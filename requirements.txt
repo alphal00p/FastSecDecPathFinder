@@ -1,0 +1,8 @@
+symbolica
+numpy
+colorama
+prettytable
+progressbar2
+pytest
+maturin
+patchelf

@@ -1,0 +1,1407 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\dd}{\mathrm d}
+\newcommand{\ii}{\mathrm i}
+\newcommand{\eps}{\epsilon}
+\newcommand{\U}{\mathcal U}
+\newcommand{\F}{\mathcal F}
+\newcommand{\hU}{\widehat{\mathcal U}}
+\newcommand{\hF}{\widehat{\mathcal F}}
+\newcommand{\Dlt}{\Delta}
+
+\title{Fast Sector Decomposition from Black-Box Symanzik Polynomials}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{The example triangle}
+
+We consider the scalar one-loop triangle with one incoming off-shell momentum
+and two outgoing massless momenta,
+\begin{equation}
+  p_0=p_1+p_2,
+  \qquad
+  p_1^2=p_2^2=0,
+  \qquad
+  p_0^2=s=m_0^2 .
+\end{equation}
+All three internal propagators are taken to have the same mass \(m\).  A
+convenient routing is
+\begin{align}
+  D_0 &= \ell^2-m^2+\ii0,\\
+  D_1 &= (\ell+p_1)^2-m^2+\ii0,\\
+  D_2 &= (\ell-p_2)^2-m^2+\ii0 .
+\end{align}
+The scalar integral is
+\begin{equation}
+  C_0(s;m^2)
+  =
+  \int \frac{\dd^D\ell}{\ii\pi^{D/2}}\,
+  \frac{1}{D_0D_1D_2}.
+\end{equation}
+With Feynman parameters \(x_i\geq 0\), the projective representation is
+\begin{equation}
+  C_0(s;m^2)
+  =
+  -\Gamma(\alpha)
+  \int_0^\infty \dd x_0\,\dd x_1\,\dd x_2\,
+  \delta(1-x_0-x_1-x_2)\,
+  \frac{\U^{3-D}}{\F^\alpha},
+  \qquad
+  \alpha=3-\frac{D}{2}.
+\end{equation}
+For this routing,
+\begin{equation}
+  \U=x_0+x_1+x_2,
+\end{equation}
+and
+\begin{equation}
+  \F
+  =
+  m^2\U^2
+  -
+  s\,x_1x_2
+  -
+  \ii0 .
+\end{equation}
+Solving the simplex constraint by
+\begin{equation}
+  x_0=1-x_1-x_2
+\end{equation}
+gives
+\begin{equation}
+  0\leq x_1\leq 1,
+  \qquad
+  0\leq x_2\leq 1-x_1,
+\end{equation}
+and therefore
+\begin{equation}
+  \U=1,
+  \qquad
+  \F=m^2-s\,x_1x_2-\ii0 .
+\end{equation}
+For \(D=4-2\eps\), one has \(\alpha=1+\eps\), and
+\begin{equation}
+  C_0(s;m^2)
+  =
+  -\Gamma(1+\eps)
+  \int_0^1 \dd x_1
+  \int_0^{1-x_1} \dd x_2\,
+  \left(m^2-s\,x_1x_2-\ii0\right)^{-1-\eps}.
+\end{equation}
+Throughout the rest of the note, sector integrands \(I_s\) do not include the
+global prefactor \(-\Gamma(\alpha)\).  Thus an exact decomposition has the form
+\begin{equation}
+  C_0(s;m^2)
+  =
+  -\Gamma(\alpha)
+  \sum_s
+  \int_{\mathcal C_s}\dd y_s\,
+  I_s(y_s).
+\end{equation}
+
+\subsection{Endpoint sectors}
+
+The primary endpoint decomposition splits the simplex into two sectors.
+
+\paragraph{Sector \(S_1\), \(x_1\geq x_2\).}
+\begin{equation}
+  X_{S_1}(t,z)
+  =
+  (x_0,x_1,x_2)
+  =
+  \left(
+    1-t,\,
+    \frac{t}{1+z},\,
+    \frac{tz}{1+z}
+  \right),
+  \qquad
+  0\leq t,z\leq 1 .
+\end{equation}
+The Jacobian is
+\begin{equation}
+  J_{S_1}(t,z)=\frac{t}{(1+z)^2}.
+\end{equation}
+The pulled-back second Symanzik polynomial is
+\begin{equation}
+  \F_{S_1}(t,z)
+  =
+  m^2
+  -
+  s\,\frac{t^2z}{(1+z)^2}
+  -
+  \ii0 .
+\end{equation}
+In the massless endpoint case \(m=0\),
+\begin{equation}
+  \F_{S_1}(t,z)
+  =
+  (-s-\ii0)\,\frac{t^2z}{(1+z)^2}.
+\end{equation}
+The expected monomial is therefore
+\begin{equation}
+  M_{S_1}(t,z)=t^2z .
+\end{equation}
+
+\paragraph{Sector \(S_2\), \(x_2\geq x_1\).}
+\begin{equation}
+  X_{S_2}(t,z)
+  =
+  (x_0,x_1,x_2)
+  =
+  \left(
+    1-t,\,
+    \frac{tz}{1+z},\,
+    \frac{t}{1+z}
+  \right),
+  \qquad
+  0\leq t,z\leq 1 .
+\end{equation}
+The Jacobian is again
+\begin{equation}
+  J_{S_2}(t,z)=\frac{t}{(1+z)^2}.
+\end{equation}
+The pulled-back polynomial is
+\begin{equation}
+  \F_{S_2}(t,z)
+  =
+  m^2
+  -
+  s\,\frac{t^2z}{(1+z)^2}
+  -
+  \ii0 .
+\end{equation}
+In the massless endpoint case,
+\begin{equation}
+  \F_{S_2}(t,z)
+  =
+  (-s-\ii0)\,\frac{t^2z}{(1+z)^2},
+  \qquad
+  M_{S_2}(t,z)=t^2z .
+\end{equation}
+With these definitions, the two-sector representation of the original
+triangle is
+\begin{align}
+  C_0(s;m^2)
+  &=
+  -\Gamma(\alpha)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  I_{S_a}(t,z),
+  \\
+  I_{S_a}(t,z)
+  &=
+  \frac{t}{(1+z)^2}\,
+  \U(X_{S_a}(t,z))^{3-D}\,
+  \F(X_{S_a}(t,z))^{-\alpha}.
+\end{align}
+Equivalently, after inserting the explicit polynomial,
+\begin{equation}
+  C_0(s;m^2)
+  =
+  -\Gamma(\alpha)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  \frac{t}{(1+z)^2}
+  \left(
+    m^2
+    -
+    s\,\frac{t^2z}{(1+z)^2}
+    -
+    \ii0
+  \right)^{-\alpha}.
+\end{equation}
+For \(D=4-2\eps\) and \(m=0\), this becomes
+\begin{equation}
+  C_0(s;0)
+  =
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  t^{-1-2\eps}
+  z^{-1-\eps}
+  G_{S_a}(t,z),
+\end{equation}
+where
+\begin{equation}
+  G_{S_a}(t,z)
+  =
+  (-s-\ii0)^{-1-\eps}(1+z)^{2\eps}.
+\end{equation}
+
+\subsection{Massive threshold sectors}
+
+For \(m\neq 0\), the endpoint singularity is lifted.  A threshold singularity
+appears at
+\begin{equation}
+  s=4m^2,
+\end{equation}
+at the point
+\begin{equation}
+  x_0=0,
+  \qquad
+  x_1=x_2=\frac12 .
+\end{equation}
+Write
+\begin{equation}
+  x_0=a,
+  \qquad
+  x_1=\frac{1-a+d}{2},
+  \qquad
+  x_2=\frac{1-a-d}{2},
+\end{equation}
+and split
+\begin{equation}
+  d=\sigma(1-a)b,
+  \qquad
+  \sigma=\pm1,
+  \qquad
+  0\leq b\leq 1 .
+\end{equation}
+At threshold,
+\begin{equation}
+  \F
+  =
+  m^2\left[a(2-a)+(1-a)^2b^2\right]-\ii0 .
+\end{equation}
+The overlap \(a\sim b^2\) is blown up by two sectors for each sign
+\(\sigma\).
+
+\paragraph{Sector \(T_{\sigma,1}\), \(b^2\leq a\).}
+Use \(a=r^2\), \(b=ry\).  Then
+\begin{equation}
+  X_{T_{\sigma,1}}(r,y)
+  =
+  \left(
+    r^2,\,
+    \frac{(1-r^2)(1+\sigma ry)}{2},\,
+    \frac{(1-r^2)(1-\sigma ry)}{2}
+  \right),
+  \qquad
+  0\leq r,y\leq 1 .
+\end{equation}
+The Jacobian is
+\begin{equation}
+  J_{T_{\sigma,1}}(r,y)=r^2(1-r^2).
+\end{equation}
+The polynomial factorizes as
+\begin{equation}
+  \F_{T_{\sigma,1}}(r,y)
+  =
+  m^2r^2
+  \left[
+    (2-r^2)+(1-r^2)^2y^2
+  \right]
+  -
+  \ii0 .
+\end{equation}
+The expected monomial is
+\begin{equation}
+  M_{T_{\sigma,1}}(r,y)=r^2 .
+\end{equation}
+
+\paragraph{Sector \(T_{\sigma,2}\), \(a\leq b^2\).}
+Use \(a=b^2y\).  Then
+\begin{equation}
+  X_{T_{\sigma,2}}(b,y)
+  =
+  \left(
+    b^2y,\,
+    \frac{(1-b^2y)(1+\sigma b)}{2},\,
+    \frac{(1-b^2y)(1-\sigma b)}{2}
+  \right),
+  \qquad
+  0\leq b,y\leq 1 .
+\end{equation}
+The Jacobian is
+\begin{equation}
+  J_{T_{\sigma,2}}(b,y)
+  =
+  \frac12\,b^2(1-b^2y).
+\end{equation}
+The polynomial factorizes as
+\begin{equation}
+  \F_{T_{\sigma,2}}(b,y)
+  =
+  m^2b^2
+  \left[
+    y(2-b^2y)+(1-b^2y)^2
+  \right]
+  -
+  \ii0 .
+\end{equation}
+The expected monomial is
+\begin{equation}
+  M_{T_{\sigma,2}}(b,y)=b^2 .
+\end{equation}
+At exact threshold, the four threshold sectors reconstruct the original
+massive triangle as
+\begin{align}
+  C_0(4m^2;m^2)
+  &=
+  -\Gamma(\alpha)
+  \sum_{\sigma=\pm1}
+  \left[
+    \int_0^1\dd r
+    \int_0^1\dd y\,
+    I_{T_{\sigma,1}}(r,y)
+  \right.
+  \notag\\
+  &\hspace{4.7cm}
+  \left.
+    +
+    \int_0^1\dd b
+    \int_0^1\dd y\,
+    I_{T_{\sigma,2}}(b,y)
+  \right],
+  \\
+  I_{T_{\sigma,1}}(r,y)
+  &=
+  r^2(1-r^2)\,
+  \F(X_{T_{\sigma,1}}(r,y))^{-\alpha},
+  \\
+  I_{T_{\sigma,2}}(b,y)
+  &=
+  \frac12 b^2(1-b^2y)\,
+  \F(X_{T_{\sigma,2}}(b,y))^{-\alpha}.
+\end{align}
+Here \(\U=1\) after the simplex constraint, so no separate power of \(\U\)
+appears in the last two lines.
+
+\section{Direct approach}
+
+In the direct approach, each sector map \(X_s\) is substituted explicitly into
+\(\U\) and \(\F\).  If the pulled-back polynomial factorizes as
+\begin{equation}
+  \F_s(y)
+  =
+  \F(X_s(y))
+  =
+  M_s(y)\,\phi_s(y),
+\end{equation}
+then the sector integrand is built as
+\begin{equation}
+  I_s^{\mathrm{dir}}(y)
+  =
+  J_s(y)\,
+  \U(X_s(y))^{3-D}\,
+  M_s(y)^{-\alpha}\,
+  \phi_s(y)^{-\alpha}.
+\end{equation}
+The corresponding contribution to the original scalar integral is always
+understood as
+\begin{equation}
+  C_0
+  =
+  -\Gamma(\alpha)
+  \sum_s
+  \int_{\mathcal C_s}\dd y_s\,
+  I_s^{\mathrm{dir}}(y_s),
+\end{equation}
+with the sector domains \(\mathcal C_s\) specified explicitly below.
+
+\subsection{\texorpdfstring{Endpoint sector \(S_1\)}{Endpoint sector S1}}
+
+For \(m=0\),
+\begin{equation}
+  \U_{S_1}(t,z)=1,
+\end{equation}
+and
+\begin{equation}
+  \F_{S_1}(t,z)
+  =
+  (-s-\ii0)\,\frac{t^2z}{(1+z)^2}
+  =
+  M_{S_1}(t,z)\,\phi_{S_1}(t,z),
+\end{equation}
+with
+\begin{equation}
+  M_{S_1}(t,z)=t^2z,
+  \qquad
+  \phi_{S_1}(t,z)=\frac{-s-\ii0}{(1+z)^2}.
+\end{equation}
+Therefore
+\begin{align}
+  I_{S_1}^{\mathrm{dir}}(t,z)
+  &=
+  \frac{t}{(1+z)^2}\,
+  (t^2z)^{-\alpha}
+  \left(\frac{-s-\ii0}{(1+z)^2}\right)^{-\alpha}.
+\end{align}
+For \(D=4-2\eps\), i.e. \(\alpha=1+\eps\),
+\begin{equation}
+  I_{S_1}^{\mathrm{dir}}(t,z)
+  =
+  (-s-\ii0)^{-1-\eps}\,
+  t^{-1-2\eps}\,
+  z^{-1-\eps}\,
+  (1+z)^{2\eps}.
+\end{equation}
+
+\subsection{\texorpdfstring{Endpoint sector \(S_2\)}{Endpoint sector S2}}
+
+By symmetry,
+\begin{equation}
+  \F_{S_2}(t,z)
+  =
+  (-s-\ii0)\,\frac{t^2z}{(1+z)^2},
+  \qquad
+  M_{S_2}(t,z)=t^2z,
+\end{equation}
+and hence
+\begin{equation}
+  I_{S_2}^{\mathrm{dir}}(t,z)
+  =
+  (-s-\ii0)^{-1-\eps}\,
+  t^{-1-2\eps}\,
+  z^{-1-\eps}\,
+  (1+z)^{2\eps}.
+\end{equation}
+The full massless triangle is therefore
+\begin{align}
+  C_0(s;0)
+  &=
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  I_{S_a}^{\mathrm{dir}}(t,z)
+  \notag\\
+  &=
+  -2\Gamma(1+\eps)
+  (-s-\ii0)^{-1-\eps}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  t^{-1-2\eps}
+  z^{-1-\eps}
+  (1+z)^{2\eps}.
+\end{align}
+
+\subsection{Threshold sectors}
+
+At \(s=4m^2\), the direct threshold integrands are
+\begin{align}
+  I_{T_{\sigma,1}}^{\mathrm{dir}}(r,y)
+  &=
+  r^2(1-r^2)\,
+  (r^2)^{-\alpha}
+  \left(
+    m^2\left[(2-r^2)+(1-r^2)^2y^2\right]-\ii0
+  \right)^{-\alpha},
+  \\
+  I_{T_{\sigma,2}}^{\mathrm{dir}}(b,y)
+  &=
+  \frac12 b^2(1-b^2y)\,
+  (b^2)^{-\alpha}
+  \left(
+    m^2\left[y(2-b^2y)+(1-b^2y)^2\right]-\ii0
+  \right)^{-\alpha}.
+\end{align}
+The dependence on \(\sigma\) is only in the map \(X_T\), not in the
+factorized polynomial for this symmetric equal-mass triangle.
+These four direct threshold sectors reconstruct the threshold integral as
+\begin{align}
+  C_0(4m^2;m^2)
+  &=
+  -\Gamma(\alpha)
+  \sum_{\sigma=\pm1}
+  \left[
+    \int_0^1\dd r
+    \int_0^1\dd y\,
+    I_{T_{\sigma,1}}^{\mathrm{dir}}(r,y)
+  \right.
+  \notag\\
+  &\hspace{4.8cm}
+  \left.
+    +
+    \int_0^1\dd b
+    \int_0^1\dd y\,
+    I_{T_{\sigma,2}}^{\mathrm{dir}}(b,y)
+  \right].
+\end{align}
+
+\section{Indirect approach}
+
+The indirect approach keeps the Symanzik polynomials closed.  We assume only
+black-box evaluators
+\begin{equation}
+  \hU(x_0,x_1,x_2),
+  \qquad
+  \hF(x_0,x_1,x_2),
+\end{equation}
+together with their partial derivatives with respect to the original
+parameters \(x_i\).  In practice, these derivative jets can be computed
+efficiently with dual numbers.
+
+For a sector map \(X_s\), define the pullbacks
+\begin{equation}
+  U_s(y)=\hU(X_s(y)),
+  \qquad
+  F_s(y)=\hF(X_s(y)).
+\end{equation}
+Derivatives with respect to sector variables are obtained by chain rules.  For
+example,
+\begin{equation}
+  \partial_a F_s(y)
+  =
+  \sum_i
+  \frac{\partial \hF}{\partial x_i}(X_s(y))\,
+  \frac{\partial X_{s,i}}{\partial y_a}(y),
+\end{equation}
+and
+\begin{align}
+  \partial_a\partial_b F_s(y)
+  &=
+  \sum_{i,j}
+  \frac{\partial^2 \hF}{\partial x_i\partial x_j}(X_s(y))\,
+  \frac{\partial X_{s,i}}{\partial y_a}(y)\,
+  \frac{\partial X_{s,j}}{\partial y_b}(y)
+  \notag\\
+  &\quad
+  +
+  \sum_i
+  \frac{\partial \hF}{\partial x_i}(X_s(y))\,
+  \frac{\partial^2 X_{s,i}}{\partial y_a\partial y_b}(y).
+\end{align}
+Higher derivatives are obtained similarly, or more directly by propagating
+dual-number jets through the known sector map and then through the black-box
+polynomial evaluator.
+
+The object to construct is the regular coefficient \(\phi_s\) defined by
+\begin{equation}
+  F_s(y)=M_s(y)\,\phi_s(y),
+\end{equation}
+where \(M_s\) is the expected monomial for that sector.  Once \(\phi_s\) is
+available, the sector integrand is
+\begin{equation}
+  I_s^{\mathrm{ind}}(y)
+  =
+  J_s(y)\,
+  U_s(y)^{3-D}\,
+  M_s(y)^{-\alpha}\,
+  \phi_s(y)^{-\alpha}.
+\end{equation}
+At interior points this is pointwise identical to direct substitution, since
+\begin{equation}
+  \phi_s(y)=\frac{\hF(X_s(y))}{M_s(y)}
+\end{equation}
+there.
+For the endpoint decomposition before any monomial extraction, the black-box
+form of the exact triangle is
+\begin{align}
+  C_0(s;m^2)
+  &=
+  -\Gamma(\alpha)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  \frac{t}{(1+z)^2}
+  \hU(X_{S_a}(t,z))^{3-D}
+  \hF(X_{S_a}(t,z))^{-\alpha}.
+\end{align}
+When \(m=0\), and hence
+\(\hF(X_{S_a}(t,z))=t^2z\,\phi_{S_a}(t,z)\), this same equality becomes
+\begin{align}
+  C_0(s;0)
+  &=
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  \frac{t}{(1+z)^2}\,
+  \hU(X_{S_a}(t,z))^{-1+2\eps}
+  \notag\\
+  &\hspace{3.2cm}\times
+  (t^2z)^{-1-\eps}\,
+  \phi_{S_a}(t,z)^{-1-\eps}.
+\end{align}
+
+\subsection{Using Cauchy remainder formula}
+
+Suppose
+\begin{equation}
+  M_s(y)=\prod_{a=1}^n y_a^{r_a},
+  \qquad
+  r_a\in\mathbb N .
+\end{equation}
+If \(F_s\) is divisible by \(M_s\), then repeated use of the Cauchy form of
+the Taylor remainder gives
+\begin{equation}
+  \phi_s(y)
+  =
+  \prod_{a:r_a>0}
+  \left[
+    \frac{1}{(r_a-1)!}
+    \int_0^1 \dd\lambda_a\,
+    (1-\lambda_a)^{r_a-1}
+  \right]
+  \left(
+    \prod_{a:r_a>0}
+    \partial_{y_a}^{r_a}
+  \right)
+  F_s(y^{(\lambda)}),
+\end{equation}
+where
+\begin{equation}
+  y_a^{(\lambda)}=
+  \begin{cases}
+    \lambda_a y_a, & r_a>0,\\
+    y_a, & r_a=0 .
+  \end{cases}
+\end{equation}
+This formula does not require opening \(\hF\).  The derivatives of
+\(F_s=\hF\circ X_s\) are supplied by the chain rules above.
+
+For the first endpoint sector,
+\begin{equation}
+  M_{S_1}(t,z)=t^2z.
+\end{equation}
+Introduce dummy variables \(T,Z\) and write
+\begin{equation}
+  F_{S_1}(T,Z)
+  =
+  \hF\left(
+    1-T,\,
+    \frac{T}{1+Z},\,
+    \frac{TZ}{1+Z}
+  \right).
+\end{equation}
+Then
+\begin{equation}
+  \phi_{S_1}^{\mathrm{C}}(t,z)
+  =
+  \int_0^1 \dd\lambda\,(1-\lambda)
+  \int_0^1 \dd\mu\,
+  \left[
+    \partial_T^2\partial_Z F_{S_1}(T,Z)
+  \right]_{T=\lambda t,\;Z=\mu z}.
+\end{equation}
+Equivalently, keeping the black box unopened,
+\begin{align}
+  \phi_{S_1}^{\mathrm{C}}(t,z)
+  &=
+  \int_0^1 \dd\lambda\,(1-\lambda)
+  \int_0^1 \dd\mu\,
+  \partial_T^2\partial_Z
+  \hF\left(
+    1-T,\,
+    \frac{T}{1+Z},\,
+    \frac{TZ}{1+Z}
+  \right)
+  \bigg|_{T=\lambda t,\;Z=\mu z}.
+\end{align}
+The second endpoint sector is obtained with
+\begin{equation}
+  F_{S_2}(T,Z)
+  =
+  \hF\left(
+    1-T,\,
+    \frac{TZ}{1+Z},\,
+    \frac{T}{1+Z}
+  \right),
+\end{equation}
+and the same Cauchy formula,
+\begin{equation}
+  \phi_{S_2}^{\mathrm{C}}(t,z)
+  =
+  \int_0^1 \dd\lambda\,(1-\lambda)
+  \int_0^1 \dd\mu\,
+  \left[
+    \partial_T^2\partial_Z F_{S_2}(T,Z)
+  \right]_{T=\lambda t,\;Z=\mu z}.
+\end{equation}
+Using these Cauchy-remainder coefficients, the complete massless triangle is
+\begin{align}
+  C_0(s;0)
+  &=
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  \frac{t}{(1+z)^2}\,
+  \hU(X_{S_a}(t,z))^{-1+2\eps}
+  \notag\\
+  &\hspace{3.2cm}\times
+  (t^2z)^{-1-\eps}\,
+  \left[\phi_{S_a}^{\mathrm{C}}(t,z)\right]^{-1-\eps}.
+\end{align}
+
+If we momentarily open the explicit massless triangle polynomial, then
+\begin{equation}
+  F_{S_1}(T,Z)
+  =
+  (-s-\ii0)\,\frac{T^2Z}{(1+Z)^2}.
+\end{equation}
+Therefore
+\begin{equation}
+  \partial_T^2\partial_Z F_{S_1}(T,Z)
+  =
+  2(-s-\ii0)\,\frac{1-Z}{(1+Z)^3}.
+\end{equation}
+The explicit \((\lambda,\mu)\)-integrand is
+\begin{equation}
+  (1-\lambda)\,
+  2(-s-\ii0)\,
+  \frac{1-\mu z}{(1+\mu z)^3}.
+\end{equation}
+Consequently,
+\begin{align}
+  \phi_{S_1}^{\mathrm{C}}(t,z)
+  &=
+  \int_0^1 \dd\lambda\,(1-\lambda)
+  \int_0^1 \dd\mu\,
+  2(-s-\ii0)\,
+  \frac{1-\mu z}{(1+\mu z)^3}
+  \notag\\
+  &=
+  \frac{-s-\ii0}{(1+z)^2},
+\end{align}
+as in the direct approach.
+The same computation holds in sector \(S_2\).  Hence the explicit
+Cauchy-remainder reconstruction of the massless triangle is
+\begin{align}
+  C_0(s;0)
+  &=
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  \frac{t}{(1+z)^2}
+  (t^2z)^{-1-\eps}
+  \left(\frac{-s-\ii0}{(1+z)^2}\right)^{-1-\eps}
+  \notag\\
+  &=
+  -2\Gamma(1+\eps)
+  (-s-\ii0)^{-1-\eps}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  t^{-1-2\eps}
+  z^{-1-\eps}
+  (1+z)^{2\eps}.
+\end{align}
+
+The auxiliary integrals are well behaved because the assumed monomial
+divisibility implies that \(F_s=M_s\phi_s\) with \(\phi_s\) regular at the
+sector boundaries.  The Cauchy-remainder integrands are derivatives of a
+regular pullback evaluated on a compact domain.  In this explicit sector,
+\begin{equation}
+  \frac{1-\mu z}{(1+\mu z)^3}
+\end{equation}
+is bounded for \(0\leq \mu,z\leq 1\).
+
+\subsection{Using subtraction terms}
+
+The alternative is to avoid the auxiliary Cauchy-remainder integrals.  At
+interior points one simply evaluates
+\begin{equation}
+  \phi_s(y)=\frac{\hF(X_s(y))}{M_s(y)}.
+\end{equation}
+Boundary values are supplied by the continuous extension, using derivatives.
+For the first endpoint sector,
+\begin{align}
+  \phi_{S_1}(0,z)
+  &=
+  \frac{1}{2z}
+  \left[
+    \partial_T^2 F_{S_1}(T,z)
+  \right]_{T=0},
+  \\
+  \phi_{S_1}(t,0)
+  &=
+  \frac{1}{t^2}
+  \left[
+    \partial_Z F_{S_1}(t,Z)
+  \right]_{Z=0},
+  \\
+  \phi_{S_1}(0,0)
+  &=
+  \frac12
+  \left[
+    \partial_T^2\partial_Z F_{S_1}(T,Z)
+  \right]_{T=0,\;Z=0}.
+\end{align}
+Again, the derivatives of \(F_{S_1}\) are not symbolic derivatives of an opened
+polynomial.  They are derivatives of \(\hF\circ X_{S_1}\), obtained from the
+black-box derivative jets and the chain rule.
+
+For \(D=4-2\eps\), write each factorized endpoint integrand as
+\begin{equation}
+  I_{S_a}^{\mathrm{ind}}(t,z)
+  =
+  t^{-1-2\eps}\,
+  z^{-1-\eps}\,
+  G_{S_a}(t,z),
+  \qquad
+  a=1,2,
+\end{equation}
+where
+\begin{equation}
+  G_{S_a}(t,z)
+  =
+  \frac{1}{(1+z)^2}\,
+  U_{S_a}(t,z)^{-1+2\eps}\,
+  \phi_{S_a}(t,z)^{-1-\eps}.
+\end{equation}
+The two-dimensional endpoint subtraction identity is
+\begin{align}
+  &\int_0^1 \dd t\int_0^1 \dd z\,
+  t^{-1-2\eps}z^{-1-\eps}G(t,z)
+  \notag\\
+  &=
+  \int_0^1 \dd t\int_0^1 \dd z\,
+  t^{-1-2\eps}z^{-1-\eps}
+  \left[
+    G(t,z)-G(0,z)-G(t,0)+G(0,0)
+  \right]
+  \notag\\
+  &\quad
+  -\frac{1}{2\eps}
+  \int_0^1 \dd z\,
+  z^{-1-\eps}
+  \left[
+    G(0,z)-G(0,0)
+  \right]
+  \notag\\
+  &\quad
+  -\frac{1}{\eps}
+  \int_0^1 \dd t\,
+  t^{-1-2\eps}
+  \left[
+    G(t,0)-G(0,0)
+  \right]
+  +
+  \frac{G(0,0)}{2\eps^2}.
+\end{align}
+Each bracket is less singular at the corresponding endpoint.  This is the
+subtraction-term alternative to constructing \(\phi_s\) with auxiliary
+integrals.
+Applied sector by sector, it gives the full massless triangle as
+\begin{align}
+  C_0(s;0)
+  &=
+  -\Gamma(1+\eps)
+  \sum_{a=1}^{2}
+  \Bigg\{
+  \int_0^1 \dd t\int_0^1 \dd z\,
+  t^{-1-2\eps}z^{-1-\eps}
+  \Big[
+    G_{S_a}(t,z)-G_{S_a}(0,z)
+  \notag\\
+  &\hspace{5.1cm}
+    -G_{S_a}(t,0)+G_{S_a}(0,0)
+  \Big]
+  \notag\\
+  &\qquad
+  -\frac{1}{2\eps}
+  \int_0^1 \dd z\,
+  z^{-1-\eps}
+  \left[
+    G_{S_a}(0,z)-G_{S_a}(0,0)
+  \right]
+  \notag\\
+  &\qquad
+  -\frac{1}{\eps}
+  \int_0^1 \dd t\,
+  t^{-1-2\eps}
+  \left[
+    G_{S_a}(t,0)-G_{S_a}(0,0)
+  \right]
+  +
+  \frac{G_{S_a}(0,0)}{2\eps^2}
+  \Bigg\}.
+\end{align}
+
+For the explicit massless triangle in sector \(S_1\),
+\begin{equation}
+  U_{S_1}(t,z)=1,
+  \qquad
+  \phi_{S_1}(t,z)=\frac{-s-\ii0}{(1+z)^2}.
+\end{equation}
+Thus
+\begin{equation}
+  G_{S_1}^{\mathrm{exp}}(t,z)
+  =
+  (-s-\ii0)^{-1-\eps}(1+z)^{2\eps}.
+\end{equation}
+This function is independent of \(t\).  Therefore
+\begin{equation}
+  G_{S_1}^{\mathrm{exp}}(t,z)
+  -
+  G_{S_1}^{\mathrm{exp}}(0,z)
+  -
+  G_{S_1}^{\mathrm{exp}}(t,0)
+  +
+  G_{S_1}^{\mathrm{exp}}(0,0)
+  =
+  0,
+\end{equation}
+and
+\begin{equation}
+  G_{S_1}^{\mathrm{exp}}(t,0)
+  -
+  G_{S_1}^{\mathrm{exp}}(0,0)
+  =
+  0.
+\end{equation}
+The only non-trivial subtraction piece is
+\begin{equation}
+  G_{S_1}^{\mathrm{exp}}(0,z)
+  -
+  G_{S_1}^{\mathrm{exp}}(0,0)
+  =
+  (-s-\ii0)^{-1-\eps}
+  \left[
+    (1+z)^{2\eps}-1
+  \right].
+\end{equation}
+The explicitly subtracted result for one endpoint sector is therefore
+\begin{align}
+  &\int_0^1 \dd t\int_0^1 \dd z\,
+  I_{S_1}^{\mathrm{dir}}(t,z)
+  \notag\\
+  &=
+  -\frac{(-s-\ii0)^{-1-\eps}}{2\eps}
+  \int_0^1 \dd z\,
+  z^{-1-\eps}
+  \left[
+    (1+z)^{2\eps}-1
+  \right]
+  +
+  \frac{(-s-\ii0)^{-1-\eps}}{2\eps^2}.
+\end{align}
+The second sector gives the same contribution, so the full massless triangle is
+\begin{align}
+  C_0(s;0)
+  &=
+  -2\Gamma(1+\eps)
+  \left\{
+  -\frac{(-s-\ii0)^{-1-\eps}}{2\eps}
+  \int_0^1 \dd z\,
+  z^{-1-\eps}
+  \left[
+    (1+z)^{2\eps}-1
+  \right]
+  +
+  \frac{(-s-\ii0)^{-1-\eps}}{2\eps^2}
+  \right\}.
+\end{align}
+This expression was obtained without requiring any symbolic expansion in an
+implementation: only \(X_{S_a}\), \(J_{S_a}\), the known monomial \(t^2z\), and
+black-box values and derivative limits of \(\hU\) and \(\hF\) are required in
+each endpoint sector.
+
+\section{Python prototype in \texttt{FSD}}
+
+The folder \texttt{FSD} contains a first implementation of the construction
+above.  The executable entry point is
+\begin{equation}
+  \texttt{FSD/FSD.py}.
+\end{equation}
+It uses a local Python virtual environment,
+\begin{equation}
+  \texttt{FSD/.venv},
+\end{equation}
+and a local checkout of OneLOopBridge,
+\begin{equation}
+  \texttt{FSD/external/OneLOopBridge}.
+\end{equation}
+The benchmark value is obtained from the Python binding
+\begin{equation}
+  \texttt{oneloop\_bridge.three\_point(0,0,s,m2,m2,m2)}.
+\end{equation}
+
+\subsection{Separation of prepared sectors and processing}
+
+The code mirrors the split used in this note.  First, endpoint sectors are
+prepared independently of the Symanzik polynomials.  Each sector stores only
+the data
+\begin{equation}
+  \left\{
+    X_s,\,
+    J_s,\,
+    M_s
+  \right\}.
+\end{equation}
+For the current prototype these are just \(S_1\) and \(S_2\).  Threshold
+sectors are intentionally not implemented yet.
+
+The processing layer then receives the prepared sectors together with two
+black-box Symbolica evaluators,
+\begin{equation}
+  \hU(x_0,x_1,x_2;s,m^2),
+  \qquad
+  \hF(x_0,x_1,x_2;s,m^2).
+\end{equation}
+After these evaluators are built, the processing code does not inspect or
+symbolically rewrite the expressions for \(\U\) or \(\F\).  In particular,
+\(\phi_s\) is obtained from
+\begin{equation}
+  \phi_s(t,z)
+  =
+  \frac{\hF(X_s(t,z))}{M_s(t,z)}
+\end{equation}
+at interior points, and from Symbolica dual-number derivatives at boundary
+points.  The dual-number jets are propagated through the known map \(X_s\) and
+then through the black-box evaluator for \(\hF\).  This realizes the chain-rule
+construction described in the previous sections.
+
+\subsection{Havana sampling}
+
+The prototype uses Symbolica's Havana integrator as a sampler rather than as a
+single black-box scalar integrator.  One adaptive grid is used for all
+endpoint-sector contributions:
+\begin{equation}
+  \text{discrete sector id}
+  \quad\otimes\quad
+  (t,z)\in[0,1]^2.
+\end{equation}
+Lower-support subtraction terms are localized into this same two-dimensional
+domain by multiplying by a unit-density dummy integration over the unused
+variable.  Thus the \(z\)-edge term is represented as a function of \((t,z)\)
+which is independent of \(t\), and the corner term is represented as a constant
+function of \((t,z)\).  This avoids maintaining separate Havana grids for
+two-dimensional, one-dimensional, and zero-dimensional pieces.
+
+For every batch, the code samples points from the single grid, evaluates all
+Laurent coefficients on those same points, and fills its own accumulators.  The
+Havana grid is trained only with the absolute value of the finite-part
+integrand.  In Symbolica's sampled representation, the first entry of
+\(\texttt{sample.weights}\) is the full Monte Carlo weight used in the manual
+accumulator.
+
+The integration loop reports progress with \(\texttt{progressbar2}\).  The bar
+shows the current iteration, the accumulated number of sampled points against
+the nominal target \(N_{\rm iter}N_{\rm batch}\), the live relative Monte Carlo
+error maxed over the Laurent coefficients, and, when a benchmark is available,
+the live pull maxed over the Laurent coefficients.  The live pull is computed
+after applying the same Gamma and prefactor conventions used in the final
+output table.
+
+\subsection{Implemented modes and conventions}
+
+The command-line interface supports two modes.  In massive mode, with
+\(m>0\) and \(s<4m^2\), the integral is finite and the endpoint monomial
+factorization is not applied.  The implementation evaluates
+\begin{equation}
+  C_0(s;m^2)
+  =
+  -
+  \sum_{a=1}^{2}
+  \int_0^1\dd t
+  \int_0^1\dd z\,
+  J_{S_a}(t,z)\,
+  \hU(X_{S_a}(t,z))^{-1}\,
+  \hF(X_{S_a}(t,z))^{-1}.
+\end{equation}
+
+In massless mode, the implementation uses the subtraction formula of
+Section~3.2 and returns the coefficients of
+\begin{equation}
+  C_0(s;0)
+  =
+  \frac{C_{-2}}{\epsilon^2}
+  +
+  \frac{C_{-1}}{\epsilon}
+  +
+  C_0
+  +
+  \mathcal O(\epsilon).
+\end{equation}
+The default output convention is the OneLOopBridge convention.  In this
+convention the universal Gamma/Euler factors are stripped from the displayed
+Laurent coefficients.  For the massless endpoint representation this also
+amounts to removing the finite convention term
+\begin{equation}
+  \frac{\pi^2}{6}\,C_{-2}
+\end{equation}
+from the direct sector-parametric finite coefficient.  With this convention,
+the prototype compares directly to the values returned by OneLOopBridge.
+The separate command-line option \(\texttt{--prefactor-convention}\) controls
+only the overall scalar-integral normalization shown in the output table.  The
+default value \(\texttt{raw}\) displays the raw OneLOopBridge normalization.
+The value \(\texttt{feynman}\) multiplies both the FastSecDec coefficients and
+the benchmark coefficients by
+\begin{equation}
+  \texttt{TO\_FEYNMAN}
+  =
+  -\frac{1}{16\pi^2},
+\end{equation}
+which is the OneLOopBridge factor converting raw scalar-integral coefficients
+to its Feynman-normalized convention.  In either display convention, values
+with Monte Carlo uncertainty are printed with the two-significant-digit
+parenthesis notation.
+
+\subsection{Implemented box example}
+
+The prototype also contains a finite massive scalar box example with massless
+external legs,
+\begin{equation}
+  D_0(0,0,0,0,s_{12},s_{23};m^2).
+\end{equation}
+The benchmark call is
+\begin{equation}
+  \texttt{oneloop\_bridge.four\_point(0,0,0,0,s12,s23,m2,m2,m2,m2)}.
+\end{equation}
+For equal internal masses, the simplex polynomial used by the implementation is
+\begin{equation}
+  \U=x_0+x_1+x_2+x_3,
+  \qquad
+  \F
+  =
+  m^2\U^2
+  -
+  s_{12}x_0x_2
+  -
+  s_{23}x_1x_3
+  -
+  \ii0.
+\end{equation}
+After imposing \(\U=1\), the finite four-point integral in \(D=4\) is
+\begin{equation}
+  D_0
+  =
+  \sum_{b=0}^{3}
+  \int_0^1\dd y_0
+  \int_0^1\dd y_1
+  \int_0^1\dd y_2\,
+  J_b(y)\,
+  \hF(X_b(y))^{-2}.
+\end{equation}
+Here \(b\) labels the primary sector in which \(x_b\) is the largest Feynman
+parameter.  In sector \(b\),
+\begin{equation}
+  x_b=\frac{1}{1+y_0+y_1+y_2},
+  \qquad
+  x_{j\neq b}=\frac{y_j}{1+y_0+y_1+y_2},
+\end{equation}
+with the three \(y_j\)'s assigned in increasing order to the non-dominant
+parameters.  The Jacobian is
+\begin{equation}
+  J_b(y)=\frac{1}{(1+y_0+y_1+y_2)^4}.
+\end{equation}
+The same code path now also implements the massless endpoint-subtracted box.
+For \(m=0\), each primary sector has the form
+\begin{equation}
+  \F(X_b(y))
+  =
+  \frac{A_b\,y_\ell+B_b\,y_r y_s}
+       {(1+y_0+y_1+y_2)^2},
+\end{equation}
+where one of the two bilinears \(x_0x_2\) and \(x_1x_3\) contains the dominant
+parameter and is therefore linear in the primary variables.  The implementation
+does not need the symbolic values of \(A_b\) and \(B_b\); it only uses the known
+positions of the linear variable \(y_\ell\) and product variables \(y_r,y_s\).
+The three secondary sectors are
+\begin{align}
+  L:\quad& y_r=uv,\quad y_\ell=u,\quad y_s=w,
+  &
+  M_L&=u,
+  \\
+  P:\quad& y_r=u,\quad y_s=v,\quad y_\ell=uvw,
+  &
+  M_P&=uv,
+  \\
+  Q:\quad& y_r=u,\quad y_\ell=uv,\quad y_s=vw,
+  &
+  M_Q&=uv.
+\end{align}
+The secondary Jacobian equals the displayed monomial in each case, so the
+regular prefactor after monomial extraction is again
+\begin{equation}
+  \frac{1}{(1+y_0(u,v,w)+y_1(u,v,w)+y_2(u,v,w))^4}.
+\end{equation}
+The residual coefficient
+\begin{equation}
+  \phi_{b\alpha}(u,v,w)
+  =
+  \frac{\F(X_{b\alpha}(u,v,w))}{M_\alpha(u,v,w)}
+\end{equation}
+is evaluated by the black-box \(\F\) away from the endpoint and by dual-number
+Taylor coefficients at \(u=0\) and \(v=0\).  The one-monomial sector \(L\) uses
+the one-variable subtraction formula, while the \(P\) and \(Q\) sectors use the
+two-variable subtraction formula.
+
+The raw coefficients produced directly by these massless box sectors are
+converted to the OneLOopBridge stripped convention as
+\begin{equation}
+  D_{-2}=A_{-2},
+  \qquad
+  D_{-1}=A_{-1}+A_{-2},
+  \qquad
+  D_0=A_0+A_{-1}+\frac{\pi^2}{6}A_{-2}.
+\end{equation}
+The current massless box command validates Euclidean kinematics,
+\(s_{12}<0\) and \(s_{23}<0\).  Timelike or threshold kinematics would require
+a contour deformation or threshold regularization, which is outside the
+present prototype.
+
+\subsection{Example commands}
+
+The massive below-threshold check can be run with
+\begin{equation}
+  \texttt{FSD/.venv/bin/python FSD/FSD.py --s 1.0 --m 1.0 --mode massive}.
+\end{equation}
+The same check in the Feynman-normalized prefactor convention can be displayed
+with
+\begin{align}
+  &\texttt{FSD/.venv/bin/python FSD/FSD.py --s 1.0 --m 1.0 --mode massive}
+  \notag\\
+  &\texttt{--prefactor-convention feynman}.
+\end{align}
+The massless Euclidean check can be run with
+\begin{equation}
+  \texttt{FSD/.venv/bin/python FSD/FSD.py --s -1.0 --m 0.0 --mode massless}.
+\end{equation}
+The timelike command with \(s>0\) is intentionally rejected in the current
+prototype because no contour deformation or threshold regularization is
+implemented.
+The massive box example can be run with
+\begin{equation}
+  \texttt{FSD/.venv/bin/python FSD/FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0}.
+\end{equation}
+The massless box check can be run with
+\begin{equation}
+  \texttt{FSD/.venv/bin/python FSD/FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
+\end{equation}
+The corresponding timelike massless box command is rejected for the same
+reason as the timelike triangle.
+The implementation intentionally imports neither \texttt{scipy} nor
+\texttt{sympy}; all symbolic handling is done through Symbolica evaluators.
+
+\section{Implementation of the modular \texttt{FSD\_v2} prototype}
+
+The sibling folder \texttt{FSD\_v2} is the modular reimplementation of the
+prototype.  Its implementation is organized so that the black-box rule is
+visible directly in the code layout:
+\begin{itemize}
+  \item \texttt{FSD.py} is only the command-line steering layer.  It parses
+  options, validates kinematics, builds the request object, prints summaries,
+  calls the benchmark, launches the integration, and renders the final table.
+  \item \texttt{sectors\_generator.py} owns the declarative sector data:
+  sector maps \(X_s\), regular Jacobians \(J_s\), endpoint monomials \(M_s\),
+  singular axes, and generated Symbolica callbacks for these expressions.
+  \item \texttt{integrand.py} owns the topology definition and the generic
+  \texttt{SectorProcessor}.  The topology retains \(\U\) and \(\F\) for
+  display and evaluator construction, but the processor never substitutes a
+  sector map into them symbolically.
+  \item \texttt{integrator.py} owns the Havana sampling loop, manual Laurent
+  coefficient accumulation, progress reporting, target-accuracy stopping, and
+  hot-path timing profile.
+  \item \texttt{benchmark.py}, \texttt{formatting.py}, \texttt{definitions.py},
+  and \texttt{utils.py} isolate OneLOopBridge access, colored output, shared
+  data containers, and parenthesis uncertainty formatting.
+\end{itemize}
+
+At runtime the processor receives only a \texttt{SectorDefinition}, a
+\texttt{TopologyDefinition}, and numeric sample points.  For a sector point
+\(y\) it evaluates
+\begin{equation}
+  x = X_s(y),
+  \qquad
+  \hU(x),
+  \qquad
+  \hF(x),
+  \qquad
+  J_s(y),
+\end{equation}
+through prebuilt Symbolica evaluators.  If the sector has no endpoint
+monomial, the contribution is evaluated directly.  If a monomial is declared,
+the residual
+\begin{equation}
+  \phi_s(y)=\frac{\hF(X_s(y))}{M_s(y)}
+\end{equation}
+is evaluated by this quotient in the interior.  On endpoint samples the same
+quantity is recovered from the Taylor coefficients of a dualized black-box
+\(\hF\) evaluator.  The dual jets of the known sector map provide the chain
+rule input, so no symbolic expansion of \(\F(X_s(y))\) is performed.
+
+The generic processor then constructs
+\begin{equation}
+  g_s(y;\eps)
+  =
+  J_s(y)\,
+  \hU(X_s(y))^{p_U+2\eps}\,
+  \phi_s(y)^{-p_F-\eps},
+\end{equation}
+and applies the declared localized subtraction formula.  Zero, one, and two
+singular axes are supported explicitly.  Stronger endpoint structures raise an
+error instead of being guessed.
+
+The Havana driver samples one discrete sector dimension and the common
+continuous sector dimension.  Lower-support subtraction pieces are localized
+into the same highest-dimensional sample space by dummy unit-density
+dependence on unused variables.  Each sampled point therefore contributes to
+all Laurent coefficients through the same manual accumulator,
+\begin{equation}
+  A_k
+  =
+  \frac{1}{N}\sum_{n=1}^{N}
+  w_n\,I_{k,s_n}(y_n),
+  \qquad
+  k\in\{-2,-1,0\}.
+\end{equation}
+Havana is trained only on the finite-part magnitude used as an importance
+function.  The adaptive grid is cloned at the beginning of an iteration; batch
+training samples are accumulated into the clone and merged back into the live
+grid only at the end of a completed iteration.
+
+The target-accuracy stop is evaluated after each accumulated batch, not only
+after a full Havana iteration.  Thus the final returned coefficients contain
+all completed batches up to the stopping point.  In parallel mode the driver
+keeps only a worker-sized window of batches in flight, so early stopping does
+not submit the entire iteration unnecessarily.  The option
+\(\texttt{--batch-size}\) therefore controls both vectorization size and
+mid-iteration stopping granularity.
+
+The timing profile reported by the progress bar and final table is a work-time
+profile:
+\begin{equation}
+  T_{\rm prof}
+  =
+  T_{\rm Python}
+  +
+  T_{\rm eval}
+  +
+  T_{\rm Havana}.
+\end{equation}
+Here \(T_{\rm eval}\) is the sum of Symbolica evaluator wall times over all
+workers, \(T_{\rm Python}\) is NumPy and Python glue on workers plus master-side
+submission, result retrieval, accumulation, and progress rendering, and
+\(T_{\rm Havana}\) is Havana sampling, training accumulation, grid merge, and
+grid update time.  The displayed evaluator average is
+\begin{equation}
+  \langle t_{\rm eval}\rangle
+  =
+  \frac{10^6\,T_{\rm eval}}{N_{\rm accepted}}
+  \quad
+  \text{microseconds per sample per worker},
+\end{equation}
+because \(T_{\rm eval}\) is already summed over workers.
+
+The current supported commands are, for example,
+\begin{align}
+  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0},
+  \\
+  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral triangle --s -1.0 --m 0.0},
+  \\
+  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0},
+  \\
+  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
+\end{align}
+Massless timelike commands, such as
+\(\texttt{--integral triangle --s 1.0 --m 0.0}\), are rejected by validation.
+OneLOopBridge is required in all runs because the implementation always
+compares the Laurent coefficients to a benchmark value.
+
+\end{document}

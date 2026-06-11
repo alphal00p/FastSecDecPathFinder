@@ -1,0 +1,127 @@
+"""Shared immutable request/result containers and timing accumulators."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+ONELOOP_TO_FEYNMAN = -1.0 / (16.0 * 3.141592653589793238462643383279502884**2)
+EULER_GAMMA = 0.577215664901532860606512090082402431
+
+
+@dataclass(frozen=True)
+class IntegralRequest:
+    """Fully validated CLI configuration passed through the implementation."""
+
+    integral: str
+    mode: str
+    s: float | None
+    s12: float | None
+    s23: float | None
+    m: float
+    gamma_scheme: str
+    prefactor_convention: str
+    seed: int
+    max_iter: int
+    min_iter: int
+    samples_per_iter: int
+    batch_size: int
+    target_rel_accuracy: float | None
+    min_error: float
+    bins: int
+    workers: int
+    jit_compile_evaluators: bool
+    show_stats: bool
+    no_progress: bool
+    quiet_summary: bool
+    json: bool
+    mu: float | None
+    onshell_threshold: float | None
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    """OneLOopBridge coefficients in raw normalization plus its prefactor."""
+
+    raw: list[complex]
+    factor: complex
+
+    @property
+    def feynman(self) -> list[complex]:
+        """Return coefficients converted to the Feynman-normalized convention."""
+        return [self.factor * value for value in self.raw]
+
+
+@dataclass(frozen=True)
+class IntegrationResult:
+    """Numerical integration output before final display convention selection."""
+
+    raw_sector_coeffs: list[complex]
+    raw_sector_errors: list[complex]
+    samples: int
+    elapsed_seconds: float
+    avg_eval_us_per_sample_per_worker: float
+    eval_seconds: float
+    python_seconds: float
+    havana_seconds: float
+    python_overhead_fraction: float
+
+
+@dataclass
+class HotPathTiming:
+    """Additive work-time profile split into evaluator, Python, and Havana time."""
+
+    eval_seconds: float = 0.0
+    python_seconds: float = 0.0
+    havana_seconds: float = 0.0
+
+    def add_eval(self, seconds: float) -> None:
+        """Accumulate Symbolica evaluator wall time."""
+        self.eval_seconds += max(float(seconds), 0.0)
+
+    def add_python(self, seconds: float) -> None:
+        """Accumulate Python and NumPy glue time."""
+        self.python_seconds += max(float(seconds), 0.0)
+
+    def add_havana(self, seconds: float) -> None:
+        """Accumulate Havana sampling, training, merge, and update time."""
+        self.havana_seconds += max(float(seconds), 0.0)
+
+    def absorb(self, other: "HotPathTiming") -> None:
+        """Merge timing reported by a worker or nested processor call."""
+        self.eval_seconds += other.eval_seconds
+        self.python_seconds += other.python_seconds
+        self.havana_seconds += other.havana_seconds
+
+    @property
+    def total_seconds(self) -> float:
+        """Return the summed work-time profile, not the elapsed wall time."""
+        return self.eval_seconds + self.python_seconds + self.havana_seconds
+
+    @property
+    def python_overhead_fraction(self) -> float:
+        """Fraction of profiled work attributed to Python and NumPy glue."""
+        total = self.total_seconds
+        if total <= 0.0:
+            return 0.0
+        return self.python_seconds / total
+
+    @property
+    def evaluator_fraction(self) -> float:
+        """Fraction of profiled work spent inside Symbolica evaluators."""
+        total = self.total_seconds
+        if total <= 0.0:
+            return 0.0
+        return self.eval_seconds / total
+
+    @property
+    def havana_fraction(self) -> float:
+        """Fraction of profiled work spent in Havana sampler/grid operations."""
+        total = self.total_seconds
+        if total <= 0.0:
+            return 0.0
+        return self.havana_seconds / total
+
+
+JsonDict = dict[str, Any]

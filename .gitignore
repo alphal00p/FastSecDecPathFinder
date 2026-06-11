@@ -1,0 +1,18 @@
+.venv/
+.deps/
+external/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# LaTeX build products.  The source and compiled PDF under docs/ are tracked.
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
