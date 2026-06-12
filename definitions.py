@@ -11,10 +11,52 @@ EULER_GAMMA = 0.577215664901532860606512090082402431
 
 
 @dataclass(frozen=True)
+class EpsilonExpansion:
+    """Affine coefficient ``base + eps_coeff * epsilon``."""
+
+    base: float
+    eps_coeff: float
+
+    def as_text(self, symbol: str = "eps") -> str:
+        """Render the affine expansion compactly for summaries."""
+        if self.eps_coeff == 0.0:
+            return f"{self.base:g}"
+        sign = "+" if self.eps_coeff >= 0.0 else "-"
+        return f"{self.base:g} {sign} {abs(self.eps_coeff):g}*{symbol}"
+
+
+@dataclass(frozen=True)
+class ParametricRepresentation:
+    """General scalar Feynman-parametric representation metadata.
+
+    For an L-loop scalar integral with propagator powers nu_i and
+    A=sum_i nu_i, the standard projective representation has the form
+
+      prefactor * int_delta prod_i dx_i x_i^(nu_i-1)
+      U^(A-(L+1)D/2) F^(-(A-LD/2)).
+
+    The sector processor does not apply the global prefactor.  It needs the
+    affine U/F exponents and parameter weights so sector declarations can
+    expose all endpoint monomial sources explicitly.
+    """
+
+    loop_count: int
+    propagator_powers: tuple[float, ...]
+    dimension: EpsilonExpansion
+    gamma_argument: EpsilonExpansion
+    u_exponent: EpsilonExpansion
+    f_exponent: EpsilonExpansion
+    parameter_weight_powers: tuple[float, ...]
+    prefactor_description: str
+    convention_description: str
+
+
+@dataclass(frozen=True)
 class IntegralRequest:
     """Fully validated CLI configuration passed through the implementation."""
 
     integral: str
+    dot_file: str | None
     mode: str
     s: float | None
     s12: float | None

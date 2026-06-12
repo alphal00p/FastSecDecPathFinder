@@ -1,7 +1,7 @@
-# FSD_v2
+# FSD
 
-`FSD_v2` is a modular rewrite of the `FastSecDec/FSD` prototype.  It keeps the
-same triangle and box examples, but separates:
+`FSD` is a modular black-box sector-decomposition prototype for the triangle
+and box examples.  It separates:
 
 - declarative sector generation,
 - black-box U/F topology evaluators,
@@ -14,6 +14,13 @@ from sector metadata plus numerical U/F evaluators.  U and F Symbolica
 expressions are retained in `TopologyDefinition` for display and evaluator
 construction, but `SectorProcessor` only calls evaluators and never
 symbolically manipulates U or F.
+
+`TopologyDefinition` also stores the general parametric metadata needed beyond
+the current one-loop examples: loop count, propagator powers, the affine
+dimension, the global prefactor description, and the epsilon-dependent powers
+of `U` and `F`.  `SectorDefinition` stores monomial powers from `U`, `F`,
+Jacobian/measure, and numerator factors separately, so endpoint powers can be
+assembled generically before applying a subtraction strategy.
 
 Do not import `scipy` or `sympy` in this project.
 
@@ -31,14 +38,14 @@ OneLOopBridge is required and external.  It is not vendored.
 Use an existing checkout:
 
 ```sh
-cd FSD_v2
+cd FSD
 ONELOOPBRIDGE_SRC=/path/to/OneLOopBridge ./install.sh
 ```
 
 Or let the script clone it into ignored `.deps/`:
 
 ```sh
-cd FSD_v2
+cd FSD
 ./install.sh --clone-oneloopbridge
 ```
 
@@ -48,7 +55,7 @@ OneLOopBridge Python bindings, and verifies `import oneloop_bridge`.
 ## Tests
 
 The pytest suite requires the same configured `.venv` and external
-OneLOopBridge binding as normal CLI runs.  Run it from `FSD_v2` with:
+OneLOopBridge binding as normal CLI runs.  Run it from the repository root with:
 
 ```sh
 .venv/bin/python -m pytest -q
@@ -91,6 +98,24 @@ Box massless:
 ```sh
 .venv/bin/python FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0
 ```
+
+GammaLoop DOT-file topology path:
+
+```sh
+.venv/bin/python FSD.py --dot-file /path/to/integral.dot
+```
+
+This path is intentionally scaffolded but not implemented yet.  The CLI
+validates that the `.dot` file exists, then dispatches through
+`GammaLoopDotTopologyBuilder` in `dot_topology.py`.  Before failing at the
+future parser/topology hook, it prints a structured placeholder summary showing
+the planned topology fields and declarative sector schema.  The parser,
+`TopologyDefinition` construction, sector issuing, and benchmark mapping hooks
+currently raise `NotImplementedError`.  This is the planned extension point for
+turning GammaLoop-convention graph data into the same retained U/F topology
+objects and declarative `SectorDefinition` objects used by the built-in
+triangle and box examples, including the general parametric metadata described
+above.
 
 Display the Feynman-normalized prefactor convention:
 
@@ -150,9 +175,9 @@ Before integration, non-JSON runs print a coloured structured summary:
 
 - run configuration and Havana settings,
 - retained U/F polynomials,
-- evaluator parameter order and F dual shapes,
-- all sector maps, regular Jacobians, monomials, singular axes, and subtraction
-  type,
+- evaluator parameter order and U/F dual shapes,
+- all sector maps, regular sector prefactors, U/F monomials, endpoint powers,
+  singular axes, and subtraction type,
 - validation and benchmark availability.
 
 Use `--quiet-summary` to suppress this summary.  Use `--json` for JSON output;
@@ -200,5 +225,5 @@ Supported examples:
 - `D0(0,0,0,0,s12,s23;0)`, massless endpoint-subtracted, with Euclidean
   `s12 < 0` and `s23 < 0`.
 
-Timelike and threshold massless kinematics are intentionally rejected because
-the prototype has no contour deformation or threshold regularization.
+Non-Euclidean massless kinematics are intentionally rejected in the current
+prototype.

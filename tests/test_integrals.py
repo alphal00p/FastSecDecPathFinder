@@ -1,4 +1,4 @@
-"""Pytest smoke coverage for the supported FSD_v2 integral modes."""
+"""Pytest smoke coverage for the supported FSD integral modes."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 
@@ -16,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from FSD import compute_benchmark_quietly, validate_request
 from definitions import IntegralRequest
+from dot_topology import GammaLoopDotTopologyBuilder
 from formatting import apply_global_convention, pull_value, selected_prefactor_values
 from integrand import build_topology
 from integrator import integrate
@@ -26,6 +28,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
     """Build a deterministic, low-statistics integration request for tests."""
     data = {
         "integral": "triangle",
+        "dot_file": None,
         "mode": "massive",
         "s": None,
         "s12": None,
@@ -149,3 +152,86 @@ def test_massless_timelike_kinematics_are_rejected(integral_request: IntegralReq
     """Massless timelike cases need contour deformation and are not supported."""
     with pytest.raises(ValueError, match="contour deformation|threshold regularization"):
         validate_request(integral_request)
+
+
+def test_dual_f_evaluator_is_cloned_without_mutating_scalar_evaluator() -> None:
+    """Dualizing cached F evaluators must not mutate ordinary scalar F calls."""
+    integral_request = make_request(integral="triangle", mode="massless", s=-1.0, m=0.0)
+    topology = build_topology(integral_request)
+    sector = generate_sectors(integral_request)[0]
+    x_values = sector.map_eval_batch(np.asarray([[0.5, 0.25]], dtype=float))
+
+    scalar_before = topology.f_values(x_values)
+    taylor = topology.f_taylor_batch(sector, np.asarray([[0.0, 0.25]], dtype=float))
+    scalar_after = topology.f_values(x_values)
+
+    assert taylor.shape == (1, len(sector.dual_shape))
+    assert topology.f_dual_evaluator(sector.dual_shape) is topology.f_dual_evaluator(sector.dual_shape)
+    assert np.allclose(scalar_before, scalar_after)
+
+
+def test_endpoint_powers_are_assembled_from_parametric_metadata() -> None:
+    """Endpoint powers come from Jacobian, U/F, and topology exponents."""
+    integral_request = make_request(integral="triangle", mode="massless", s=-1.0, m=0.0)
+    topology = build_topology(integral_request)
+    sector = generate_sectors(integral_request)[0]
+
+    t_power = topology.endpoint_power(sector, 0)
+    z_power = topology.endpoint_power(sector, 1)
+
+    assert t_power.base == pytest.approx(-1.0)
+    assert t_power.eps_coeff == pytest.approx(-2.0)
+    assert z_power.base == pytest.approx(-1.0)
+    assert z_power.eps_coeff == pytest.approx(-1.0)
+
+
+def test_dot_file_request_reaches_topology_placeholder(tmp_path: Path) -> None:
+    """DOT input is wired to a future GammaLoop parser, but not implemented."""
+    dot_file = tmp_path / "toy.dot"
+    dot_file.write_text("digraph toy { a -> b; }\n", encoding="utf-8")
+    integral_request = make_request(integral="dot", dot_file=str(dot_file), mode="massless", m=0.0)
+
+    validate_request(integral_request)
+    with pytest.raises(NotImplementedError, match="TopologyDefinition"):
+        build_topology(integral_request)
+
+
+def test_dot_file_printout_placeholder_has_topology_and_sector_schema(tmp_path: Path) -> None:
+    """DOT mode can print the generic topology/sector schema before parsing."""
+    dot_file = tmp_path / "toy.dot"
+    dot_file.write_text("digraph toy { a -> b; }\n", encoding="utf-8")
+    integral_request = make_request(integral="dot", dot_file=str(dot_file), mode="massless", m=0.0)
+
+    printout = GammaLoopDotTopologyBuilder.from_request(integral_request).printout_placeholder()
+    text = str(printout)
+    data = printout.to_dict()
+
+    assert "DOT topology placeholder" in text
+    assert "U polynomial" in text
+    assert "sector schema" in text
+    assert any(row[0] == "U monomial" for row in data["sector_schema"])
+    assert any(row[0] == "endpoint powers" for row in data["sector_schema"])
+
+
+def test_dot_file_request_reaches_sector_placeholder(tmp_path: Path) -> None:
+    """DOT-backed sector generation has an explicit future extension hook."""
+    dot_file = tmp_path / "toy.dot"
+    dot_file.write_text("digraph toy { a -> b; }\n", encoding="utf-8")
+    integral_request = make_request(integral="dot", dot_file=str(dot_file), mode="massless", m=0.0)
+
+    validate_request(integral_request)
+    with pytest.raises(NotImplementedError, match="Sector generation"):
+        generate_sectors(integral_request)
+
+
+def test_dot_file_request_validates_file_path(tmp_path: Path) -> None:
+    """DOT mode rejects missing files and non-DOT suffixes before parsing."""
+    missing = make_request(integral="dot", dot_file=str(tmp_path / "missing.dot"))
+    with pytest.raises(ValueError, match="does not exist"):
+        validate_request(missing)
+
+    not_dot = tmp_path / "toy.txt"
+    not_dot.write_text("digraph toy { a -> b; }\n", encoding="utf-8")
+    wrong_suffix = make_request(integral="dot", dot_file=str(not_dot))
+    with pytest.raises(ValueError, match=".dot suffix"):
+        validate_request(wrong_suffix)

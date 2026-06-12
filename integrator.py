@@ -542,6 +542,9 @@ def integrate(
     if any(sector.integration_dim != continuous_dim for sector in sectors):
         raise ValueError("all sectors must have the same integration dimension for the current Havana driver")
 
+    # One discrete dimension chooses the sector, and each sector owns an
+    # adaptive continuous Havana grid of the same dimension.  Lower-support
+    # subtraction terms are localized into this same dimension by the processor.
     grid = NumericalIntegrator.discrete(
         [NumericalIntegrator.continuous(continuous_dim, n_bins=request.bins) for _ in sectors]
     )
@@ -585,6 +588,9 @@ def integrate(
             coords = np.empty((n_samples, continuous_dim), dtype=float)
             weights = np.empty(n_samples, dtype=float)
             for sample_index, sample in enumerate(samples):
+                # Havana samples contain one discrete coordinate d[0] and one
+                # continuous coordinate vector c.  The first weight is the full
+                # MC weight used in the manual Laurent accumulators.
                 sector_indices[sample_index] = int(sample.d[0])
                 coords[sample_index, :] = sample.c
                 weights[sample_index] = float(sample.weights[0])
@@ -618,6 +624,9 @@ def integrate(
                 hot_timing.add_python(time.perf_counter() - aggregate_start)
 
                 havana_batch_start = time.perf_counter()
+                # The training observable is scalar and finite-part based.
+                # It steers the adaptive grid, while the Laurent coefficients
+                # themselves are accumulated in RunningStats above.
                 training_grid.add_training_samples(batch_samples, t_part)
                 hot_timing.add_havana(time.perf_counter() - havana_batch_start)
 
@@ -687,9 +696,15 @@ def integrate(
                     submit_until_full()
 
             if stop_requested:
+                # A target-accuracy stop returns the already accumulated
+                # partial iteration.  The cloned training grid is deliberately
+                # not merged because the live grid will not be sampled again.
                 break
 
             havana_update_start = time.perf_counter()
+            # Full completed iterations update the live Havana grid from the
+            # cloned training grid.  This preserves stable sampling during the
+            # iteration while still adapting between iterations.
             grid.merge(training_grid)
             live_avg, live_err, live_chi = grid.update(1.5, 1.5)
             hot_timing.add_havana(time.perf_counter() - havana_update_start)

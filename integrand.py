@@ -9,6 +9,7 @@ only evaluates prepared sector callbacks and U/F callbacks on numeric batches.
 from __future__ import annotations
 
 import cmath
+import copy
 from itertools import product
 import math
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from typing import Any
 import numpy as np
 from symbolica import E, S
 
-from definitions import HotPathTiming, IntegralRequest
+from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
 from sectors_generator import SectorDefinition
 
 
@@ -39,8 +40,12 @@ class TopologyDefinition:
     expected_laurent_orders: list[str]
     convention_note: str
     jit_compile_evaluators: bool = False
+    parametric_representation: ParametricRepresentation | None = None
     _u_evaluator: Any = field(init=False, repr=False)
     _f_evaluator: Any = field(init=False, repr=False)
+    _u_dual_evaluators: dict[tuple[tuple[int, ...], ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
     _f_dual_evaluators: dict[tuple[tuple[int, ...], ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -50,6 +55,19 @@ class TopologyDefinition:
         params = [S(name) for name in [*self.x_names, *self.parameter_names]]
         self._u_evaluator = self.u_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
         self._f_evaluator = self.f_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+        if self.parametric_representation is None:
+            propagator_powers = tuple(1.0 for _ in self.x_names)
+            self.parametric_representation = ParametricRepresentation(
+                loop_count=1,
+                propagator_powers=propagator_powers,
+                dimension=EpsilonExpansion(4.0, -2.0),
+                gamma_argument=EpsilonExpansion(float(self.f_power_base), -float(self.eps_log_f_coeff)),
+                u_exponent=EpsilonExpansion(float(self.u_power_base), float(self.eps_log_u_coeff)),
+                f_exponent=EpsilonExpansion(-float(self.f_power_base), float(self.eps_log_f_coeff)),
+                parameter_weight_powers=tuple(power - 1.0 for power in propagator_powers),
+                prefactor_description="inferred one-loop scalar prefactor",
+                convention_description=self.convention_note,
+            )
 
     @property
     def evaluator_parameter_order(self) -> list[str]:
@@ -99,16 +117,56 @@ class TopologyDefinition:
         rows = self._rows(x_values)
         return np.asarray(self._timed_evaluate(self._f_evaluator, rows, timing), dtype=np.complex128)[:, 0]
 
+    def u_dual_evaluator(self, dual_shape: list[tuple[int, ...]]) -> Any:
+        """Return a cached dualized U evaluator for the requested jet shape."""
+        key = tuple(dual_shape)
+        evaluator = self._u_dual_evaluators.get(key)
+        if evaluator is None:
+            evaluator = copy.copy(self._u_evaluator)
+            evaluator.dualize([list(mi) for mi in dual_shape])
+            self._u_dual_evaluators[key] = evaluator
+        return evaluator
+
     def f_dual_evaluator(self, dual_shape: list[tuple[int, ...]]) -> Any:
         """Return a cached dualized F evaluator for the requested jet shape."""
         key = tuple(dual_shape)
         evaluator = self._f_dual_evaluators.get(key)
         if evaluator is None:
-            params = [S(name) for name in [*self.x_names, *self.parameter_names]]
-            evaluator = self.f_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+            # The heavy expression-to-evaluator lowering was already done in
+            # __post_init__.  Symbolica evaluators support shallow copying, so
+            # we clone the boot-time scalar F evaluator and dualize the clone
+            # for this shape.  The scalar evaluator remains available for
+            # ordinary F(X_s(y)) calls.
+            evaluator = copy.copy(self._f_evaluator)
             evaluator.dualize([list(mi) for mi in dual_shape])
             self._f_dual_evaluators[key] = evaluator
         return evaluator
+
+    def _taylor_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        evaluator: Any,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate Taylor coefficients of one black-box polynomial."""
+        rows_in = np.asarray(y_values, dtype=float)
+        x_jets = sector.map_dual_eval_batch(rows_in, timing)
+        n_rows = rows_in.shape[0]
+        dual_len = len(sector.dual_shape)
+        rows = np.zeros(
+            (n_rows, (len(self.x_names) + len(self.parameter_values)) * dual_len),
+            dtype=float,
+        )
+        offset = 0
+        for x_index in range(len(self.x_names)):
+            rows[:, offset : offset + dual_len] = x_jets[:, x_index, :]
+            offset += dual_len
+        for value in self.parameter_values:
+            rows[:, offset] = float(value)
+            offset += dual_len
+        values = self._timed_evaluate(evaluator, rows, timing)
+        return np.asarray(values, dtype=np.complex128)
 
     def f_taylor(
         self, sector: SectorDefinition, y: list[float] | tuple[float, ...]
@@ -117,12 +175,16 @@ class TopologyDefinition:
         if not sector.dual_shape:
             raise ValueError(f"{sector.name}: no dual shape declared")
 
+        # The sector owns X_s(y) and can therefore supply jets of x_i=X_i(y).
+        # F remains a black-box evaluator that only sees those numeric jets.
         x_jets = sector.map_dual_eval(y)
         zero = [0.0 for _ in sector.dual_shape]
         row: list[float] = []
         for jet in x_jets:
             row.extend(jet)
         for value in self.parameter_values:
+            # External invariants and masses are constants in the endpoint
+            # Taylor expansion: only the zeroth dual component is non-zero.
             param_jet = zero.copy()
             param_jet[0] = float(value)
             row.extend(param_jet)
@@ -140,30 +202,54 @@ class TopologyDefinition:
         if not sector.dual_shape:
             raise ValueError(f"{sector.name}: no dual shape declared")
 
-        rows_in = np.asarray(y_values, dtype=float)
-        x_jets = sector.map_dual_eval_batch(rows_in, timing)
-        n_rows = rows_in.shape[0]
-        dual_len = len(sector.dual_shape)
-        rows = np.zeros(
-            (n_rows, (len(self.x_names) + len(self.parameter_values)) * dual_len),
-            dtype=float,
-        )
-        offset = 0
-        for x_index in range(len(self.x_names)):
-            rows[:, offset : offset + dual_len] = x_jets[:, x_index, :]
-            offset += dual_len
-        for value in self.parameter_values:
-            rows[:, offset] = float(value)
-            offset += dual_len
-
         evaluator = self.f_dual_evaluator(sector.dual_shape)
-        values = self._timed_evaluate(evaluator, rows, timing)
-        return np.asarray(values, dtype=np.complex128)
+        return self._taylor_batch(sector, y_values, evaluator, timing)
+
+    def u_taylor_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Batch Taylor coefficients of U after composing map jets with U."""
+        if not sector.dual_shape:
+            raise ValueError(f"{sector.name}: no dual shape declared")
+
+        evaluator = self.u_dual_evaluator(sector.dual_shape)
+        return self._taylor_batch(sector, y_values, evaluator, timing)
+
+    def endpoint_power(self, sector: SectorDefinition, axis: int) -> EpsilonExpansion:
+        """Return the full endpoint power of one sector variable.
+
+        The exponent of y_axis is assembled from every declared monomial source:
+        the regularized measure/Jacobian, optional numerator weights, and the
+        extracted U and F monomials with their topology-level epsilon-dependent
+        powers.  This is the scalar quantity the subtraction algorithm needs.
+        """
+        parametric = self.parametric_representation
+        if parametric is None:
+            raise ValueError(f"{self.family}: missing parametric representation metadata")
+        base = (
+            float(sector.jacobian_monomial_powers[axis])
+            + float(sector.measure_monomial_powers[axis])
+            + float(sector.numerator_monomial_powers[axis])
+            + parametric.u_exponent.base * float(sector.u_monomial_powers[axis])
+            + parametric.f_exponent.base * float(sector.f_monomial_powers[axis])
+        )
+        eps_coeff = (
+            parametric.u_exponent.eps_coeff * float(sector.u_monomial_powers[axis])
+            + parametric.f_exponent.eps_coeff * float(sector.f_monomial_powers[axis])
+        )
+        return EpsilonExpansion(base=base, eps_coeff=eps_coeff)
 
 
 def build_topology(request: IntegralRequest) -> TopologyDefinition:
     """Construct the U/F topology definition for the requested family."""
     m2 = request.m * request.m
+    if request.integral == "dot":
+        from dot_topology import build_topology_from_dot_request
+
+        return build_topology_from_dot_request(request)
     if request.integral == "triangle":
         if request.s is None:
             raise ValueError("triangle topology requires s")
@@ -180,6 +266,17 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             eps_log_f_coeff=-1.0,
             expected_laurent_orders=["eps^-2", "eps^-1", "eps^0"],
             convention_note="triangle scalar integral in the OneLOop-compatible stripped convention",
+            parametric_representation=ParametricRepresentation(
+                loop_count=1,
+                propagator_powers=(1.0, 1.0, 1.0),
+                dimension=EpsilonExpansion(4.0, -2.0),
+                gamma_argument=EpsilonExpansion(1.0, 1.0),
+                u_exponent=EpsilonExpansion(-1.0, 2.0),
+                f_exponent=EpsilonExpansion(-1.0, -1.0),
+                parameter_weight_powers=(0.0, 0.0, 0.0),
+                prefactor_description="-Gamma(1+eps) in the projective scalar-integral convention",
+                convention_description="sector integrals are accumulated before the global prefactor/convention shift",
+            ),
             jit_compile_evaluators=request.jit_compile_evaluators,
         )
     if request.integral == "box":
@@ -198,6 +295,17 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             eps_log_f_coeff=-1.0,
             expected_laurent_orders=["eps^-2", "eps^-1", "eps^0"],
             convention_note="box scalar integral in the OneLOop-compatible stripped convention",
+            parametric_representation=ParametricRepresentation(
+                loop_count=1,
+                propagator_powers=(1.0, 1.0, 1.0, 1.0),
+                dimension=EpsilonExpansion(4.0, -2.0),
+                gamma_argument=EpsilonExpansion(2.0, 1.0),
+                u_exponent=EpsilonExpansion(0.0, 2.0),
+                f_exponent=EpsilonExpansion(-2.0, -1.0),
+                parameter_weight_powers=(0.0, 0.0, 0.0, 0.0),
+                prefactor_description="Gamma(2+eps) in the projective scalar-integral convention",
+                convention_description="sector integrals are accumulated before the global prefactor/convention shift",
+            ),
             jit_compile_evaluators=request.jit_compile_evaluators,
         )
     raise ValueError(f"unsupported integral {request.integral!r}")
@@ -300,40 +408,107 @@ class SectorProcessor:
         f_values: np.ndarray | None,
         timing: HotPathTiming,
     ) -> np.ndarray:
-        """Evaluate the regular residual ``phi = F(X(y))/M(y)``.
+        """Evaluate the regular residual ``phi = F(X(y))/M_F(y)``.
 
         Interior points use the scalar F evaluator and divide by the declared
         monomial.  Endpoint points use dual Taylor coefficients of the black-box
         F evaluator composed with sector-map dual jets.
         """
+        return self._monomial_residual_batch(
+            sector=sector,
+            y_values=y_values,
+            x_values=x_values,
+            polynomial_values=f_values,
+            monomial_powers=sector.f_monomial_powers,
+            value_batch=self.topology.f_values,
+            taylor_batch=self.topology.f_taylor_batch,
+            timing=timing,
+        )
+
+    def _u_residual_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        x_values: np.ndarray | None,
+        u_values: np.ndarray | None,
+        timing: HotPathTiming,
+    ) -> np.ndarray:
+        """Evaluate the regular residual ``psi = U(X(y))/M_U(y)``."""
+        return self._monomial_residual_batch(
+            sector=sector,
+            y_values=y_values,
+            x_values=x_values,
+            polynomial_values=u_values,
+            monomial_powers=sector.u_monomial_powers,
+            value_batch=self.topology.u_values,
+            taylor_batch=self.topology.u_taylor_batch,
+            timing=timing,
+        )
+
+    def _monomial_value_batch(self, y_values: np.ndarray, powers: list[int]) -> np.ndarray:
+        """Evaluate a declared monomial for arbitrary power metadata."""
+        rows = np.asarray(y_values, dtype=float)
+        values = np.ones(rows.shape[0], dtype=float)
+        for axis, power in enumerate(powers):
+            if power:
+                values *= rows[:, axis] ** power
+        return values
+
+    def _monomial_residual_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        x_values: np.ndarray | None,
+        polynomial_values: np.ndarray | None,
+        monomial_powers: list[int],
+        value_batch: Any,
+        taylor_batch: Any,
+        timing: HotPathTiming,
+    ) -> np.ndarray:
+        """Evaluate ``P(X_s(y))/M_s(y)`` for P=U or F without opening P."""
         axes = sector.singular_axes
         rows = np.asarray(y_values, dtype=float)
-        phi = np.empty(rows.shape[0], dtype=np.complex128)
-        if not axes:
-            if f_values is not None:
-                return np.asarray(f_values, dtype=np.complex128)
+        residual = np.empty(rows.shape[0], dtype=np.complex128)
+        if not any(monomial_powers):
+            if polynomial_values is not None:
+                return np.asarray(polynomial_values, dtype=np.complex128)
             if x_values is None:
                 x_values = sector.map_eval_batch(rows, timing)
-            return self.topology.f_values(x_values, timing)
+            return value_batch(x_values, timing)
+        if not axes:
+            raise ValueError(f"{sector.name}: monomial powers require declared singular axes")
 
         axis_values = rows[:, axes]
+        # Interior points implement the literal formula from the docs:
+        #   residual_s(y) = P(X_s(y)) / M_s(y).
+        # The caller often already evaluated X_s and F(X_s) while building g_s,
+        # so we reuse those arrays to avoid extra evaluator calls.
         interior = np.all(axis_values > self.boundary_tol, axis=1)
         if np.any(interior):
-            if f_values is None:
+            if polynomial_values is None:
                 if x_values is None:
                     x_values = sector.map_eval_batch(rows[interior], timing)
-                    f_interior = self.topology.f_values(x_values, timing)
+                    values_interior = value_batch(x_values, timing)
                 else:
-                    f_interior = self.topology.f_values(x_values[interior], timing)
+                    values_interior = value_batch(x_values[interior], timing)
             else:
-                f_interior = np.asarray(f_values, dtype=np.complex128)[interior]
-            phi[interior] = f_interior / sector.f_monomial_value_batch(rows[interior])
+                values_interior = np.asarray(polynomial_values, dtype=np.complex128)[interior]
+            residual[interior] = values_interior / self._monomial_value_batch(
+                rows[interior], monomial_powers
+            )
 
         boundary = ~interior
         if np.any(boundary):
             boundary_rows = rows[boundary]
-            taylor = self.topology.f_taylor_batch(sector, boundary_rows, timing)
+            # Direct division by M_s would produce 0/0 at endpoints.  Instead,
+            # request the Taylor coefficients of F(X_s(y)) from the dualized
+            # black-box F evaluator.  The sector supplies only the known map
+            # jets; F is still not opened or symbolically expanded.
+            taylor = taylor_batch(sector, boundary_rows, timing)
             boundary_phi = np.empty(boundary_rows.shape[0], dtype=np.complex128)
+            # boundary_flags marks which singular coordinates are actually at
+            # the endpoint for each row.  For two singular axes this separates
+            # edge limits, corner limits, and mixed cases in one vectorized pass.
             boundary_flags = boundary_rows[:, axes] <= self.boundary_tol
             for pattern in product((False, True), repeat=len(axes)):
                 row_mask = np.all(boundary_flags == np.asarray(pattern, dtype=bool), axis=1)
@@ -342,18 +517,25 @@ class SectorProcessor:
                 multi_index: list[int] = []
                 denominator = np.ones(int(np.count_nonzero(row_mask)), dtype=float)
                 for axis, is_boundary in zip(axes, pattern):
-                    power = sector.f_monomial_powers[axis]
+                    power = monomial_powers[axis]
                     if is_boundary:
+                        # If y_axis=0, dividing by y_axis^power is replaced by
+                        # taking the matching Taylor coefficient of F(X_s).
                         multi_index.append(power)
                     else:
+                        # If y_axis is nonzero while another axis is at its
+                        # endpoint, keep the ordinary quotient for this factor.
                         multi_index.append(0)
                         denominator *= boundary_rows[row_mask, axis] ** power
+                # Symbolica dual coefficients are Taylor coefficients in the
+                # declared multi-index basis, so this retrieves the finite
+                # residual phi_s for the current boundary pattern.
                 boundary_phi[row_mask] = (
                     taylor[row_mask, sector.dual_index(tuple(multi_index))] / denominator
                 )
-            phi[boundary] = boundary_phi
+            residual[boundary] = boundary_phi
 
-        return phi
+        return residual
 
     def _g_coeffs_batch(
         self,
@@ -365,13 +547,19 @@ class SectorProcessor:
         x = sector.map_eval_batch(y_values, timing)
         u = self.topology.u_values(x, timing)
         f = self.topology.f_values(x, timing)
+        u_residual = self._u_residual_batch(sector, y_values, x, u, timing)
         phi = self._phi_batch(sector, y_values, x, f, timing)
         regular_j = sector.jacobian_eval_batch(y_values, timing).astype(np.complex128)
-        pref = regular_j * np.power(u, self.topology.u_power_base) * np.power(
+        # The monomial powers have already been extracted, so the integrable
+        # endpoint structure lives outside g_s.  Here we build only the regular
+        # coefficient multiplying the localized subtraction formula.
+        pref = regular_j * np.power(u_residual, self.topology.u_power_base) * np.power(
             phi, -self.topology.f_power_base
         )
+        # Expand U^{a+b eps} phi^{c+d eps} through eps^0:
+        # pref * exp(eps * exponent_log) = pref * (1 + eps L + eps^2 L^2/2).
         exponent_log = (
-            self.topology.eps_log_u_coeff * feynman_log_array(u)
+            self.topology.eps_log_u_coeff * feynman_log_array(u_residual)
             + self.topology.eps_log_f_coeff * feynman_log_array(phi)
         )
         coeffs = np.empty((y_values.shape[0], 3), dtype=np.complex128)
@@ -389,17 +577,22 @@ class SectorProcessor:
         """Apply the localized one-axis logarithmic endpoint subtraction."""
         self._check_supported_singular_powers(sector)
         axis = sector.singular_axes[0]
-        alpha = float(sector.f_monomial_powers[axis])
+        eps_coeff = self._log_endpoint_eps_coeff(sector, axis)
         coord = y_values[:, axis]
 
         g_y = self._g_coeffs_batch(sector, y_values, timing)
         y0 = y_values.copy()
         y0[:, axis] = 0.0
+        # g_0 is evaluated with phi_s recovered from the dual endpoint limit;
+        # this is the subtraction term localized on the endpoint hyperplane.
         g_0 = self._g_coeffs_batch(sector, y0, timing)
 
         coeffs = np.zeros((y_values.shape[0], 3), dtype=np.complex128)
-        coeffs[:, 1] = -g_0[:, 0] / alpha
-        coeffs[:, 2] = -g_0[:, 1] / alpha + (g_y[:, 0] - g_0[:, 0]) / coord
+        # For y^{-1+c eps} g(y,eps), the endpoint integral of g(0,eps)
+        # produces g(0,eps)/(c eps), and the finite remainder is
+        # (g(y,0)-g(0,0))/y.
+        coeffs[:, 1] = g_0[:, 0] / eps_coeff
+        coeffs[:, 2] = g_0[:, 1] / eps_coeff + (g_y[:, 0] - g_0[:, 0]) / coord
         return coeffs, complex_abs_for_training_array(coeffs[:, 2])
 
     def _two_axis_subtraction_batch(
@@ -411,8 +604,8 @@ class SectorProcessor:
         """Apply the localized two-axis endpoint subtraction."""
         self._check_supported_singular_powers(sector)
         axis_a, axis_b = sector.singular_axes
-        alpha = float(sector.f_monomial_powers[axis_a])
-        beta = float(sector.f_monomial_powers[axis_b])
+        eps_a = self._log_endpoint_eps_coeff(sector, axis_a)
+        eps_b = self._log_endpoint_eps_coeff(sector, axis_b)
         ya = y_values[:, axis_a]
         yb = y_values[:, axis_b]
 
@@ -423,11 +616,15 @@ class SectorProcessor:
         y_00 = y_0b.copy()
         y_00[:, axis_b] = 0.0
 
+        # Evaluate the regular function at the interior, two edges, and the
+        # corner.  The edge/corner calls trigger the phi_s dual-limit path above.
         g_ab = self._g_coeffs_batch(sector, y_values, timing)
         g_a0 = self._g_coeffs_batch(sector, y_a0, timing)
         g_0b = self._g_coeffs_batch(sector, y_0b, timing)
         g_00 = self._g_coeffs_batch(sector, y_00, timing)
 
+        # These are the inclusion-exclusion pieces of the two-axis localized
+        # subtraction formula described in the implementation notes.
         remainder0 = g_ab[:, 0] - g_0b[:, 0] - g_a0[:, 0] + g_00[:, 0]
         edge_b0 = g_0b[:, 0] - g_00[:, 0]
         edge_b1 = g_0b[:, 1] - g_00[:, 1]
@@ -435,16 +632,16 @@ class SectorProcessor:
         edge_a1 = g_a0[:, 1] - g_00[:, 1]
 
         coeffs = np.empty((y_values.shape[0], 3), dtype=np.complex128)
-        coeffs[:, 0] = g_00[:, 0] / (alpha * beta)
+        coeffs[:, 0] = g_00[:, 0] / (eps_a * eps_b)
         coeffs[:, 1] = (
-            g_00[:, 1] / (alpha * beta)
-            - edge_b0 / (alpha * yb)
-            - edge_a0 / (beta * ya)
+            g_00[:, 1] / (eps_a * eps_b)
+            + edge_b0 / (eps_a * yb)
+            + edge_a0 / (eps_b * ya)
         )
         coeffs[:, 2] = (
-            g_00[:, 2] / (alpha * beta)
-            - (edge_b1 - beta * edge_b0 * np.log(yb)) / (alpha * yb)
-            - (edge_a1 - alpha * edge_a0 * np.log(ya)) / (beta * ya)
+            g_00[:, 2] / (eps_a * eps_b)
+            + (edge_b1 + eps_b * edge_b0 * np.log(yb)) / (eps_a * yb)
+            + (edge_a1 + eps_a * edge_a0 * np.log(ya)) / (eps_b * ya)
             + remainder0 / (ya * yb)
         )
         return coeffs, complex_abs_for_training_array(coeffs[:, 2])
@@ -468,18 +665,24 @@ class SectorProcessor:
             f"{sector.name}: only zero, one, and two singular axes are currently supported"
         )
 
-    def _check_supported_singular_powers(self, sector: SectorDefinition) -> None:
-        """Ensure the declared endpoint powers are logarithmic after extraction."""
-        for axis in sector.singular_axes:
-            base_power = (
-                sector.jacobian_monomial_powers[axis]
-                - self.topology.f_power_base * sector.f_monomial_powers[axis]
+    def _log_endpoint_eps_coeff(self, sector: SectorDefinition, axis: int) -> float:
+        """Return c for a supported endpoint factor y^(-1+c eps)."""
+        endpoint_power = self.topology.endpoint_power(sector, axis)
+        if abs(endpoint_power.base + 1.0) > 1.0e-12:
+            raise ValueError(
+                f"{sector.name}: unsupported endpoint power y^({endpoint_power.as_text()}); "
+                "only logarithmic y^(-1+c*eps) factors are implemented"
             )
-            if base_power != -1:
-                raise ValueError(
-                    f"{sector.name}: unsupported endpoint power y^{base_power}; "
-                    "only logarithmic y^(-1-alpha*eps) factors are implemented"
-                )
+        if abs(endpoint_power.eps_coeff) <= 1.0e-15:
+            raise ValueError(
+                f"{sector.name}: endpoint power y^({endpoint_power.as_text()}) has no epsilon regulator"
+            )
+        return endpoint_power.eps_coeff
+
+    def _check_supported_singular_powers(self, sector: SectorDefinition) -> None:
+        """Ensure declared endpoint powers are logarithmic after extraction."""
+        for axis in sector.singular_axes:
+            self._log_endpoint_eps_coeff(sector, axis)
 
     def _phi(self, sector: SectorDefinition, y: list[float] | tuple[float, ...]) -> complex:
         """Scalar residual evaluator kept for legacy/debug comparisons."""
@@ -506,6 +709,8 @@ class SectorProcessor:
         """Scalar regular-function coefficient builder."""
         x = sector.map_eval(y)
         u = self.topology.u_value(x)
+        if any(sector.u_monomial_powers):
+            raise NotImplementedError("scalar debug path does not implement U residual limits")
         phi = self._phi(sector, y)
         regular_j = complex(sector.jacobian_eval(y))
         pref = regular_j * (u ** self.topology.u_power_base) * (phi ** (-self.topology.f_power_base))
@@ -529,7 +734,7 @@ class SectorProcessor:
         """Scalar one-axis subtraction kept for legacy/debug comparisons."""
         self._check_supported_singular_powers(sector)
         axis = sector.singular_axes[0]
-        alpha = float(sector.f_monomial_powers[axis])
+        eps_coeff = self._log_endpoint_eps_coeff(sector, axis)
         coord = float(y[axis])
 
         g_y = self._g_coeffs(sector, y)
@@ -537,8 +742,8 @@ class SectorProcessor:
         g_0 = self._g_coeffs(sector, y0)
 
         coeff_m2 = 0.0 + 0.0j
-        coeff_m1 = -g_0[0] / alpha
-        coeff_0 = -g_0[1] / alpha + (g_y[0] - g_0[0]) / coord
+        coeff_m1 = g_0[0] / eps_coeff
+        coeff_0 = g_0[1] / eps_coeff + (g_y[0] - g_0[0]) / coord
         coeffs = [coeff_m2, coeff_m1, coeff_0]
         return coeffs, complex_abs_for_training(coeff_0)
 
@@ -548,8 +753,8 @@ class SectorProcessor:
         """Scalar two-axis subtraction kept for legacy/debug comparisons."""
         self._check_supported_singular_powers(sector)
         axis_a, axis_b = sector.singular_axes
-        alpha = float(sector.f_monomial_powers[axis_a])
-        beta = float(sector.f_monomial_powers[axis_b])
+        eps_a = self._log_endpoint_eps_coeff(sector, axis_a)
+        eps_b = self._log_endpoint_eps_coeff(sector, axis_b)
         ya = float(y[axis_a])
         yb = float(y[axis_b])
 
@@ -568,16 +773,16 @@ class SectorProcessor:
         edge_a0 = g_a0[0] - g_00[0]
         edge_a1 = g_a0[1] - g_00[1]
 
-        coeff_m2 = g_00[0] / (alpha * beta)
+        coeff_m2 = g_00[0] / (eps_a * eps_b)
         coeff_m1 = (
-            g_00[1] / (alpha * beta)
-            - edge_b0 / (alpha * yb)
-            - edge_a0 / (beta * ya)
+            g_00[1] / (eps_a * eps_b)
+            + edge_b0 / (eps_a * yb)
+            + edge_a0 / (eps_b * ya)
         )
         coeff_0 = (
-            g_00[2] / (alpha * beta)
-            - (edge_b1 - beta * edge_b0 * math.log(yb)) / (alpha * yb)
-            - (edge_a1 - alpha * edge_a0 * math.log(ya)) / (beta * ya)
+            g_00[2] / (eps_a * eps_b)
+            + (edge_b1 + eps_b * edge_b0 * math.log(yb)) / (eps_a * yb)
+            + (edge_a1 + eps_a * edge_a0 * math.log(ya)) / (eps_b * ya)
             + remainder0 / (ya * yb)
         )
 

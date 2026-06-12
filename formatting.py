@@ -10,6 +10,7 @@ from colorama import Fore, Style
 from prettytable import PrettyTable
 
 from definitions import BenchmarkResult, EULER_GAMMA, IntegralRequest, JsonDict, ONELOOP_TO_FEYNMAN
+from dot_topology import DotTopologyPrintout
 from integrand import TopologyDefinition
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty, format_percent
@@ -48,6 +49,8 @@ def monomial_power_text(variable_names: list[str], powers: list[int]) -> str:
 
 def kinematic_restrictions(request: IntegralRequest) -> str:
     """Return the human-readable restriction enforced by validation."""
+    if request.integral == "dot":
+        return "valid .dot file path; GammaLoop parser/sector generation not implemented yet"
     if request.integral == "triangle":
         if request.mode == "massive":
             return "m > 0 and s < 4 m^2"
@@ -64,33 +67,52 @@ def summary_data(
     benchmark_available: bool,
 ) -> JsonDict:
     """Build the serializable run summary used for tables and JSON."""
+    header = {
+        "integral": request.integral,
+        "mode": request.mode,
+        "family": topology.family,
+        "s": request.s,
+        "s12": request.s12,
+        "s23": request.s23,
+        "m": request.m,
+        "gamma_scheme": request.gamma_scheme,
+        "prefactor_convention": request.prefactor_convention,
+        "benchmark": "OneLOopBridge available" if benchmark_available else "unavailable",
+        "seed": request.seed,
+        "max_iter": request.max_iter,
+        "samples_per_iter": request.samples_per_iter,
+        "batch_size": request.batch_size,
+        "target_rel_accuracy_percent": request.target_rel_accuracy,
+        "bins": request.bins,
+        "workers": request.workers,
+        "jit_compile_evaluators": request.jit_compile_evaluators,
+    }
+    if request.dot_file is not None:
+        header["dot_file"] = request.dot_file
+    parametric = topology.parametric_representation
+    parametric_data = {}
+    if parametric is not None:
+        parametric_data = {
+            "loops": parametric.loop_count,
+            "propagator_powers": parametric.propagator_powers,
+            "D": parametric.dimension.as_text(),
+            "Gamma argument": parametric.gamma_argument.as_text(),
+            "U exponent": parametric.u_exponent.as_text(),
+            "F exponent": parametric.f_exponent.as_text(),
+            "parameter weights": parametric.parameter_weight_powers,
+            "prefactor": parametric.prefactor_description,
+            "convention": parametric.convention_description,
+        }
+
     return {
-        "header": {
-            "integral": request.integral,
-            "mode": request.mode,
-            "family": topology.family,
-            "s": request.s,
-            "s12": request.s12,
-            "s23": request.s23,
-            "m": request.m,
-            "gamma_scheme": request.gamma_scheme,
-            "prefactor_convention": request.prefactor_convention,
-            "benchmark": "OneLOopBridge available" if benchmark_available else "unavailable",
-            "seed": request.seed,
-            "max_iter": request.max_iter,
-            "samples_per_iter": request.samples_per_iter,
-            "batch_size": request.batch_size,
-            "target_rel_accuracy_percent": request.target_rel_accuracy,
-            "bins": request.bins,
-            "workers": request.workers,
-            "jit_compile_evaluators": request.jit_compile_evaluators,
-        },
+        "header": header,
         "symanzik": {
             "U": expression_text(topology.u_expr),
             "F": expression_text(topology.f_expr),
             "parameter_order": topology.evaluator_parameter_order,
             "parameter_values": topology.parameter_values,
             "dual_shapes": [sector.dual_shape for sector in sectors if sector.dual_shape],
+            "parametric": parametric_data,
         },
         "sectors": [
             {
@@ -102,10 +124,18 @@ def summary_data(
                     for j, expr in enumerate(sector.map_exprs)
                 ],
                 "regular_jacobian": expression_text(sector.regular_jacobian_expr),
+                "u_monomial": expression_text(sector.u_monomial_expr),
                 "f_monomial": expression_text(sector.f_monomial_expr),
+                "u_monomial_powers": sector.u_monomial_powers,
                 "f_monomial_powers": sector.f_monomial_powers,
                 "jacobian_monomial_powers": sector.jacobian_monomial_powers,
+                "measure_monomial_powers": sector.measure_monomial_powers,
+                "numerator_monomial_powers": sector.numerator_monomial_powers,
                 "singular_axes": [sector.variable_names[axis] for axis in sector.singular_axes],
+                "endpoint_powers": [
+                    f"{sector.variable_names[axis]}^({topology.endpoint_power(sector, axis).as_text()})"
+                    for axis in sector.singular_axes
+                ],
                 "subtraction": sector.subtraction_type,
                 "description": sector.description,
             }
@@ -129,7 +159,7 @@ def print_preintegration_summary(
 ) -> None:
     """Print colored pre-integration tables for topology and sectors."""
     data = summary_data(request, topology, sectors, benchmark_available)
-    print(maybe_color("\nFastSecDec v2 run summary", Fore.CYAN))
+    print(maybe_color("\nFSD run summary", Fore.CYAN))
 
     header = PrettyTable()
     header.field_names = [maybe_color("item", Fore.CYAN), maybe_color("value", Fore.CYAN)]
@@ -143,11 +173,13 @@ def print_preintegration_summary(
     symanzik.add_row([maybe_color("F", Fore.MAGENTA), data["symanzik"]["F"]])
     symanzik.add_row(["evaluator order", ", ".join(data["symanzik"]["parameter_order"])])
     symanzik.add_row(["parameter values", data["symanzik"]["parameter_values"]])
+    for key, value in data["symanzik"]["parametric"].items():
+        symanzik.add_row([key, value])
     unique_shapes = []
     for shape in data["symanzik"]["dual_shapes"]:
         if shape not in unique_shapes:
             unique_shapes.append(shape)
-    symanzik.add_row(["F dual shapes", unique_shapes if unique_shapes else "none"])
+    symanzik.add_row(["U/F dual shapes", unique_shapes if unique_shapes else "none"])
     print(symanzik)
 
     sector_table = PrettyTable()
@@ -157,8 +189,10 @@ def print_preintegration_summary(
         maybe_color("vars", Fore.CYAN),
         maybe_color("map", Fore.CYAN),
         maybe_color("J_reg", Fore.CYAN),
+        maybe_color("M_U", Fore.CYAN),
         maybe_color("M_F", Fore.CYAN),
         maybe_color("axes", Fore.CYAN),
+        maybe_color("endpoint powers", Fore.CYAN),
         maybe_color("subtraction", Fore.CYAN),
     ]
     sector_table.align = "l"
@@ -170,8 +204,10 @@ def print_preintegration_summary(
                 ", ".join(sector["variables"]),
                 "\n".join(sector["map"]),
                 sector["regular_jacobian"],
+                sector["u_monomial"],
                 sector["f_monomial"],
                 ", ".join(sector["singular_axes"]) if sector["singular_axes"] else "-",
+                ", ".join(sector["endpoint_powers"]) if sector["endpoint_powers"] else "-",
                 sector["subtraction"],
             ]
         )
@@ -181,6 +217,46 @@ def print_preintegration_summary(
     validation.field_names = [maybe_color("check", Fore.CYAN), maybe_color("value", Fore.CYAN)]
     for key, value in data["validation"].items():
         validation.add_row([maybe_color(str(key), Fore.MAGENTA), value])
+    print(validation)
+
+
+def dot_placeholder_summary_data(printout: DotTopologyPrintout) -> JsonDict:
+    """Build serializable summary data for a DOT topology placeholder."""
+    return printout.to_dict()
+
+
+def print_dot_placeholder_summary(printout: DotTopologyPrintout) -> None:
+    """Print the generic DOT topology/sector summary scaffold."""
+    print(maybe_color("\nFSD DOT topology placeholder", Fore.CYAN))
+
+    header = PrettyTable()
+    header.field_names = [maybe_color("item", Fore.CYAN), maybe_color("value", Fore.CYAN)]
+    for key, value in printout.header_rows():
+        header.add_row([maybe_color(key, Fore.MAGENTA), value])
+    print(header)
+
+    topology = PrettyTable()
+    topology.field_names = [maybe_color("topology field", Fore.CYAN), maybe_color("planned value", Fore.CYAN)]
+    topology.align = "l"
+    for key, value in printout.topology_rows():
+        topology.add_row([maybe_color(key, Fore.MAGENTA), value])
+    print(topology)
+
+    sector = PrettyTable()
+    sector.field_names = [
+        maybe_color("sector field", Fore.CYAN),
+        maybe_color("symbol", Fore.CYAN),
+        maybe_color("purpose", Fore.CYAN),
+    ]
+    sector.align = "l"
+    for name, symbol, purpose in printout.sector_schema_rows():
+        sector.add_row([maybe_color(name, Fore.MAGENTA), symbol, purpose])
+    print(sector)
+
+    validation = PrettyTable()
+    validation.field_names = [maybe_color("gate", Fore.CYAN), maybe_color("status", Fore.CYAN)]
+    for key, value in printout.validation_rows():
+        validation.add_row([maybe_color(key, Fore.MAGENTA), value])
     print(validation)
 
 
@@ -251,6 +327,13 @@ def apply_global_convention(
     request: IntegralRequest,
 ) -> tuple[list[complex], list[complex]]:
     """Apply gamma-scheme and stripped-convention shifts to sector coefficients."""
+    if request.integral == "dot":
+        raise NotImplementedError(
+            "Global prefactor/convention handling for DOT-file topologies is "
+            "not implemented yet.  It should be derived from the parsed "
+            "topology metadata rather than inferred from triangle/box rules."
+        )
+
     a, b, c = sector_coeffs
     ea, eb, ec = sector_errors
     if request.integral == "box":

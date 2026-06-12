@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+from pathlib import Path
 import sys
 
 from colorama import Fore, Style, init as colorama_init
@@ -20,12 +21,15 @@ from benchmark import check_oneloop_bridge, compute_benchmark
 from definitions import IntegralRequest
 from formatting import (
     apply_global_convention,
+    dot_placeholder_summary_data,
     make_output,
     output_json,
+    print_dot_placeholder_summary,
     print_preintegration_summary,
     print_result_table,
     summary_data,
 )
+from dot_topology import GammaLoopDotTopologyBuilder
 from integrand import build_topology
 from integrator import integrate
 from sectors_generator import generate_sectors
@@ -48,6 +52,16 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--batch-size must be >= 0, where 0 means one batch per worker chunk")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
+
+    if request.integral == "dot":
+        if request.dot_file is None:
+            raise ValueError("DOT-file topology mode requires --dot-file")
+        dot_path = Path(request.dot_file).expanduser()
+        if not dot_path.is_file():
+            raise ValueError(f"DOT-file topology does not exist: {dot_path}")
+        if dot_path.suffix.lower() != ".dot":
+            raise ValueError(f"DOT-file topology input must use a .dot suffix: {dot_path}")
+        return
 
     if request.integral == "triangle":
         if request.s is None:
@@ -98,13 +112,32 @@ def validate_request(request: IntegralRequest) -> None:
 def parse_args() -> argparse.Namespace:
     """Build the CLI parser and return parsed command-line options."""
     parser = argparse.ArgumentParser(
-        description="FSD_v2 modular black-box sector-decomposition prototype."
+        description="FSD modular black-box sector-decomposition prototype."
     )
-    parser.add_argument("--integral", choices=["triangle", "box"], default="triangle")
+    parser.add_argument(
+        "--integral",
+        choices=["triangle", "box"],
+        default="triangle",
+        help="Built-in example integral. Ignored when --dot-file is supplied.",
+    )
+    parser.add_argument(
+        "--dot-file",
+        default=None,
+        help=(
+            "Path to a GammaLoop-convention DOT file describing the integral. "
+            "This selects the DOT-backed topology path, which is scaffolded but "
+            "not implemented yet."
+        ),
+    )
     parser.add_argument("--s", type=float, default=None, help="Triangle invariant s=p0^2.")
     parser.add_argument("--s12", type=float, default=None, help="Box invariant (p1+p2)^2.")
     parser.add_argument("--s23", type=float, default=None, help="Box invariant (p2+p3)^2.")
-    parser.add_argument("--m", type=float, required=True, help="Internal physical mass m.")
+    parser.add_argument(
+        "--m",
+        type=float,
+        default=0.0,
+        help="Internal physical mass m for built-in examples. Defaults to 0 for DOT-file scaffolding.",
+    )
     parser.add_argument("--mode", choices=["auto", "massive", "massless"], default="auto")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--max-iter", type=int, default=8, help="Maximum Havana iterations, or -1 for unbounded.")
@@ -168,8 +201,10 @@ def parse_args() -> argparse.Namespace:
 def build_request(args: argparse.Namespace) -> IntegralRequest:
     """Convert argparse output into the immutable request object used below."""
     mode = resolve_mode(args.m, args.mode)
+    dot_file = str(Path(args.dot_file).expanduser()) if args.dot_file is not None else None
     return IntegralRequest(
-        integral=args.integral,
+        integral="dot" if dot_file is not None else args.integral,
+        dot_file=dot_file,
         mode=mode,
         s=args.s,
         s12=args.s12,
@@ -217,6 +252,27 @@ def main() -> int:
 
     try:
         validate_request(request)
+        if request.integral == "dot":
+            # The DOT path is intentionally wired through the same public
+            # topology/sector builders as implemented examples.  Those builders
+            # currently raise NotImplementedError at the future GammaLoop parser
+            # and sector-generation hooks.
+            dot_printout = GammaLoopDotTopologyBuilder.from_request(request).printout_placeholder()
+            if request.json:
+                print(
+                    output_json(
+                        {
+                            "status": "not_implemented",
+                            "dot_placeholder": dot_placeholder_summary_data(dot_printout),
+                        }
+                    )
+                )
+            elif not request.quiet_summary:
+                print_dot_placeholder_summary(dot_printout)
+            sys.stdout.flush()
+            build_topology(request)
+            generate_sectors(request)
+            raise NotImplementedError("DOT-file topology path unexpectedly returned concrete objects")
         check_oneloop_bridge()
     except Exception as exc:
         print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)

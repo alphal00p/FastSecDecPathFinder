@@ -10,6 +10,7 @@
 \newcommand{\eps}{\epsilon}
 \newcommand{\U}{\mathcal U}
 \newcommand{\F}{\mathcal F}
+\newcommand{\V}{\mathcal V}
 \newcommand{\hU}{\widehat{\mathcal U}}
 \newcommand{\hF}{\widehat{\mathcal F}}
 \newcommand{\Dlt}{\Delta}
@@ -240,145 +241,6 @@ where
   (-s-\ii0)^{-1-\eps}(1+z)^{2\eps}.
 \end{equation}
 
-\subsection{Massive threshold sectors}
-
-For \(m\neq 0\), the endpoint singularity is lifted.  A threshold singularity
-appears at
-\begin{equation}
-  s=4m^2,
-\end{equation}
-at the point
-\begin{equation}
-  x_0=0,
-  \qquad
-  x_1=x_2=\frac12 .
-\end{equation}
-Write
-\begin{equation}
-  x_0=a,
-  \qquad
-  x_1=\frac{1-a+d}{2},
-  \qquad
-  x_2=\frac{1-a-d}{2},
-\end{equation}
-and split
-\begin{equation}
-  d=\sigma(1-a)b,
-  \qquad
-  \sigma=\pm1,
-  \qquad
-  0\leq b\leq 1 .
-\end{equation}
-At threshold,
-\begin{equation}
-  \F
-  =
-  m^2\left[a(2-a)+(1-a)^2b^2\right]-\ii0 .
-\end{equation}
-The overlap \(a\sim b^2\) is blown up by two sectors for each sign
-\(\sigma\).
-
-\paragraph{Sector \(T_{\sigma,1}\), \(b^2\leq a\).}
-Use \(a=r^2\), \(b=ry\).  Then
-\begin{equation}
-  X_{T_{\sigma,1}}(r,y)
-  =
-  \left(
-    r^2,\,
-    \frac{(1-r^2)(1+\sigma ry)}{2},\,
-    \frac{(1-r^2)(1-\sigma ry)}{2}
-  \right),
-  \qquad
-  0\leq r,y\leq 1 .
-\end{equation}
-The Jacobian is
-\begin{equation}
-  J_{T_{\sigma,1}}(r,y)=r^2(1-r^2).
-\end{equation}
-The polynomial factorizes as
-\begin{equation}
-  \F_{T_{\sigma,1}}(r,y)
-  =
-  m^2r^2
-  \left[
-    (2-r^2)+(1-r^2)^2y^2
-  \right]
-  -
-  \ii0 .
-\end{equation}
-The expected monomial is
-\begin{equation}
-  M_{T_{\sigma,1}}(r,y)=r^2 .
-\end{equation}
-
-\paragraph{Sector \(T_{\sigma,2}\), \(a\leq b^2\).}
-Use \(a=b^2y\).  Then
-\begin{equation}
-  X_{T_{\sigma,2}}(b,y)
-  =
-  \left(
-    b^2y,\,
-    \frac{(1-b^2y)(1+\sigma b)}{2},\,
-    \frac{(1-b^2y)(1-\sigma b)}{2}
-  \right),
-  \qquad
-  0\leq b,y\leq 1 .
-\end{equation}
-The Jacobian is
-\begin{equation}
-  J_{T_{\sigma,2}}(b,y)
-  =
-  \frac12\,b^2(1-b^2y).
-\end{equation}
-The polynomial factorizes as
-\begin{equation}
-  \F_{T_{\sigma,2}}(b,y)
-  =
-  m^2b^2
-  \left[
-    y(2-b^2y)+(1-b^2y)^2
-  \right]
-  -
-  \ii0 .
-\end{equation}
-The expected monomial is
-\begin{equation}
-  M_{T_{\sigma,2}}(b,y)=b^2 .
-\end{equation}
-At exact threshold, the four threshold sectors reconstruct the original
-massive triangle as
-\begin{align}
-  C_0(4m^2;m^2)
-  &=
-  -\Gamma(\alpha)
-  \sum_{\sigma=\pm1}
-  \left[
-    \int_0^1\dd r
-    \int_0^1\dd y\,
-    I_{T_{\sigma,1}}(r,y)
-  \right.
-  \notag\\
-  &\hspace{4.7cm}
-  \left.
-    +
-    \int_0^1\dd b
-    \int_0^1\dd y\,
-    I_{T_{\sigma,2}}(b,y)
-  \right],
-  \\
-  I_{T_{\sigma,1}}(r,y)
-  &=
-  r^2(1-r^2)\,
-  \F(X_{T_{\sigma,1}}(r,y))^{-\alpha},
-  \\
-  I_{T_{\sigma,2}}(b,y)
-  &=
-  \frac12 b^2(1-b^2y)\,
-  \F(X_{T_{\sigma,2}}(b,y))^{-\alpha}.
-\end{align}
-Here \(\U=1\) after the simplex constraint, so no separate power of \(\U\)
-appears in the last two lines.
-
 \section{Direct approach}
 
 In the direct approach, each sector map \(X_s\) is substituted explicitly into
@@ -488,49 +350,6 @@ The full massless triangle is therefore
   (1+z)^{2\eps}.
 \end{align}
 
-\subsection{Threshold sectors}
-
-At \(s=4m^2\), the direct threshold integrands are
-\begin{align}
-  I_{T_{\sigma,1}}^{\mathrm{dir}}(r,y)
-  &=
-  r^2(1-r^2)\,
-  (r^2)^{-\alpha}
-  \left(
-    m^2\left[(2-r^2)+(1-r^2)^2y^2\right]-\ii0
-  \right)^{-\alpha},
-  \\
-  I_{T_{\sigma,2}}^{\mathrm{dir}}(b,y)
-  &=
-  \frac12 b^2(1-b^2y)\,
-  (b^2)^{-\alpha}
-  \left(
-    m^2\left[y(2-b^2y)+(1-b^2y)^2\right]-\ii0
-  \right)^{-\alpha}.
-\end{align}
-The dependence on \(\sigma\) is only in the map \(X_T\), not in the
-factorized polynomial for this symmetric equal-mass triangle.
-These four direct threshold sectors reconstruct the threshold integral as
-\begin{align}
-  C_0(4m^2;m^2)
-  &=
-  -\Gamma(\alpha)
-  \sum_{\sigma=\pm1}
-  \left[
-    \int_0^1\dd r
-    \int_0^1\dd y\,
-    I_{T_{\sigma,1}}^{\mathrm{dir}}(r,y)
-  \right.
-  \notag\\
-  &\hspace{4.8cm}
-  \left.
-    +
-    \int_0^1\dd b
-    \int_0^1\dd y\,
-    I_{T_{\sigma,2}}^{\mathrm{dir}}(b,y)
-  \right].
-\end{align}
-
 \section{Indirect approach}
 
 The indirect approach keeps the Symanzik polynomials closed.  We assume only
@@ -627,183 +446,10 @@ When \(m=0\), and hence
   \phi_{S_a}(t,z)^{-1-\eps}.
 \end{align}
 
-\subsection{Using Cauchy remainder formula}
-
-Suppose
-\begin{equation}
-  M_s(y)=\prod_{a=1}^n y_a^{r_a},
-  \qquad
-  r_a\in\mathbb N .
-\end{equation}
-If \(F_s\) is divisible by \(M_s\), then repeated use of the Cauchy form of
-the Taylor remainder gives
-\begin{equation}
-  \phi_s(y)
-  =
-  \prod_{a:r_a>0}
-  \left[
-    \frac{1}{(r_a-1)!}
-    \int_0^1 \dd\lambda_a\,
-    (1-\lambda_a)^{r_a-1}
-  \right]
-  \left(
-    \prod_{a:r_a>0}
-    \partial_{y_a}^{r_a}
-  \right)
-  F_s(y^{(\lambda)}),
-\end{equation}
-where
-\begin{equation}
-  y_a^{(\lambda)}=
-  \begin{cases}
-    \lambda_a y_a, & r_a>0,\\
-    y_a, & r_a=0 .
-  \end{cases}
-\end{equation}
-This formula does not require opening \(\hF\).  The derivatives of
-\(F_s=\hF\circ X_s\) are supplied by the chain rules above.
-
-For the first endpoint sector,
-\begin{equation}
-  M_{S_1}(t,z)=t^2z.
-\end{equation}
-Introduce dummy variables \(T,Z\) and write
-\begin{equation}
-  F_{S_1}(T,Z)
-  =
-  \hF\left(
-    1-T,\,
-    \frac{T}{1+Z},\,
-    \frac{TZ}{1+Z}
-  \right).
-\end{equation}
-Then
-\begin{equation}
-  \phi_{S_1}^{\mathrm{C}}(t,z)
-  =
-  \int_0^1 \dd\lambda\,(1-\lambda)
-  \int_0^1 \dd\mu\,
-  \left[
-    \partial_T^2\partial_Z F_{S_1}(T,Z)
-  \right]_{T=\lambda t,\;Z=\mu z}.
-\end{equation}
-Equivalently, keeping the black box unopened,
-\begin{align}
-  \phi_{S_1}^{\mathrm{C}}(t,z)
-  &=
-  \int_0^1 \dd\lambda\,(1-\lambda)
-  \int_0^1 \dd\mu\,
-  \partial_T^2\partial_Z
-  \hF\left(
-    1-T,\,
-    \frac{T}{1+Z},\,
-    \frac{TZ}{1+Z}
-  \right)
-  \bigg|_{T=\lambda t,\;Z=\mu z}.
-\end{align}
-The second endpoint sector is obtained with
-\begin{equation}
-  F_{S_2}(T,Z)
-  =
-  \hF\left(
-    1-T,\,
-    \frac{TZ}{1+Z},\,
-    \frac{T}{1+Z}
-  \right),
-\end{equation}
-and the same Cauchy formula,
-\begin{equation}
-  \phi_{S_2}^{\mathrm{C}}(t,z)
-  =
-  \int_0^1 \dd\lambda\,(1-\lambda)
-  \int_0^1 \dd\mu\,
-  \left[
-    \partial_T^2\partial_Z F_{S_2}(T,Z)
-  \right]_{T=\lambda t,\;Z=\mu z}.
-\end{equation}
-Using these Cauchy-remainder coefficients, the complete massless triangle is
-\begin{align}
-  C_0(s;0)
-  &=
-  -\Gamma(1+\eps)
-  \sum_{a=1}^{2}
-  \int_0^1\dd t
-  \int_0^1\dd z\,
-  \frac{t}{(1+z)^2}\,
-  \hU(X_{S_a}(t,z))^{-1+2\eps}
-  \notag\\
-  &\hspace{3.2cm}\times
-  (t^2z)^{-1-\eps}\,
-  \left[\phi_{S_a}^{\mathrm{C}}(t,z)\right]^{-1-\eps}.
-\end{align}
-
-If we momentarily open the explicit massless triangle polynomial, then
-\begin{equation}
-  F_{S_1}(T,Z)
-  =
-  (-s-\ii0)\,\frac{T^2Z}{(1+Z)^2}.
-\end{equation}
-Therefore
-\begin{equation}
-  \partial_T^2\partial_Z F_{S_1}(T,Z)
-  =
-  2(-s-\ii0)\,\frac{1-Z}{(1+Z)^3}.
-\end{equation}
-The explicit \((\lambda,\mu)\)-integrand is
-\begin{equation}
-  (1-\lambda)\,
-  2(-s-\ii0)\,
-  \frac{1-\mu z}{(1+\mu z)^3}.
-\end{equation}
-Consequently,
-\begin{align}
-  \phi_{S_1}^{\mathrm{C}}(t,z)
-  &=
-  \int_0^1 \dd\lambda\,(1-\lambda)
-  \int_0^1 \dd\mu\,
-  2(-s-\ii0)\,
-  \frac{1-\mu z}{(1+\mu z)^3}
-  \notag\\
-  &=
-  \frac{-s-\ii0}{(1+z)^2},
-\end{align}
-as in the direct approach.
-The same computation holds in sector \(S_2\).  Hence the explicit
-Cauchy-remainder reconstruction of the massless triangle is
-\begin{align}
-  C_0(s;0)
-  &=
-  -\Gamma(1+\eps)
-  \sum_{a=1}^{2}
-  \int_0^1\dd t
-  \int_0^1\dd z\,
-  \frac{t}{(1+z)^2}
-  (t^2z)^{-1-\eps}
-  \left(\frac{-s-\ii0}{(1+z)^2}\right)^{-1-\eps}
-  \notag\\
-  &=
-  -2\Gamma(1+\eps)
-  (-s-\ii0)^{-1-\eps}
-  \int_0^1\dd t
-  \int_0^1\dd z\,
-  t^{-1-2\eps}
-  z^{-1-\eps}
-  (1+z)^{2\eps}.
-\end{align}
-
-The auxiliary integrals are well behaved because the assumed monomial
-divisibility implies that \(F_s=M_s\phi_s\) with \(\phi_s\) regular at the
-sector boundaries.  The Cauchy-remainder integrands are derivatives of a
-regular pullback evaluated on a compact domain.  In this explicit sector,
-\begin{equation}
-  \frac{1-\mu z}{(1+\mu z)^3}
-\end{equation}
-is bounded for \(0\leq \mu,z\leq 1\).
-
 \subsection{Using subtraction terms}
 
-The alternative is to avoid the auxiliary Cauchy-remainder integrals.  At
-interior points one simply evaluates
+The subtraction construction is the one used to expose the Laurent poles in
+\(\eps\).  At interior points one evaluates
 \begin{equation}
   \phi_s(y)=\frac{\hF(X_s(y))}{M_s(y)}.
 \end{equation}
@@ -884,7 +530,7 @@ The two-dimensional endpoint subtraction identity is
   \frac{G(0,0)}{2\eps^2}.
 \end{align}
 Each bracket is less singular at the corresponding endpoint.  This is the
-subtraction-term alternative to constructing \(\phi_s\) with auxiliary
+mechanism that turns endpoint singularities into explicit poles and finite
 integrals.
 Applied sector by sector, it gives the full massless triangle as
 \begin{align}
@@ -1001,97 +647,677 @@ implementation: only \(X_{S_a}\), \(J_{S_a}\), the known monomial \(t^2z\), and
 black-box values and derivative limits of \(\hU\) and \(\hF\) are required in
 each endpoint sector.
 
-\section{Python prototype in \texttt{FSD}}
+\section{General parametric structure}
 
-The folder \texttt{FSD} contains a first implementation of the construction
-above.  The executable entry point is
+For a scalar \(L\)-loop integral with \(N\) propagators of powers
+\(\nu_i\), define
 \begin{equation}
-  \texttt{FSD/FSD.py}.
+  A=\sum_{i=1}^{N}\nu_i,
+  \qquad
+  D=D_0+D_\eps\eps .
 \end{equation}
-It uses a local Python virtual environment,
-\begin{equation}
-  \texttt{FSD/.venv},
-\end{equation}
-and a local checkout of OneLOopBridge,
-\begin{equation}
-  \texttt{FSD/external/OneLOopBridge}.
-\end{equation}
-The benchmark value is obtained from the Python binding
-\begin{equation}
-  \texttt{oneloop\_bridge.three\_point(0,0,s,m2,m2,m2)}.
-\end{equation}
+With the usual projective Feynman-parameter normalization, the parametric
+integral has the schematic form
+\begin{align}
+  I(\nu)
+  &=
+  \mathcal P(D,\nu)\,
+  \frac{\Gamma(A-LD/2)}{\prod_i\Gamma(\nu_i)}
+  \int_{x_i\geq0}
+  \left[\prod_{i=1}^{N}\dd x_i\,x_i^{\nu_i-1}\right]
+  \delta\!\left(1-\sum_i x_i\right)
+  \notag\\
+  &\hspace{2.8cm}\times
+  \U(x)^{A-(L+1)D/2}\,
+  \F(x)^{-(A-LD/2)} .
+\end{align}
+The convention-dependent prefactor \(\mathcal P(D,\nu)\) contains the signs,
+powers of \(\ii\pi^{D/2}\), and any global normalization choices.  It is not
+part of the sector-local black-box construction.  What the sector processor
+needs are the affine powers
+\begin{align}
+  p_U(\eps)&=A-(L+1)D/2,\\
+  p_F(\eps)&=-(A-LD/2),
+\end{align}
+the parameter weights \(\nu_i-1\), and the retained black-box evaluators for
+\(\U\) and \(\F\).
 
-\subsection{Separation of prepared sectors and processing}
+After a sector map \(x=X_s(y)\), the topology-specific sector generator should
+separate each possible endpoint monomial source,
+\begin{align}
+  J_s(y)\prod_i X_{s,i}(y)^{\nu_i-1}N_s(y)
+  &=
+  J_{s,\mathrm{reg}}(y)
+  \prod_a y_a^{j_{s,a}},
+  \\
+  \U(X_s(y))
+  &=
+  M_{U,s}(y)\,\psi_s(y),
+  \qquad
+  M_{U,s}(y)=\prod_a y_a^{u_{s,a}},
+  \\
+  \F(X_s(y))
+  &=
+  M_{F,s}(y)\,\phi_s(y),
+  \qquad
+  M_{F,s}(y)=\prod_a y_a^{f_{s,a}}.
+\end{align}
+Here \(N_s\) denotes any smooth numerator or extra parameter-space factor.  The
+regular functions \(\psi_s\) and \(\phi_s\) are evaluated by black-box
+dual-number limits of \(\U\) and \(\F\); neither polynomial is symbolically
+opened inside the processor.  The full endpoint power of \(y_a\) is then
+\begin{equation}
+  \rho_{s,a}(\eps)
+  =
+  j_{s,a}
+  +
+  u_{s,a}\,p_U(\eps)
+  +
+  f_{s,a}\,p_F(\eps),
+\end{equation}
+with any additional numerator or measure monomial powers included in
+\(j_{s,a}\).  This is the object that decides the subtraction problem.  The
+implemented examples are logarithmic endpoint cases,
+\begin{equation}
+  \rho_{s,a}(\eps)=-1+c_{s,a}\eps,
+  \qquad
+  c_{s,a}\neq0,
+\end{equation}
+which produce explicit Laurent poles from
+\(\int_0^1\dd y_a\,y_a^{-1+c_{s,a}\eps}\).
 
-The code mirrors the split used in this note.  First, endpoint sectors are
-prepared independently of the Symanzik polynomials.  Each sector stores only
-the data
+For a uniform notation, let
+\begin{equation}
+  P\in\{\U,\F\},
+  \qquad
+  r_{P,s,a}\in\mathbb N,
+  \qquad
+  M_{P,s}(y)=\prod_{a\in A_s}y_a^{r_{P,s,a}},
+\end{equation}
+with \(r_{\U,s,a}=u_{s,a}\), \(r_{\F,s,a}=f_{s,a}\), and \(A_s\) the set of
+sector axes on which an endpoint monomial has been declared.  Define
+\begin{equation}
+  P_s(y)=\widehat P(X_s(y)),
+  \qquad
+  R_{P,s}(y)=\frac{P_s(y)}{M_{P,s}(y)}.
+\end{equation}
+Thus \(R_{\U,s}=\psi_s\) and \(R_{\F,s}=\phi_s\).  At an interior point this is
+just the quotient above.  At a boundary point, let
+\begin{equation}
+  B(y)=\{a\in A_s\;|\;y_a=0\},
+  \qquad
+  \bar B=A_s\setminus B,
+\end{equation}
+and introduce dual variables \(\eta_b\) for \(b\in B\).  The boundary jet is
+formed by
+\begin{equation}
+  \widehat y_a(\eta)=
+  \begin{cases}
+    \eta_a, & a\in B,\\
+    y_a, & a\notin B .
+  \end{cases}
+\end{equation}
+Then the regular residual is the Taylor coefficient
+\begin{equation}
+  R_{P,s}(y)
+  =
+  \frac{
+    \left[
+      \prod_{b\in B}\eta_b^{r_{P,s,b}}
+    \right]\,
+    \widehat P\!\left(X_s(\widehat y(\eta))\right)
+  }{
+    \prod_{a\in \bar B}y_a^{r_{P,s,a}}
+  }.
+\end{equation}
+Here \([\eta^n]\) denotes the Taylor coefficient, not the derivative.  In
+derivative notation the same statement is
+\begin{equation}
+  R_{P,s}(y)
+  =
+  \frac{
+    \left.
+    \left(\prod_{b\in B}
+      \frac{1}{r_{P,s,b}!}\,
+      \partial_{\eta_b}^{r_{P,s,b}}
+    \right)
+    \widehat P\!\left(X_s(\widehat y(\eta))\right)
+    \right|_{\eta=0}
+  }{
+    \prod_{a\in\bar B}y_a^{r_{P,s,a}}
+  }.
+\end{equation}
+The chain rule is applied at the level of truncated jets:
+\begin{equation}
+  J^{\mathbf r}_{B}\!\left(P_s\right)(y)
+  =
+  J^{\mathbf r}_{x}\!\left(\widehat P\right)\!\left(X_s(y)\right)
+  \circ
+  J^{\mathbf r}_{B}\!\left(X_s\right)(y),
+\end{equation}
+where
+\begin{equation}
+  \mathbf r=(r_{P,s,b})_{b\in B}.
+\end{equation}
+Equivalently, for the first two derivative orders,
+\begin{align}
+  \partial_a P_s(y)
+  &=
+  \sum_i
+  \frac{\partial \widehat P}{\partial x_i}(X_s(y))\,
+  \partial_a X_{s,i}(y),
+  \\
+  \partial_a\partial_b P_s(y)
+  &=
+  \sum_{i,j}
+  \frac{\partial^2 \widehat P}{\partial x_i\partial x_j}(X_s(y))\,
+  \partial_a X_{s,i}(y)\,
+  \partial_b X_{s,j}(y)
+  \notag\\
+  &\quad+
+  \sum_i
+  \frac{\partial \widehat P}{\partial x_i}(X_s(y))\,
+  \partial_a\partial_b X_{s,i}(y).
+\end{align}
+
+After extracting the declared monomials, every sector has the form
+\begin{equation}
+  I_s(\eps)
+  =
+  \int_{[0,1]^d}\dd^d y\,
+  \left[
+    \prod_{a\in A_s}y_a^{\rho_{s,a}(\eps)}
+  \right]
+  G_s(y,\eps),
+\end{equation}
+where
+\begin{equation}
+  G_s(y,\eps)
+  =
+  J_{s,\mathrm{reg}}(y)\,
+  R_{\U,s}(y)^{p_U(\eps)}\,
+  R_{\F,s}(y)^{p_F(\eps)}
+\end{equation}
+times any remaining regular numerator factor.  Write
+\begin{equation}
+  \rho_{s,a}(\eps)=\beta_{s,a}+c_{s,a}\eps,
+  \qquad
+  \beta_{s,a}\in\mathbb Z,
+\end{equation}
+and define the endpoint Taylor order
+\begin{equation}
+  N_{s,a}=\max(-\beta_{s,a}-1,0).
+\end{equation}
+For one endpoint variable,
+\begin{align}
+  \int_0^1\dd y\,y^{\beta+c\eps}G(y,\eps)
+  &=
+  \int_0^1\dd y\,y^{\beta+c\eps}
+  \left[
+    G(y,\eps)
+    -
+    \sum_{n=0}^{N}
+    \frac{y^n}{n!}
+    \partial_y^nG(0,\eps)
+  \right]
+  \notag\\
+  &\quad+
+  \sum_{n=0}^{N}
+  \frac{\partial_y^nG(0,\eps)}
+       {n!\,(\beta+n+1+c\eps)} .
+\end{align}
+The first line is finite at \(y=0\), while the second line contains the
+explicit \(\eps\)-poles.
+
+For several endpoint axes, introduce the Taylor projector
+\begin{equation}
+  (\mathcal T_a G)(y,\eps)
+  =
+  \sum_{n=0}^{N_{s,a}}
+  \frac{y_a^n}{n!}
+  \left[
+    \partial_{y_a}^nG(y,\eps)
+  \right]_{y_a=0},
+  \qquad
+  \mathcal R_a=1-\mathcal T_a .
+\end{equation}
+Then the recursive subtraction identity can be written compactly as
+\begin{align}
+  I_s(\eps)
+  &=
+  \sum_{B\subseteq A_s}
+  \sum_{\{0\leq n_b\leq N_{s,b}\}_{b\in B}}
+  \left[
+    \prod_{b\in B}
+    \frac{1}{
+      n_b!\,
+      (\beta_{s,b}+n_b+1+c_{s,b}\eps)
+    }
+  \right]
+  \notag\\
+  &\quad\times
+  \int
+  \dd y_{\bar B}\,
+  \left[
+    \prod_{a\in A_s\setminus B}
+    y_a^{\beta_{s,a}+c_{s,a}\eps}
+  \right]
+  \left[
+    \prod_{a\in A_s\setminus B}\mathcal R_a
+  \right]
+  \left[
+    \left.
+    \prod_{b\in B}\partial_{y_b}^{n_b}
+    G_s(y,\eps)
+    \right|_{y_B=0}
+  \right].
+\end{align}
+In the logarithmic case \(\beta_{s,a}=-1\), one has \(N_{s,a}=0\), and the
+identity reduces to
+\begin{align}
+  I_s(\eps)
+  &=
+  \sum_{B\subseteq A_s}
+  \left[
+    \prod_{b\in B}\frac{1}{c_{s,b}\eps}
+  \right]
+  \int
+  \dd y_{\bar B}\,
+  \left[
+    \prod_{a\in A_s\setminus B}
+    y_a^{-1+c_{s,a}\eps}
+  \right]
+  \notag\\
+  &\quad\times
+  \left[
+    \prod_{a\in A_s\setminus B}(1-\mathcal T_a)
+  \right]
+  \left[
+    G_s(y,\eps)
+  \right]_{y_B=0},
+  \qquad
+  (\mathcal T_aG)(y,\eps)=G(y,\eps)|_{y_a=0}.
+\end{align}
+Finally, expanding
+\begin{equation}
+  G_s(y,\eps)=\sum_{k\geq0}\eps^k G_s^{(k)}(y),
+  \qquad
+  \prod_{a\in A_s\setminus B}y_a^{c_{s,a}\eps}
+  =
+  \sum_{r\geq0}
+  \frac{\eps^r}{r!}
+  \left(
+    \sum_{a\in A_s\setminus B}c_{s,a}\log y_a
+  \right)^r,
+\end{equation}
+gives the Laurent coefficients explicitly as ordinary finite integrals.
+
+This audit leads to a useful interface boundary.  A topology definition must
+retain the global parametric metadata: loop count, propagator powers,
+dimension, prefactor description, and affine powers of \(\U\) and \(\F\).  A
+sector definition must retain the map, regular sector prefactor, monomial
+powers of \(\U\) and \(\F\), monomial powers from the Jacobian/measure or
+numerator, and the singular axes.  The generic processor can then assemble
+\(\rho_{s,a}\), evaluate \(\psi_s\) and \(\phi_s\) from dualized black-box
+evaluators, and apply the appropriate localized subtraction formula.
+
+The current numerical implementation still evaluates only the coefficients
+\(\epsilon^{-2},\epsilon^{-1},\epsilon^0\) and implements explicit formulas for
+zero, one, and two logarithmic endpoint axes.  Higher-rank endpoint structures
+and non-logarithmic endpoint powers require a recursive subtraction engine and
+a variable-length Laurent accumulator.  The metadata described above is now
+present so such a recursive engine can be added without changing the
+black-box/topology/sector boundary.
+
+\section{Outlook: Schwinger sampling with momentum-space numerators}
+
+The construction above assumes that the loop momenta have already been
+integrated out, so all non-trivial information enters through the Symanzik
+polynomials and possible parameter-space numerator factors.  A complementary
+path is useful when the denominator part should still be organized in
+Feynman/Schwinger parameters, but the numerator is easier to keep as a
+momentum-space black box.  Schematically, start from a regulated integral
+\begin{equation}
+  I[f]
+  =
+  \int \dd^{DL}k\,
+  \frac{f(k)}
+       {\prod_{e\in E}(D_e(k)+\ii0)^{\nu_e}} .
+\end{equation}
+Using Schwinger parameters, or equivalently the projective Feynman-parameter
+form of the same denominator product,
+\begin{equation}
+  \prod_{e\in E}\frac{1}{(D_e(k)+\ii0)^{\nu_e}}
+  =
+  \frac{\Gamma(\nu)}{\prod_e\Gamma(\nu_e)}
+  \int_{\mathbb P^{|E|-1}_+}
+  \prod_e \dd x_e\,x_e^{\nu_e-1}\,
+  \left[
+    \sum_e x_e(D_e(k)+\ii0)
+  \right]^{-\nu},
+  \qquad
+  \nu=\sum_e\nu_e ,
+\end{equation}
+one obtains an integral over positive edge parameters and loop momenta,
+without replacing \(f(k)\) by tensor-reduction formulae.  The quadratic
+denominator combination can be written schematically as
+\begin{equation}
+  \sum_e x_eD_e(k)
+  =
+  (k-Q(x))^T A(x)(k-Q(x))+\V(x),
+  \qquad
+  \V(x)=\frac{\F(x)}{\U(x)} ,
+\end{equation}
+with the appropriate \(+\ii0\) prescription or later contour deformation
+understood.  Introducing an overall Schwinger scale and auxiliary momentum
+variables then gives a representation of the schematic form
+\begin{align}
+  I[f]
+  &\propto
+  \int_{\mathbb P^{|E|-1}_+}
+  \prod_e \dd x_e\,x_e^{\nu_e-1}\,
+  \frac{1}{\U(x)^{D/2}\,\V(x)^\omega}
+  \notag\\
+  &\quad\times
+  \int_0^\infty \dd\lambda\,
+  \lambda^{\omega-1}e^{-\lambda}
+  \int \dd\mu(q)\,
+  f\!\left(k(x,q,\lambda)\right),
+\end{align}
+where
+\begin{equation}
+  \omega=\sum_e\nu_e-\frac{DL}{2}.
+\end{equation}
+Here \(\dd\mu(q)\) denotes a fixed reference measure for the auxiliary
+momentum variables after the quadratic form has been normalized.  The important
+feature is not the particular choice of that reference measure.  The important
+feature is that the numerator remains a callable function of momenta, while
+the Feynman-parameter part still exposes \(\U\), \(\F\), endpoint monomials,
+and sector maps to the same FSD machinery as before.
+
+After sector decomposition of the parameter variables, the intended structure
+is
+\begin{align}
+  I[f]
+  &=
+  \sum_s
+  \int_{[0,1]^{d_s}}\dd y
+  \int\dd\lambda\,\dd\mu(q)\,
+  \prod_{a\in A_s}y_a^{\rho_{s,a}(\eps)}
+  \,
+  G_s(y,\lambda,q;\eps)\,
+  f\!\left(k_s(y,\lambda,q)\right).
+\end{align}
+The subtraction operators act on the sector variables \(y_a\).  The auxiliary
+variables \(\lambda\) and \(q\) are spectators for the endpoint algebra:
+\begin{equation}
+  \mathcal S_s
+  \left[
+    G_s(y,\lambda,q;\eps)\,
+    f(k_s(y,\lambda,q))
+  \right],
+\end{equation}
+with \(\mathcal S_s\) the same local Taylor-subtraction operator used for the
+ordinary parameter-space integrand.  Thus the future topology object would
+store not only \(\U\), \(\F\), and the parametric exponents, but also the
+momentum routing, the quadratic denominator data, and the map from sampled
+auxiliary variables to loop momenta.  The integrand definition would expose a
+momentum-space numerator callback
+\begin{equation}
+  f:\; k \longmapsto f(k),
+\end{equation}
+and FSD would provide
+\begin{equation}
+  z\in[0,1]^n
+  \longmapsto
+  \left(K_{\mathrm{FSD}}(z),\,k(z)\right),
+\end{equation}
+so that the numerical integrand is \(K_{\mathrm{FSD}}(z)f(k(z))\).
+
+This is conceptually different from momentum-space tropical sampling, such as
+the approach implemented in \texttt{momtrop}; see
+\url{https://github.com/alphal00p/momtrop}.  The FSD version would deliberately
+use sector decomposition and subtraction for the Feynman-parameter part.  It
+therefore inherits the larger sector count and will not compete with tropical
+sampling on the factorial-sector problem for finite parameter integrals.  The
+advantage is different: the same framework can expose endpoint poles in
+\(\eps\), and, once contour deformation or another threshold treatment is
+added, it is not tied to a finite Euclidean integration domain.  For generic
+higher-order endpoint subtractions one may also need derivatives of the
+composed numerator \(f(k_s(y,\lambda,q))\), or an explicit regularity contract
+showing that only boundary values are required.  This is a boundary condition
+for the future backend, not part of the current scalar implementation.
+Moreover, the momentum-space numerator must be understood as a
+\(D\)-dimensional numerator, not merely a four-dimensional one.  Rational
+terms from the \((D-4)\)-dimensional components have to be retained, for
+example through the usual \(\mu\)-term bookkeeping
+\begin{equation}
+  k_{[D]}^2
+  =
+  k_{[4]}^2
+  +
+  \mu^2,
+  \qquad
+  \mu^2 \equiv k_{[D-4]}^2 ,
+\end{equation}
+with signs and metric conventions fixed consistently with the chosen
+denominator prescription.
+
+
+\section{Implementation in \texttt{FSD}}
+
+The repository contains the modular implementation used for the numerical
+checks described above.  It is referred to simply as \texttt{FSD}.  The
+executable entry point is
+\begin{equation}
+  \texttt{FSD.py}.
+\end{equation}
+A local virtual environment is created at
+\begin{equation}
+  \texttt{.venv},
+\end{equation}
+and OneLOopBridge is required as an external dependency.  The benchmark values
+are obtained from the Python binding calls
+\begin{align}
+  &\texttt{oneloop\_bridge.three\_point(0,0,s,m2,m2,m2)},
+  \\
+  &\texttt{oneloop\_bridge.four\_point(0,0,0,0,s12,s23,m2,m2,m2,m2)}.
+\end{align}
+The only implementation described here is the modular \texttt{FSD} code.
+
+\subsection{Code organization}
+
+The implementation is organized so that the black-box rule is visible directly
+in the code layout:
+\begin{itemize}
+  \item \texttt{FSD.py} is the command-line steering layer.  It parses options,
+  validates kinematics, builds the request object, prints summaries, calls the
+  benchmark, launches the integration, and renders the final table.
+  \item \texttt{sectors\_generator.py} owns the declarative sector data:
+  sector maps \(X_s\), regular sector prefactors, endpoint monomials
+  \(M_{U,s}\) and \(M_{F,s}\), monomial powers from Jacobian/measure or
+  numerator factors, singular axes, and generated Symbolica callbacks for
+  these expressions.
+  \item \texttt{integrand.py} owns the topology definition and the generic
+  \texttt{SectorProcessor}.  The topology retains \(\U\) and \(\F\) for
+  display and evaluator construction, but the processor never substitutes a
+  sector map into them symbolically.
+  \item \texttt{integrator.py} owns the Havana sampling loop, manual Laurent
+  coefficient accumulation, progress reporting, target-accuracy stopping, and
+  hot-path timing profile.
+  \item \texttt{benchmark.py}, \texttt{formatting.py}, \texttt{definitions.py},
+  and \texttt{utils.py} isolate OneLOopBridge access, colored output, shared
+  data containers, and parenthesis uncertainty formatting.
+  \item \texttt{dot\_topology.py} is the scaffold for future
+  GammaLoop-convention DOT-file input.  It is wired into the same topology and
+  sector interfaces, but its parser, topology builder, sector issuer, and
+  benchmark mapping intentionally raise \texttt{NotImplementedError}.
+\end{itemize}
+
+\subsection{DOT-file extension path}
+
+The command-line option
+\begin{equation}
+  \texttt{--dot-file path/to/integral.dot}
+\end{equation}
+selects the future GammaLoop DOT-backed topology path.  The current code
+validates that the file exists and then dispatches to
+\texttt{GammaLoopDotTopologyBuilder}.  The intended development sequence is
+\begin{align}
+  \texttt{DOT file}
+  &\longrightarrow
+  \texttt{GammaLoopTopologyData},
+  \\
+  \texttt{GammaLoopTopologyData}
+  &\longrightarrow
+  \texttt{TopologyDefinition},
+  \\
+  \texttt{GammaLoopTopologyData}
+  &\longrightarrow
+  \left\{\texttt{SectorDefinition}\right\}.
+\end{align}
+This keeps arbitrary future topologies on the same path as the built-in
+triangle and box examples: topology-specific information is converted into
+retained Symanzik expressions and declarative sector metadata, while the
+\texttt{SectorProcessor} remains generic and continues to consume only
+black-box evaluators and sector callbacks.
+
+\subsection{Prepared sectors and black-box processing}
+
+The code mirrors the split used in this note.  Sectors are prepared
+independently of the Symanzik polynomials.  Each sector stores only
 \begin{equation}
   \left\{
     X_s,\,
-    J_s,\,
-    M_s
-  \right\}.
+    J_{s,\mathrm{reg}},\,
+    M_{U,s},\,
+    M_{F,s},\,
+    \text{measure/numerator monomial powers},\,
+    \text{singular axes}
+  \right\},
 \end{equation}
-For the current prototype these are just \(S_1\) and \(S_2\).  Threshold
-sectors are intentionally not implemented yet.
-
-The processing layer then receives the prepared sectors together with two
-black-box Symbolica evaluators,
+plus Symbolica evaluators generated from these known sector expressions.  The
+processing layer receives these prepared sectors together with black-box
+Symbolica evaluators
 \begin{equation}
-  \hU(x_0,x_1,x_2;s,m^2),
+  \hU(x;p),
   \qquad
-  \hF(x_0,x_1,x_2;s,m^2).
+  \hF(x;p),
 \end{equation}
-After these evaluators are built, the processing code does not inspect or
-symbolically rewrite the expressions for \(\U\) or \(\F\).  In particular,
-\(\phi_s\) is obtained from
+where \(p\) denotes the external invariants and masses.  After the evaluators
+are built, the processing code does not inspect or symbolically rewrite the
+expressions for \(\U\) or \(\F\).
+
+At runtime the processor receives only a \texttt{SectorDefinition}, a
+\texttt{TopologyDefinition}, and numeric sample points.  For a sector point
+\(y\) it evaluates
 \begin{equation}
-  \phi_s(t,z)
-  =
-  \frac{\hF(X_s(t,z))}{M_s(t,z)}
+  x = X_s(y),
+  \qquad
+  \hU(x),
+  \qquad
+  \hF(x),
+  \qquad
+  J_s(y),
 \end{equation}
-at interior points, and from Symbolica dual-number derivatives at boundary
-points.  The dual-number jets are propagated through the known map \(X_s\) and
-then through the black-box evaluator for \(\hF\).  This realizes the chain-rule
-construction described in the previous sections.
+through prebuilt Symbolica evaluators.  If the sector has no endpoint
+monomial, the contribution is evaluated directly.  If a monomial is declared,
+the residuals
+\begin{equation}
+  \psi_s(y)=\frac{\hU(X_s(y))}{M_{U,s}(y)},
+  \qquad
+  \phi_s(y)=\frac{\hF(X_s(y))}{M_{F,s}(y)}
+\end{equation}
+are evaluated by these quotients in the interior.  On endpoint samples the
+same quantities are recovered from Taylor coefficients of dualized black-box
+\(\hU\) and \(\hF\) evaluators.  The dual jets of the known sector map provide
+the chain-rule input, so no symbolic expansion of \(\U(X_s(y))\) or
+\(\F(X_s(y))\) is performed.  The scalar \(\hU\) and \(\hF\) evaluators are
+constructed once with the topology.  Dualized evaluators are cached by their
+requested Taylor shape and are obtained by copying these scalar evaluators
+before applying Symbolica's dualization step.
 
-\subsection{Havana sampling}
+The generic processor then constructs
+\begin{equation}
+  g_s(y;\eps)
+  =
+  J_{s,\mathrm{reg}}(y)\,
+  \psi_s(y)^{p_U(\eps)}\,
+  \phi_s(y)^{p_F(\eps)},
+\end{equation}
+assembles the endpoint powers \(\rho_{s,a}(\eps)\), and applies the declared
+localized subtraction formula.  Zero, one, and two logarithmic singular axes
+are supported explicitly.  Higher-rank or non-logarithmic endpoint structures
+raise an error instead of being guessed.
 
-The prototype uses Symbolica's Havana integrator as a sampler rather than as a
-single black-box scalar integrator.  One adaptive grid is used for all
-endpoint-sector contributions:
+\subsection{Havana sampling and stopping}
+
+\texttt{FSD} uses Symbolica's Havana integrator as a sampler rather than as a
+single black-box scalar integrator.  One discrete dimension chooses the sector
+and each sector has a continuous adaptive grid of the same dimension:
 \begin{equation}
   \text{discrete sector id}
   \quad\otimes\quad
-  (t,z)\in[0,1]^2.
+  y\in[0,1]^d.
 \end{equation}
-Lower-support subtraction terms are localized into this same two-dimensional
-domain by multiplying by a unit-density dummy integration over the unused
-variable.  Thus the \(z\)-edge term is represented as a function of \((t,z)\)
-which is independent of \(t\), and the corner term is represented as a constant
-function of \((t,z)\).  This avoids maintaining separate Havana grids for
-two-dimensional, one-dimensional, and zero-dimensional pieces.
+Lower-support subtraction pieces are localized into the same highest-dimensional
+sample space by dummy unit-density dependence on unused variables.  This avoids
+separate grids for bulk, edge, and corner pieces.
 
-For every batch, the code samples points from the single grid, evaluates all
-Laurent coefficients on those same points, and fills its own accumulators.  The
-Havana grid is trained only with the absolute value of the finite-part
-integrand.  In Symbolica's sampled representation, the first entry of
-\(\texttt{sample.weights}\) is the full Monte Carlo weight used in the manual
-accumulator.
+Each sampled point contributes to all Laurent coefficients through the same
+manual accumulator,
+\begin{equation}
+  A_k
+  =
+  \frac{1}{N}\sum_{n=1}^{N}
+  w_n\,I_{k,s_n}(y_n),
+  \qquad
+  k\in\{-2,-1,0\}.
+\end{equation}
+Havana is trained only on the finite-part magnitude used as an importance
+function.  The adaptive grid is cloned at the beginning of an iteration; batch
+training samples are accumulated into the clone and merged back into the live
+grid only at the end of a completed iteration.
 
-The integration loop reports progress with \(\texttt{progressbar2}\).  The bar
-shows the current iteration, the accumulated number of sampled points against
-the nominal target \(N_{\rm iter}N_{\rm batch}\), the live relative Monte Carlo
-error maxed over the Laurent coefficients, and, when a benchmark is available,
-the live pull maxed over the Laurent coefficients.  The live pull is computed
-after applying the same Gamma and prefactor conventions used in the final
-output table.
+The target-accuracy stop is evaluated after each accumulated batch, not only
+after a full Havana iteration.  Thus the final returned coefficients contain
+all completed batches up to the stopping point.  In parallel mode the driver
+keeps only a worker-sized window of batches in flight, so early stopping does
+not submit the entire iteration unnecessarily.  The option
+\(\texttt{--batch-size}\) therefore controls both vectorization size and
+mid-iteration stopping granularity.
+
+\subsection{Timing profile}
+
+The timing profile reported by the progress bar and final table is a work-time
+profile:
+\begin{equation}
+  T_{\rm prof}
+  =
+  T_{\rm Python}
+  +
+  T_{\rm eval}
+  +
+  T_{\rm Havana}.
+\end{equation}
+Here \(T_{\rm eval}\) is the sum of Symbolica evaluator wall times over all
+workers, \(T_{\rm Python}\) is NumPy and Python glue on workers plus
+master-side submission, result retrieval, accumulation, and progress rendering,
+and \(T_{\rm Havana}\) is Havana sampling, training accumulation, grid merge,
+and grid update time.  The displayed evaluator average is
+\begin{equation}
+  \langle t_{\rm eval}\rangle
+  =
+  \frac{10^6\,T_{\rm eval}}{N_{\rm accepted}}
+  \quad
+  \text{microseconds per sample per worker},
+\end{equation}
+because \(T_{\rm eval}\) is already summed over workers.
 
 \subsection{Implemented modes and conventions}
 
-The command-line interface supports two modes.  In massive mode, with
-\(m>0\) and \(s<4m^2\), the integral is finite and the endpoint monomial
+For the triangle, the command-line interface supports massive and massless
+modes.  In the validated finite massive region, endpoint monomial
 factorization is not applied.  The implementation evaluates
 \begin{equation}
   C_0(s;m^2)
@@ -1104,8 +1330,7 @@ factorization is not applied.  The implementation evaluates
   \hU(X_{S_a}(t,z))^{-1}\,
   \hF(X_{S_a}(t,z))^{-1}.
 \end{equation}
-
-In massless mode, the implementation uses the subtraction formula of
+In massless Euclidean mode, the implementation uses the subtraction formula of
 Section~3.2 and returns the coefficients of
 \begin{equation}
   C_0(s;0)
@@ -1118,40 +1343,30 @@ Section~3.2 and returns the coefficients of
   +
   \mathcal O(\epsilon).
 \end{equation}
+
 The default output convention is the OneLOopBridge convention.  In this
 convention the universal Gamma/Euler factors are stripped from the displayed
-Laurent coefficients.  For the massless endpoint representation this also
-amounts to removing the finite convention term
-\begin{equation}
-  \frac{\pi^2}{6}\,C_{-2}
-\end{equation}
-from the direct sector-parametric finite coefficient.  With this convention,
-the prototype compares directly to the values returned by OneLOopBridge.
-The separate command-line option \(\texttt{--prefactor-convention}\) controls
-only the overall scalar-integral normalization shown in the output table.  The
-default value \(\texttt{raw}\) displays the raw OneLOopBridge normalization.
-The value \(\texttt{feynman}\) multiplies both the FastSecDec coefficients and
-the benchmark coefficients by
+Laurent coefficients.  For massless endpoint representations this also amounts
+to applying the finite convention shift described in the direct construction.
+The option \(\texttt{--prefactor-convention}\) controls only the overall
+scalar-integral normalization shown in the output table.  The default value
+\(\texttt{raw}\) displays the raw OneLOopBridge normalization.  The value
+\(\texttt{feynman}\) multiplies both the \texttt{FSD} coefficients and the
+benchmark coefficients by
 \begin{equation}
   \texttt{TO\_FEYNMAN}
   =
-  -\frac{1}{16\pi^2},
+  -\frac{1}{16\pi^2}.
 \end{equation}
-which is the OneLOopBridge factor converting raw scalar-integral coefficients
-to its Feynman-normalized convention.  In either display convention, values
-with Monte Carlo uncertainty are printed with the two-significant-digit
-parenthesis notation.
+In either display convention, values with Monte Carlo uncertainty are printed
+with the two-significant-digit parenthesis notation.
 
 \subsection{Implemented box example}
 
-The prototype also contains a finite massive scalar box example with massless
-external legs,
+The implementation also contains a scalar box example with massless external
+legs,
 \begin{equation}
   D_0(0,0,0,0,s_{12},s_{23};m^2).
-\end{equation}
-The benchmark call is
-\begin{equation}
-  \texttt{oneloop\_bridge.four\_point(0,0,0,0,s12,s23,m2,m2,m2,m2)}.
 \end{equation}
 For equal internal masses, the simplex polynomial used by the implementation is
 \begin{equation}
@@ -1190,7 +1405,7 @@ parameters.  The Jacobian is
 \begin{equation}
   J_b(y)=\frac{1}{(1+y_0+y_1+y_2)^4}.
 \end{equation}
-The same code path now also implements the massless endpoint-subtracted box.
+
 For \(m=0\), each primary sector has the form
 \begin{equation}
   \F(X_b(y))
@@ -1232,7 +1447,7 @@ Taylor coefficients at \(u=0\) and \(v=0\).  The one-monomial sector \(L\) uses
 the one-variable subtraction formula, while the \(P\) and \(Q\) sectors use the
 two-variable subtraction formula.
 
-The raw coefficients produced directly by these massless box sectors are
+The raw coefficients produced directly by the massless box sectors are
 converted to the OneLOopBridge stripped convention as
 \begin{equation}
   D_{-2}=A_{-2},
@@ -1242,166 +1457,39 @@ converted to the OneLOopBridge stripped convention as
   D_0=A_0+A_{-1}+\frac{\pi^2}{6}A_{-2}.
 \end{equation}
 The current massless box command validates Euclidean kinematics,
-\(s_{12}<0\) and \(s_{23}<0\).  Timelike or threshold kinematics would require
-a contour deformation or threshold regularization, which is outside the
-present prototype.
+\(s_{12}<0\) and \(s_{23}<0\).  Non-Euclidean massless kinematics are outside
+the present implementation.
 
 \subsection{Example commands}
 
-The massive below-threshold check can be run with
+The massive triangle check can be run with
 \begin{equation}
-  \texttt{FSD/.venv/bin/python FSD/FSD.py --s 1.0 --m 1.0 --mode massive}.
+  \texttt{.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0}.
 \end{equation}
 The same check in the Feynman-normalized prefactor convention can be displayed
 with
 \begin{align}
-  &\texttt{FSD/.venv/bin/python FSD/FSD.py --s 1.0 --m 1.0 --mode massive}
+  &\texttt{.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0}
   \notag\\
   &\texttt{--prefactor-convention feynman}.
 \end{align}
-The massless Euclidean check can be run with
+The massless Euclidean triangle check can be run with
 \begin{equation}
-  \texttt{FSD/.venv/bin/python FSD/FSD.py --s -1.0 --m 0.0 --mode massless}.
+  \texttt{.venv/bin/python FSD.py --integral triangle --s -1.0 --m 0.0}.
 \end{equation}
-The timelike command with \(s>0\) is intentionally rejected in the current
-prototype because no contour deformation or threshold regularization is
-implemented.
 The massive box example can be run with
 \begin{equation}
-  \texttt{FSD/.venv/bin/python FSD/FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0}.
+  \texttt{.venv/bin/python FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0}.
 \end{equation}
-The massless box check can be run with
+The massless Euclidean box check can be run with
 \begin{equation}
-  \texttt{FSD/.venv/bin/python FSD/FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
+  \texttt{.venv/bin/python FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
 \end{equation}
-The corresponding timelike massless box command is rejected for the same
-reason as the timelike triangle.
-The implementation intentionally imports neither \texttt{scipy} nor
-\texttt{sympy}; all symbolic handling is done through Symbolica evaluators.
-
-\section{Implementation of the modular \texttt{FSD\_v2} prototype}
-
-The sibling folder \texttt{FSD\_v2} is the modular reimplementation of the
-prototype.  Its implementation is organized so that the black-box rule is
-visible directly in the code layout:
-\begin{itemize}
-  \item \texttt{FSD.py} is only the command-line steering layer.  It parses
-  options, validates kinematics, builds the request object, prints summaries,
-  calls the benchmark, launches the integration, and renders the final table.
-  \item \texttt{sectors\_generator.py} owns the declarative sector data:
-  sector maps \(X_s\), regular Jacobians \(J_s\), endpoint monomials \(M_s\),
-  singular axes, and generated Symbolica callbacks for these expressions.
-  \item \texttt{integrand.py} owns the topology definition and the generic
-  \texttt{SectorProcessor}.  The topology retains \(\U\) and \(\F\) for
-  display and evaluator construction, but the processor never substitutes a
-  sector map into them symbolically.
-  \item \texttt{integrator.py} owns the Havana sampling loop, manual Laurent
-  coefficient accumulation, progress reporting, target-accuracy stopping, and
-  hot-path timing profile.
-  \item \texttt{benchmark.py}, \texttt{formatting.py}, \texttt{definitions.py},
-  and \texttt{utils.py} isolate OneLOopBridge access, colored output, shared
-  data containers, and parenthesis uncertainty formatting.
-\end{itemize}
-
-At runtime the processor receives only a \texttt{SectorDefinition}, a
-\texttt{TopologyDefinition}, and numeric sample points.  For a sector point
-\(y\) it evaluates
-\begin{equation}
-  x = X_s(y),
-  \qquad
-  \hU(x),
-  \qquad
-  \hF(x),
-  \qquad
-  J_s(y),
-\end{equation}
-through prebuilt Symbolica evaluators.  If the sector has no endpoint
-monomial, the contribution is evaluated directly.  If a monomial is declared,
-the residual
-\begin{equation}
-  \phi_s(y)=\frac{\hF(X_s(y))}{M_s(y)}
-\end{equation}
-is evaluated by this quotient in the interior.  On endpoint samples the same
-quantity is recovered from the Taylor coefficients of a dualized black-box
-\(\hF\) evaluator.  The dual jets of the known sector map provide the chain
-rule input, so no symbolic expansion of \(\F(X_s(y))\) is performed.
-
-The generic processor then constructs
-\begin{equation}
-  g_s(y;\eps)
-  =
-  J_s(y)\,
-  \hU(X_s(y))^{p_U+2\eps}\,
-  \phi_s(y)^{-p_F-\eps},
-\end{equation}
-and applies the declared localized subtraction formula.  Zero, one, and two
-singular axes are supported explicitly.  Stronger endpoint structures raise an
-error instead of being guessed.
-
-The Havana driver samples one discrete sector dimension and the common
-continuous sector dimension.  Lower-support subtraction pieces are localized
-into the same highest-dimensional sample space by dummy unit-density
-dependence on unused variables.  Each sampled point therefore contributes to
-all Laurent coefficients through the same manual accumulator,
-\begin{equation}
-  A_k
-  =
-  \frac{1}{N}\sum_{n=1}^{N}
-  w_n\,I_{k,s_n}(y_n),
-  \qquad
-  k\in\{-2,-1,0\}.
-\end{equation}
-Havana is trained only on the finite-part magnitude used as an importance
-function.  The adaptive grid is cloned at the beginning of an iteration; batch
-training samples are accumulated into the clone and merged back into the live
-grid only at the end of a completed iteration.
-
-The target-accuracy stop is evaluated after each accumulated batch, not only
-after a full Havana iteration.  Thus the final returned coefficients contain
-all completed batches up to the stopping point.  In parallel mode the driver
-keeps only a worker-sized window of batches in flight, so early stopping does
-not submit the entire iteration unnecessarily.  The option
-\(\texttt{--batch-size}\) therefore controls both vectorization size and
-mid-iteration stopping granularity.
-
-The timing profile reported by the progress bar and final table is a work-time
-profile:
-\begin{equation}
-  T_{\rm prof}
-  =
-  T_{\rm Python}
-  +
-  T_{\rm eval}
-  +
-  T_{\rm Havana}.
-\end{equation}
-Here \(T_{\rm eval}\) is the sum of Symbolica evaluator wall times over all
-workers, \(T_{\rm Python}\) is NumPy and Python glue on workers plus master-side
-submission, result retrieval, accumulation, and progress rendering, and
-\(T_{\rm Havana}\) is Havana sampling, training accumulation, grid merge, and
-grid update time.  The displayed evaluator average is
-\begin{equation}
-  \langle t_{\rm eval}\rangle
-  =
-  \frac{10^6\,T_{\rm eval}}{N_{\rm accepted}}
-  \quad
-  \text{microseconds per sample per worker},
-\end{equation}
-because \(T_{\rm eval}\) is already summed over workers.
-
-The current supported commands are, for example,
-\begin{align}
-  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0},
-  \\
-  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral triangle --s -1.0 --m 0.0},
-  \\
-  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0},
-  \\
-  &\texttt{FSD\_v2/.venv/bin/python FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
-\end{align}
 Massless timelike commands, such as
 \(\texttt{--integral triangle --s 1.0 --m 0.0}\), are rejected by validation.
 OneLOopBridge is required in all runs because the implementation always
-compares the Laurent coefficients to a benchmark value.
+compares the Laurent coefficients to a benchmark value.  The implementation
+intentionally imports neither \texttt{scipy} nor \texttt{sympy}; all symbolic
+handling is done through Symbolica evaluators.
 
 \end{document}

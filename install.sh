@@ -70,4 +70,4 @@ EOF
   exit 1
 fi
 
-echo "FSD_v2 environment ready: ${VENV_DIR}"
+echo "FSD environment ready: ${VENV_DIR}"

@@ -12,7 +12,7 @@ from typing import Any
 from definitions import BenchmarkResult, IntegralRequest
 
 
-SETUP_HINT = """OneLOopBridge is required for FSD_v2.
+SETUP_HINT = """OneLOopBridge is required for FSD.
 
 Install it with one of:
   ONELOOPBRIDGE_SRC=/path/to/OneLOopBridge ./install.sh
@@ -44,6 +44,12 @@ def compute_benchmark(request: IntegralRequest) -> BenchmarkResult:
         oneloop_bridge.set_renormalization_scale(float(request.mu))
     if request.onshell_threshold is not None:
         oneloop_bridge.set_onshell_threshold(float(request.onshell_threshold))
+
+    if request.integral == "dot":
+        from dot_topology import GammaLoopDotTopologyBuilder
+
+        GammaLoopDotTopologyBuilder.from_request(request).benchmark_request()
+        raise NotImplementedError("DOT-file benchmark mapping unexpectedly returned")
 
     m2 = complex(request.m * request.m, 0.0)
     if request.integral == "triangle":

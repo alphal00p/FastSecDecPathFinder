@@ -64,7 +64,11 @@ class SectorDefinition:
     subtraction_type: str
     description: str
     jit_compile_evaluators: bool = False
+    u_monomial_powers: list[int] | None = None
+    measure_monomial_powers: list[float] | None = None
+    numerator_monomial_powers: list[float] | None = None
     f_monomial_expr: Any = field(init=False)
+    u_monomial_expr: Any = field(init=False)
     dual_shape: list[tuple[int, ...]] = field(init=False)
     _map_evaluators: list[Any] = field(init=False, repr=False)
     _jacobian_evaluator: Any = field(init=False, repr=False)
@@ -81,12 +85,34 @@ class SectorDefinition:
             raise ValueError(f"{self.name}: jacobian_monomial_powers has wrong length")
         if len(self.map_exprs) == 0:
             raise ValueError(f"{self.name}: empty sector map")
+        if self.u_monomial_powers is None:
+            self.u_monomial_powers = [0 for _ in range(self.integration_dim)]
+        if self.measure_monomial_powers is None:
+            self.measure_monomial_powers = [0.0 for _ in range(self.integration_dim)]
+        if self.numerator_monomial_powers is None:
+            self.numerator_monomial_powers = [0.0 for _ in range(self.integration_dim)]
+        if len(self.u_monomial_powers) != self.integration_dim:
+            raise ValueError(f"{self.name}: u_monomial_powers has wrong length")
+        if len(self.measure_monomial_powers) != self.integration_dim:
+            raise ValueError(f"{self.name}: measure_monomial_powers has wrong length")
+        if len(self.numerator_monomial_powers) != self.integration_dim:
+            raise ValueError(f"{self.name}: numerator_monomial_powers has wrong length")
 
         params = _symbols(self.variable_names)
         self.f_monomial_expr = _monomial_expr(self.variable_names, self.f_monomial_powers)
+        self.u_monomial_expr = _monomial_expr(self.variable_names, self.u_monomial_powers)
+        # The docs describe each endpoint sector by a known monomial M_s(y).
+        # The dual shape is exactly the set of Taylor coefficients needed to
+        # recover U(X_s(y))/M_U(y) or F(X_s(y))/M_F(y) when one or more
+        # monomial variables vanish.
         self.dual_shape = dual_shape_from_powers(
-            [self.f_monomial_powers[axis] for axis in self.singular_axes]
+            [
+                max(self.u_monomial_powers[axis], self.f_monomial_powers[axis])
+                for axis in self.singular_axes
+            ]
         )
+        # Runtime map/Jacobian evaluation is done through generated callbacks.
+        # These expressions are never substituted into the U/F expressions.
         self._map_evaluators = [
             expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
             for expr in self.map_exprs
@@ -98,6 +124,9 @@ class SectorDefinition:
         self._dual_index_by_multi_index = {multi_index: i for i, multi_index in enumerate(self.dual_shape)}
         if self.dual_shape:
             for expr in self.map_exprs:
+                # Dualized map evaluators produce the chain-rule input jets for
+                # the black-box F evaluator, matching the construction in the
+                # implementation notes.
                 evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
                 evaluator.dualize([list(mi) for mi in self.dual_shape])
                 self._map_dual_evaluators.append(evaluator)
@@ -177,6 +206,9 @@ class SectorDefinition:
         for axis, coord in enumerate(y):
             unit = unit_by_axis.get(axis)
             for mi in self.dual_shape:
+                # Coordinates are encoded as dual variables only along declared
+                # singular axes.  Non-singular coordinates stay ordinary
+                # constants in the Taylor expansion.
                 if mi == zero_mi:
                     row.append(float(coord))
                 elif unit is not None and mi == unit:
@@ -211,6 +243,8 @@ class SectorDefinition:
             unit = unit_by_axis.get(axis)
             offset = axis * dual_len
             for j, mi in enumerate(self.dual_shape):
+                # Row layout: [y0 jets][y1 jets]... in the same dual-shape
+                # order later used by TopologyDefinition.f_taylor_batch.
                 if mi == zero_mi:
                     rows[:, offset + j] = rows_in[:, axis]
                 elif unit is not None and mi == unit:
@@ -401,6 +435,10 @@ def _box_massless_sectors(jit_compile_evaluators: bool) -> list[SectorDefinition
 
 def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
     """Return all prepared sectors for the requested supported integral."""
+    if request.integral == "dot":
+        from dot_topology import generate_sectors_from_dot_request
+
+        return generate_sectors_from_dot_request(request)
     if request.integral == "triangle":
         return [
             _triangle_sector(
