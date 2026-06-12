@@ -642,6 +642,55 @@ The second sector gives the same contribution, so the full massless triangle is
   \frac{(-s-\ii0)^{-1-\eps}}{2\eps^2}
   \right\}.
 \end{align}
+This is still a compact distributional expression.  The object implemented in
+\texttt{FSD} is the Laurent expansion of this expression.  Equivalently, the
+endpoint weights are expanded as plus distributions,
+\begin{equation}
+  y^{-1-a\eps}
+  =
+  -\frac{1}{a\eps}\,\delta(y)
+  +
+  \sum_{n=0}^{\infty}
+  \frac{(-a\eps)^n}{n!}
+  \left[\frac{\log^n y}{y}\right]_+ ,
+  \qquad a>0 ,
+\end{equation}
+or, after pairing with a smooth test function \(h\),
+\begin{equation}
+  \int_0^1\dd y\,y^{-1-a\eps}h(y)
+  =
+  -\frac{h(0)}{a\eps}
+  +
+  \sum_{n=0}^{\infty}
+  \frac{(-a\eps)^n}{n!}
+  \int_0^1\dd y\,
+  \frac{\log^n y}{y}\,
+  \bigl[h(y)-h(0)\bigr].
+\end{equation}
+The subtraction formula above arranges precisely that the non-localized
+remainders have the required endpoint zeros, so the plus prescription is
+realized numerically as ordinary integrable functions with explicit logarithms.
+For the explicit \(S_1\) remainder,
+\begin{align}
+  z^{-1-\eps}
+  \bigl[(1+z)^{2\eps}-1\bigr]
+  &=
+  \eps\,\frac{2\log(1+z)}{z}
+  \notag\\
+  &\quad
+  +
+  \eps^2\,
+  \frac{
+    2\log^2(1+z)-2\log z\,\log(1+z)
+  }{z}
+  +
+  \mathcal O(\eps^3),
+\end{align}
+which is regular at \(z=0\).  The same expansion is applied to the prefactor
+\((-s-\ii0)^{-1-\eps}\), to \(\Gamma(1+\eps)\), and to the black-box
+coefficient \(G_{S_a}\) in the generic implementation.  Thus \texttt{FSD}
+samples the coefficients of the Laurent series, not the unexpanded
+\(z^{-1-\eps}\) distribution itself.
 This expression was obtained without requiring any symbolic expansion in an
 implementation: only \(X_{S_a}\), \(J_{S_a}\), the known monomial \(t^2z\), and
 black-box values and derivative limits of \(\hU\) and \(\hF\) are required in
