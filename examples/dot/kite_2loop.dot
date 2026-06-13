@@ -1,0 +1,15 @@
+digraph kite_2loop {
+  graph [label="kite_2loop"];
+  ext0 [style=invis];
+  ext1 [style=invis];
+  v1; v2; v3; v4;
+
+  ext0 -> v1 [id=0, name="p_in", mom="p"];
+  v4 -> ext1 [id=1, name="p_out", mom="p"];
+
+  v1 -> v2 [id=2, name="e0", mass="mt"];
+  v2 -> v4 [id=3, name="e1", mass="mt"];
+  v1 -> v3 [id=4, name="e2", mass="mt"];
+  v3 -> v4 [id=5, name="e3", mass="mt"];
+  v2 -> v3 [id=6, name="e4", mass="mt"];
+}

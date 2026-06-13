@@ -1,0 +1,5 @@
+values:
+  s: -1.0
+  mt: 1.0
+replacements:
+  p*p: s

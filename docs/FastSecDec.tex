@@ -3,7 +3,23 @@
 \usepackage[a4paper,margin=1in]{geometry}
 \usepackage{amsmath,amssymb,mathtools}
 \usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
 \usepackage{hyperref}
+
+\lstdefinestyle{fsdcode}{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  breakatwhitespace=true,
+  frame=single,
+  framerule=0.2pt,
+  rulecolor=\color{black!25},
+  backgroundcolor=\color{black!3},
+  xleftmargin=0.5em,
+  xrightmargin=0.5em
+}
 
 \newcommand{\dd}{\mathrm d}
 \newcommand{\ii}{\mathrm i}
@@ -13,6 +29,7 @@
 \newcommand{\V}{\mathcal V}
 \newcommand{\hU}{\widehat{\mathcal U}}
 \newcommand{\hF}{\widehat{\mathcal F}}
+\newcommand{\hP}{\widehat P}
 \newcommand{\Dlt}{\Delta}
 
 \title{Fast Sector Decomposition from Black-Box Symanzik Polynomials}
@@ -766,14 +783,18 @@ opened inside the processor.  The full endpoint power of \(y_a\) is then
 \end{equation}
 with any additional numerator or measure monomial powers included in
 \(j_{s,a}\).  This is the object that decides the subtraction problem.  The
-implemented examples are logarithmic endpoint cases,
+logarithmic endpoint case is the simplest one,
 \begin{equation}
   \rho_{s,a}(\eps)=-1+c_{s,a}\eps,
   \qquad
   c_{s,a}\neq0,
 \end{equation}
 which produce explicit Laurent poles from
-\(\int_0^1\dd y_a\,y_a^{-1+c_{s,a}\eps}\).
+\(\int_0^1\dd y_a\,y_a^{-1+c_{s,a}\eps}\).  The generic interface is not
+restricted to this case: if
+\(\rho_{s,a}(\eps)=\beta_{s,a}+c_{s,a}\eps\) with a negative integer
+\(\beta_{s,a}\), the sector data must request the Taylor projector through
+order \(-\beta_{s,a}-1\).
 
 For a uniform notation, let
 \begin{equation}
@@ -932,6 +953,7 @@ For several endpoint axes, introduce the Taylor projector
 \end{equation}
 Then the recursive subtraction identity can be written compactly as
 \begin{align}
+  \label{eq:recursive-subtraction}
   I_s(\eps)
   &=
   \sum_{B\subseteq A_s}
@@ -1010,13 +1032,20 @@ numerator, and the singular axes.  The generic processor can then assemble
 \(\rho_{s,a}\), evaluate \(\psi_s\) and \(\phi_s\) from dualized black-box
 evaluators, and apply the appropriate localized subtraction formula.
 
-The current numerical implementation still evaluates only the coefficients
-\(\epsilon^{-2},\epsilon^{-1},\epsilon^0\) and implements explicit formulas for
-zero, one, and two logarithmic endpoint axes.  Higher-rank endpoint structures
-and non-logarithmic endpoint powers require a recursive subtraction engine and
-a variable-length Laurent accumulator.  The metadata described above is now
-present so such a recursive engine can be added without changing the
-black-box/topology/sector boundary.
+The numerical implementation now follows this interface boundary directly.
+The Laurent accumulator is variable length: once sectors are known, the
+minimum Laurent order is set by the scalar bound \(-2L\), where \(L\) is the
+loop count, and the requested maximum order is selected at run time.  The
+sector endpoint pole depth is checked against this bound before integration.
+The subtraction engine is
+recursive for any number of endpoint axes with negative-integer base powers,
+using the Taylor order \(N_{s,a}=-\beta_{s,a}-1\).  Logarithmic plus
+distributions are therefore the special case \(N_{s,a}=0\).  Positive
+monomial powers factored by pySecDec but not belonging to singular axes are
+kept as regular multiplicative factors in \(G_s\).  Non-integer endpoint
+powers, unregulated endpoint powers, non-unit propagator powers, and tensor
+numerators are deliberately rejected in the current scalar implementation,
+because they require additional metadata or analytic input.
 
 \section{Outlook: Schwinger sampling with momentum-space numerators}
 
@@ -1185,51 +1214,151 @@ in the code layout:
   \item \texttt{sectors\_generator.py} owns the declarative sector data:
   sector maps \(X_s\), regular sector prefactors, endpoint monomials
   \(M_{U,s}\) and \(M_{F,s}\), monomial powers from Jacobian/measure or
-  numerator factors, singular axes, and generated Symbolica callbacks for
-  these expressions.
+  numerator factors, and singular axes.  The lowering of these declarative
+  expressions to Symbolica callbacks is an explicit preparation step.
   \item \texttt{integrand.py} owns the topology definition and the generic
   \texttt{SectorProcessor}.  The topology retains \(\U\) and \(\F\) for
   display and evaluator construction, but the processor never substitutes a
   sector map into them symbolically.
+  \item \texttt{subtraction\_formula.py} owns the generated Symbolica
+  endpoint-subtraction formulae.  It provides both the full sector-signature
+  formula backend and the newer lower-signature endpoint-projector backend.
   \item \texttt{integrator.py} owns the Havana sampling loop, manual Laurent
   coefficient accumulation, progress reporting, target-accuracy stopping, and
   hot-path timing profile.
   \item \texttt{benchmark.py}, \texttt{formatting.py}, \texttt{definitions.py},
   and \texttt{utils.py} isolate OneLOopBridge access, colored output, shared
   data containers, and parenthesis uncertainty formatting.
-  \item \texttt{dot\_topology.py} is the scaffold for future
-  GammaLoop-convention DOT-file input.  It is wired into the same topology and
-  sector interfaces, but its parser, topology builder, sector issuer, and
-  benchmark mapping intentionally raise \texttt{NotImplementedError}.
+  \item \texttt{dot\_parser.py}, \texttt{kinematics.py},
+  \texttt{dot\_topology.py}, and \texttt{pysecdec\_bridge.py} implement the
+  experimental GammaLoop-convention DOT-file path.  The bridge is the only
+  FSD-owned module that imports pySecDec.  It uses pySecDec to construct
+  \(\U,\F\) and sector data, then converts them into the same
+  \texttt{TopologyDefinition} and \texttt{SectorDefinition} objects consumed
+  by the generic processor.
 \end{itemize}
 
-\subsection{DOT-file extension path}
+\subsection{DOT-file path through pySecDec}
 
 The command-line option
-\begin{equation}
-  \texttt{--dot-file path/to/integral.dot}
-\end{equation}
-selects the future GammaLoop DOT-backed topology path.  The current code
-validates that the file exists and then dispatches to
-\texttt{GammaLoopDotTopologyBuilder}.  The intended development sequence is
+\begin{lstlisting}[style=fsdcode]
+--dot-file path/to/integral.dot
+\end{lstlisting}
+selects the GammaLoop DOT-backed topology path, together with
+\begin{lstlisting}[style=fsdcode]
+--kinematics path/to/kinematics.yaml
+\end{lstlisting}
+The YAML file supplies numeric symbol values and scalar-product replacement
+rules.  The current schema is
+\begin{lstlisting}[style=fsdcode]
+values:
+  s12: -1.0
+  s23: -1.0
+  mt: 0.0
+replacements:
+  p1*p1: 0
+  p2*p2: 0
+  p1*p2: s12/2
+\end{lstlisting}
+Values and replacement right-hand sides are evaluated with Symbolica, not with
+SymPy.  DOT edges touching nodes with \(\texttt{style=invis}\) are external
+half-edges.  An edge \(\texttt{ext -> v}\) is interpreted as incoming
+momentum, and \(\texttt{v -> ext}\) as outgoing momentum.  Internal edge
+attributes \(\texttt{mass}\) are either numeric strings or symbols present in
+the YAML \(\texttt{values}\) block.  These mass symbols are resolved to their
+numeric values before pySecDec generation, so the decomposition sees the
+actual massless or massive polynomial for the requested kinematic point.
+Flow directions are retained in the parsed DOT data; pySecDec receives bare
+external momentum symbols, with the sign convention represented by the
+scalar-product replacement rules.
+
+The implemented generation sequence is
 \begin{align}
   \texttt{DOT file}
   &\longrightarrow
-  \texttt{GammaLoopTopologyData},
+  \texttt{ParsedDotGraph},
   \\
-  \texttt{GammaLoopTopologyData}
+  \texttt{ParsedDotGraph}+\texttt{KinematicsDefinition}
+  &\longrightarrow
+  \texttt{pySecDec LoopIntegralFromGraph},
+  \\
+  \texttt{pySecDec LoopIntegralFromGraph}
   &\longrightarrow
   \texttt{TopologyDefinition},
   \\
-  \texttt{GammaLoopTopologyData}
+  \texttt{pySecDec sectors}
   &\longrightarrow
   \left\{\texttt{SectorDefinition}\right\}.
 \end{align}
-This keeps arbitrary future topologies on the same path as the built-in
-triangle and box examples: topology-specific information is converted into
-retained Symanzik expressions and declarative sector metadata, while the
-\texttt{SectorProcessor} remains generic and continues to consume only
-black-box evaluators and sector callbacks.
+The selected decomposition method is controlled by
+\begin{lstlisting}[style=fsdcode]
+--sector-method geometric
+--sector-method geometric_ku
+--sector-method iterative
+\end{lstlisting}
+The default is \(\texttt{iterative}\), which does not require Normaliz.  For
+geometric decomposition, Normaliz is required either from pySecDecContrib or
+through \(\texttt{--normaliz-executable}\).  If no Normaliz executable is
+visible, FSD rejects the geometric mode before generation starts and the user
+can select \(\texttt{geometric\_ku}\) or \(\texttt{iterative}\) instead.
+The execution engine is controlled by
+\begin{lstlisting}[style=fsdcode]
+--dot-engine fsd
+--dot-engine pysecdec
+--dot-engine both
+\end{lstlisting}
+In \(\texttt{fsd}\) mode,
+pySecDec is used only for generation; integration is performed by FSD/Havana
+using black-box Symbolica evaluators.  In \(\texttt{pysecdec}\) mode, pySecDec
+generates, compiles, loads, and runs its own C++ integration package.  In
+\(\texttt{both}\) mode both paths are run for comparison.
+
+Generation timings are recorded at detailed granularity and also grouped into
+three headline buckets:
+\begin{align}
+  T_{\U,\F}
+  &:=
+  T_{\rm DOT}
+  +
+  T_{\rm kin}
+  +
+  T_{\rm LoopIntegralFromGraph}
+  +
+  T_{\rm U/F\ extraction},
+  \\
+  T_{\rm sectors}
+  &:=
+  T_{\rm pySecDec\ decomposition}
+  +
+  T_{\rm SectorDefinition\ conversion},
+  \\
+  T_{\rm Symbolica}
+  &:=
+  T_{\rm scalar\ U/F\ evaluators}
+  +
+  T_{\rm sector\ map/J\ evaluators}
+  +
+  T_{\rm dual\ U/F\ evaluators}.
+\end{align}
+The pre-integration summary prints these three buckets, \(\U,\F\), evaluator
+parameter order, the dual-evaluator mode, a capped sector table showing at
+most twenty sectors, and statistics for total sector count, number of singular
+axes, U/F monomial power tuples, endpoint pole depth, maximum dimension, and
+maximum Laurent pole order.
+
+The current DOT examples include the massless triangle and box, plus six
+massive Euclidean multi-loop topologies: a two-loop two-point kite, a
+three-loop two-point self-energy graph, two two-loop three-point graphs, and
+two three-loop three-point graphs.  The larger three-point examples have six
+and eight internal lines, respectively.  The triangle and box reproduce the
+hard-coded examples through the DOT path.  The multi-loop examples are finite
+in the tested kinematics and are run with pySecDec contour deformation
+disabled.  They exercise pySecDec U/F construction, sector conversion,
+retained Symbolica evaluators, regular monomial factors, and the same
+FSD/Havana integration loop without the package-generation cost of double-box
+ladder examples.  DOT examples with global Gamma prefactor poles are not yet
+part of the validated set, because the current pySecDec-convention prefactor
+convolution assumes a prefactor regular at \(\eps=0\).
 
 \subsection{Prepared sectors and black-box processing}
 
@@ -1278,13 +1407,77 @@ the residuals
   \phi_s(y)=\frac{\hF(X_s(y))}{M_{F,s}(y)}
 \end{equation}
 are evaluated by these quotients in the interior.  On endpoint samples the
-same quantities are recovered from Taylor coefficients of dualized black-box
-\(\hU\) and \(\hF\) evaluators.  The dual jets of the known sector map provide
-the chain-rule input, so no symbolic expansion of \(\U(X_s(y))\) or
+same quantities are recovered as Taylor coefficients of the composed black-box
+\(\hU\) and \(\hF\).  In the default backend these coefficients are obtained
+from dualized \(\hU\) and \(\hF\) evaluators.  The dual jets of the known sector
+map provide the chain-rule input, so no symbolic expansion of \(\U(X_s(y))\) or
 \(\F(X_s(y))\) is performed.  The scalar \(\hU\) and \(\hF\) evaluators are
-constructed once with the topology.  Dualized evaluators are cached by their
-requested Taylor shape and are obtained by copying these scalar evaluators
-before applying Symbolica's dualization step.
+constructed once with the topology.  The command line exposes the following
+Taylor-evaluator preparation policies:
+\begin{itemize}
+  \item \(\texttt{--pregenerate-dual-evaluators}\), the default, builds one
+  dualized \(\hU\) evaluator and one dualized \(\hF\) evaluator for each
+  unique sector Taylor shape before integration starts.
+  \item \(\texttt{--lazy-dual-evaluators-generation}\) keeps the cache-on-first
+  use behavior: the scalar evaluator is copied and dualized the first time a
+  shape is requested.  This time is reported separately as Taylor evaluator
+  setup time, not as ordinary evaluator time.
+  \item \(\texttt{--pregenerate-single-overall-dual-evaluator}\) builds an
+  envelope dual evaluator.  For an integration dimension \(d\), let
+  \(r_d=\max_s |A_s|\) be the maximum number of singular axes among sectors
+  of that dimension.  Each sector multi-index
+  \(\alpha\in\mathbb N^{|A_s|}\) is embedded as
+  \begin{equation}
+    \iota_s(\alpha)
+    =
+    (\alpha_1,\ldots,\alpha_{|A_s|},0,\ldots,0)
+    \in\mathbb N^{r_d}.
+  \end{equation}
+  The envelope shape is
+  \begin{equation}
+    \mathcal J_d^{\rm env}
+    =
+    \bigcup_{s:\dim s=d}
+    \left\{\iota_s(\alpha)\,:\,\alpha\in\mathcal J_s\right\}.
+  \end{equation}
+  After evaluation, the output columns indexed by
+  \(\iota_s(\alpha)\) are remapped back to the sector-native shape
+  \(\mathcal J_s\).
+  \item \(\texttt{--symbolic-derivatives}\) does not dualize the topology-level
+  \(\hU\) and \(\hF\) evaluators.  Instead, it builds ordinary non-dual
+  Symbolica evaluators for the symbolic partial derivatives
+  \begin{equation}
+    \partial_x^\rho \hP(x),
+    \qquad
+    \hP\in\{\hU,\hF\},
+  \end{equation}
+  with \(\rho\) selected from the polynomial support and the largest sector
+  Taylor order requested.  These derivative evaluators are shared by all
+  sectors.  For a sector map
+  \begin{equation}
+    X_s(y+\eta)=X_s(y)+H_s(y,\eta),
+  \end{equation}
+  the sector Taylor coefficients are reconstructed numerically through
+  \begin{equation}
+    [\eta^\alpha]\,\hP(X_s(y+\eta))
+    =
+    [\eta^\alpha]\,
+    \sum_{\rho}
+    \frac{\partial_x^\rho\hP(X_s(y))}{\rho!}\,
+    H_s(y,\eta)^\rho .
+  \end{equation}
+  This is an explicit chain-rule backend for cross-checking the dualized
+  evaluator path; it is not expected to be faster in the current Python
+  implementation.
+\end{itemize}
+
+In FSD DOT mode, \texttt{TopologyDefinition} and \texttt{SectorDefinition}
+objects are generated and prepared once in the master process.  Multi-worker
+integration uses a fork context so workers inherit this prepared state and
+wrap it in a \texttt{SectorProcessor}.  Workers do not call pySecDec, do not
+rerun sector generation, and do not create Normaliz temporary directories.  If
+a fork context is unavailable, multi-worker DOT integration fails explicitly
+instead of silently regenerating sectors at runtime.
 
 The generic processor then constructs
 \begin{equation}
@@ -1294,10 +1487,78 @@ The generic processor then constructs
   \psi_s(y)^{p_U(\eps)}\,
   \phi_s(y)^{p_F(\eps)},
 \end{equation}
-assembles the endpoint powers \(\rho_{s,a}(\eps)\), and applies the declared
-localized subtraction formula.  Zero, one, and two logarithmic singular axes
-are supported explicitly.  Higher-rank or non-logarithmic endpoint structures
-raise an error instead of being guessed.
+multiplied by any regular positive monomial factors from the sector metadata.
+It then assembles the endpoint powers \(\rho_{s,a}(\eps)\) and applies the
+recursive localized Taylor-subtraction formula for all declared singular axes.
+Higher-rank endpoint structures therefore use the same code path as the
+one- and two-axis triangle/box examples.  Unsupported endpoint structures,
+such as non-integer powers or powers without an epsilon regulator, raise an
+explicit diagnostic instead of being guessed.
+
+\subsection{Subtraction backends and lower-signature projector}
+
+The command-line option
+\begin{lstlisting}[style=fsdcode]
+--subtraction-backend recursive|formula|projector-formula
+\end{lstlisting}
+selects how the endpoint algebra is evaluated after the sector data and U/F
+coefficient evaluators have been prepared.
+
+The \texttt{recursive} backend is the direct vectorized Python/Numpy
+implementation of Eq.~\eqref{eq:recursive-subtraction}.  It obtains the
+regular Taylor--Laurent coefficients
+\begin{equation}
+  g_{s,\alpha,r}^{(Z)}(y_{\bar Z})
+  =
+  [\eps^r \eta^\alpha]\,
+  G_s\!\left(
+    y_{\bar Z},\eta_Z;\eps
+  \right)
+\end{equation}
+from the black-box U/F/J Taylor evaluators, and then performs the
+inclusion--exclusion sum over endpoint projectors in Python.
+
+The \texttt{formula} backend builds one Symbolica evaluator for the complete
+sector-subtraction expression.  Its cache signature contains the sector axes,
+all U/F/Jacobian/measure monomial powers, the native Taylor-coefficient
+layout, the endpoint powers, and the requested Laurent range.  This path is a
+useful correctness reference because the endpoint algebra is evaluated inside
+Symbolica, but the formula is close to sector-specific.
+
+The \texttt{projector-formula} backend splits the expression into two layers.
+First, the already-existing black-box Taylor path computes the sector-specific
+regular coefficients \(g_{s,\alpha,r}^{(Z)}\).  Second, these coefficients are
+passed to a Symbolica evaluator that knows only the endpoint projector algebra,
+\begin{equation}
+  \mathcal{P}_{\{\beta_a,c_a,N_a\},\,k_{\min}:k_{\max}}
+  :
+  \left\{
+    y_a,\ g_{s,\alpha,r}^{(Z)}
+  \right\}
+  \longmapsto
+  \{ I_{s,k}(y) \}_{k=k_{\min}}^{k_{\max}} .
+\end{equation}
+Its cache key is only
+\begin{equation}
+  \left(
+    n_{\rm axes},
+    \{(\beta_a,c_a)\}_{a=1}^{n_{\rm axes}},
+    \{N_a\}_{a=1}^{n_{\rm axes}},
+    \{k_{\min},\ldots,k_{\max}\}
+  \right),
+\end{equation}
+not the sector map or the U/F polynomial data.  Thus U and F remain black-box
+coefficient providers, while many sectors can share the same generated
+endpoint-projector evaluator.
+
+For the DOT double-box test this reduces the generated subtraction expression
+family from \(133\) full sector formula signatures to \(20\) endpoint-projector
+signatures.  For the stored triple-box metadata, the corresponding count is
+about \(863\) current full signatures versus \(158\) ordered endpoint-projector
+signatures.  The present \texttt{projector-formula} backend is therefore a
+lower-signature generated-formula path.  It does not yet remove all Python
+cost, because the regular coefficients \(g_{s,\alpha,r}^{(Z)}\) are still
+assembled by the shared Python/Numpy Taylor-series layer.
 
 \subsection{Havana sampling and stopping}
 
@@ -1321,12 +1582,15 @@ manual accumulator,
   \frac{1}{N}\sum_{n=1}^{N}
   w_n\,I_{k,s_n}(y_n),
   \qquad
-  k\in\{-2,-1,0\}.
+  k\in\{k_{\min},k_{\min}+1,\ldots,k_{\max}\}.
 \end{equation}
-Havana is trained only on the finite-part magnitude used as an importance
-function.  The adaptive grid is cloned at the beginning of an iteration; batch
-training samples are accumulated into the clone and merged back into the live
-grid only at the end of a completed iteration.
+Here \(k_{\min}=-2L\) by default, and the upper endpoint of the range is the
+CLI-selected maximum epsilon order.  Havana is trained on the norm of the last
+requested Laurent coefficient, so the training observable follows the
+coefficient actually controlling the requested truncation.  The adaptive grid
+is cloned at the beginning of an iteration; batch training samples are
+accumulated into the clone and merged back into the live grid only at the end
+of a completed iteration.
 
 The target-accuracy stop is evaluated after each accumulated batch, not only
 after a full Havana iteration.  Thus the final returned coefficients contain
@@ -1362,6 +1626,11 @@ and grid update time.  The displayed evaluator average is
   \text{microseconds per sample per worker},
 \end{equation}
 because \(T_{\rm eval}\) is already summed over workers.
+Taylor evaluator setup is tracked separately as \(T_{\rm Taylor\,gen}\).  For
+the default pregenerated dual mode and for the symbolic-derivative mode this
+belongs to the generation bucket \(T_{\rm Symbolica}\).  For lazy mode it can
+occur during the first integration batches, but it is still reported separately
+and is not included in \(T_{\rm eval}\).
 
 \subsection{Implemented modes and conventions}
 
@@ -1512,32 +1781,96 @@ the present implementation.
 \subsection{Example commands}
 
 The massive triangle check can be run with
-\begin{equation}
-  \texttt{.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0}.
-\end{equation}
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0
+\end{lstlisting}
 The same check in the Feynman-normalized prefactor convention can be displayed
 with
-\begin{align}
-  &\texttt{.venv/bin/python FSD.py --integral triangle --s 1.0 --m 1.0}
-  \notag\\
-  &\texttt{--prefactor-convention feynman}.
-\end{align}
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py \
+  --integral triangle \
+  --s 1.0 \
+  --m 1.0 \
+  --prefactor-convention feynman
+\end{lstlisting}
 The massless Euclidean triangle check can be run with
-\begin{equation}
-  \texttt{.venv/bin/python FSD.py --integral triangle --s -1.0 --m 0.0}.
-\end{equation}
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py --integral triangle --s -1.0 --m 0.0
+\end{lstlisting}
 The massive box example can be run with
-\begin{equation}
-  \texttt{.venv/bin/python FSD.py --integral box --s12 0.5 --s23 0.7 --m 1.0}.
-\end{equation}
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py \
+  --integral box \
+  --s12 0.5 \
+  --s23 0.7 \
+  --m 1.0
+\end{lstlisting}
 The massless Euclidean box check can be run with
-\begin{equation}
-  \texttt{.venv/bin/python FSD.py --integral box --s12 -1.0 --s23 -2.0 --m 0.0}.
-\end{equation}
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py \
+  --integral box \
+  --s12 -1.0 \
+  --s23 -2.0 \
+  --m 0.0
+\end{lstlisting}
+The same triangle and box can be routed through DOT input and pySecDec sector
+generation, for example
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/triangle.dot \
+  --kinematics examples/dot/triangle_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/box.dot \
+  --kinematics examples/dot/box_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+\end{lstlisting}
+The compact multi-loop DOT smoke checks are
+\begin{lstlisting}[style=fsdcode]
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/kite_2loop.dot \
+  --kinematics examples/dot/kite_2loop_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/self_energy_3loop.dot \
+  --kinematics examples/dot/self_energy_3loop_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/three_point_2loop.dot \
+  --kinematics examples/dot/three_point_2loop_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/three_point_3loop.dot \
+  --kinematics examples/dot/three_point_3loop_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/three_point_2loop_6line.dot \
+  --kinematics examples/dot/three_point_2loop_6line_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+
+.venv/bin/python FSD.py \
+  --dot-file examples/dot/three_point_3loop_8line.dot \
+  --kinematics examples/dot/three_point_3loop_8line_kinematics.yaml \
+  --sector-method iterative \
+  --dot-engine both
+\end{lstlisting}
 Massless timelike commands, such as
 \(\texttt{--integral triangle --s 1.0 --m 0.0}\), are rejected by validation.
-OneLOopBridge is required in all runs because the implementation always
-compares the Laurent coefficients to a benchmark value.  The implementation
+Built-in triangle and box runs use OneLOopBridge unless an explicit target is
+provided.  DOT/FSD-only runs report no pull unless a target is provided or
+pySecDec is run through \(\texttt{--dot-engine both}\).  The implementation
 intentionally imports neither \texttt{scipy} nor \texttt{sympy}; all symbolic
 handling is done through Symbolica evaluators.
 

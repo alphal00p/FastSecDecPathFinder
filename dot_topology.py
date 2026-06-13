@@ -1,10 +1,4 @@
-"""GammaLoop DOT-file topology scaffolding.
-
-This module is intentionally a structural placeholder.  It shows where the
-future GammaLoop DOT parser will live, how it will feed the retained
-``TopologyDefinition`` object, and how it will issue declarative
-``SectorDefinition`` objects for the existing black-box sector processor.
-"""
+"""Adapter from GammaLoop DOT files to pySecDec-backed FSD objects."""
 
 from __future__ import annotations
 
@@ -13,6 +7,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from definitions import IntegralRequest
+from dot_parser import ParsedDotGraph, parse_dot_file
+from generation_timing import GenerationProgress, GenerationTimings
+from kinematics import KinematicsDefinition, load_kinematics
+from pysecdec_bridge import DotBuildBundle, build_dot_bundle
 
 if TYPE_CHECKING:
     from integrand import TopologyDefinition
@@ -34,35 +32,21 @@ class DotTopologySource:
 
 @dataclass(frozen=True)
 class GammaLoopTopologyData:
-    """Future normalized graph data extracted from GammaLoop DOT input.
-
-    The intended parser output should contain enough information to construct:
-
-    - loop-momentum routing,
-    - propagator masses and powers,
-    - external momentum assignments and invariants,
-    - the Feynman-parameter row order,
-    - the Symanzik U/F expressions retained for display/evaluator creation,
-    - topology-level parametric metadata such as loop count, propagator powers,
-      dimension, global prefactor convention, and affine U/F exponents,
-    - topology-specific sector metadata before evaluator generation, including
-      U/F monomial powers and measure or numerator monomial powers.
-
-    The exact field set is deliberately not frozen yet because it should follow
-    the GammaLoop DOT convention rather than guesses made in this prototype.
-    """
+    """Normalized graph plus kinematics extracted from DOT/YAML input."""
 
     source: DotTopologySource
+    graph: ParsedDotGraph
+    kinematics: KinematicsDefinition
+    timings: GenerationTimings
 
 
 @dataclass(frozen=True)
 class DotTopologyPrintout:
-    """Human-readable placeholder for a not-yet-parsed DOT topology.
+    """Human-readable DOT topology printout for parser/generation diagnostics.
 
-    The implemented triangle and box examples can print concrete U/F
-    expressions and concrete sectors.  DOT input cannot do that until the
-    GammaLoop parser exists, but the CLI can still show the exact shape of the
-    information that the parser must eventually provide.
+    The normal pre-integration summary prints concrete U/F expressions and
+    concrete sectors after pySecDec generation.  This lightweight printout is
+    kept as a schema-oriented fallback for early DOT diagnostics.
     """
 
     source: DotTopologySource
@@ -74,21 +58,21 @@ class DotTopologyPrintout:
             ("source name", self.source.name),
             ("source path", str(self.source.path)),
             ("source bytes", str(len(self.source.text.encode("utf-8")))),
-            ("parser status", "not implemented"),
+            ("parser status", "implemented through pydot + pySecDec bridge"),
         ]
 
     def topology_rows(self) -> list[tuple[str, str]]:
         """Rows describing future TopologyDefinition printout fields."""
         return [
-            ("family", "to be inferred from DOT graph metadata"),
-            ("loop count", "placeholder: parse graph cycle rank"),
-            ("propagator powers", "placeholder: parse GammaLoop edge weights"),
-            ("dimension", "placeholder: affine D0 + Deps*eps"),
-            ("prefactor", "placeholder: convention-dependent global factor"),
-            ("U polynomial", "placeholder: retained Symbolica expression"),
-            ("F polynomial", "placeholder: retained Symbolica expression"),
-            ("evaluator order", "placeholder: x_i followed by kinematic parameters"),
-            ("U/F exponents", "placeholder: affine powers in epsilon"),
+            ("family", "DOT graph name from pydot"),
+            ("loop count", "graph cycle rank E-V+1"),
+            ("propagator powers", "unit powers only in this phase"),
+            ("dimension", "4 - 2 eps"),
+            ("prefactor", "pySecDec Gamma/global prefactor metadata"),
+            ("U polynomial", "retained Symbolica expression from pySecDec"),
+            ("F polynomial", "retained Symbolica expression from pySecDec"),
+            ("evaluator order", "x_i followed by YAML value symbols"),
+            ("U/F exponents", "affine powers in eps from pySecDec"),
         ]
 
     def sector_schema_rows(self) -> list[tuple[str, str, str]]:
@@ -107,15 +91,15 @@ class DotTopologyPrintout:
     def validation_rows(self) -> list[tuple[str, str]]:
         """Rows describing the future validation gates for DOT input."""
         return [
-            ("file exists", "validated before this placeholder is printed"),
-            ("DOT parser", "NotImplementedError"),
-            ("topology construction", "NotImplementedError"),
-            ("sector generation", "NotImplementedError"),
-            ("benchmark mapping", "NotImplementedError"),
+            ("file exists", "validated before DOT generation starts"),
+            ("DOT parser", "pydot"),
+            ("topology construction", "pySecDec LoopIntegralFromGraph"),
+            ("sector generation", "pySecDec decomposition APIs"),
+            ("benchmark mapping", "pySecDec engine in --dot-engine pysecdec|both"),
         ]
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-friendly representation of the placeholder."""
+        """Return a JSON-friendly representation of the DOT printout."""
         return {
             "header": self.header_rows(),
             "topology": self.topology_rows(),
@@ -125,7 +109,7 @@ class DotTopologyPrintout:
 
     def __str__(self) -> str:
         """Plain string fallback used outside colored PrettyTable output."""
-        lines = [f"DOT topology placeholder: {self.source.path}"]
+        lines = [f"DOT topology printout: {self.source.path}"]
         lines.extend(f"  {key}: {value}" for key, value in self.topology_rows())
         lines.append("  sector schema:")
         lines.extend(f"    {name}: {symbol} ({purpose})" for name, symbol, purpose in self.sector_schema_rows())
@@ -149,46 +133,84 @@ class GammaLoopDotTopologyBuilder:
         source = DotTopologySource(path=path, text=path.read_text(encoding="utf-8"))
         return cls(request=request, source=source)
 
-    def parse_gammaloop_dot(self) -> GammaLoopTopologyData:
-        """Parse GammaLoop DOT syntax into normalized topology data."""
-        raise NotImplementedError(
-            "GammaLoop DOT parsing is not implemented yet.  This is the entry "
-            "point that should decode nodes, edges, propagators, momentum "
-            "routing, masses, and external invariants from the DOT file."
+    def parse_gammaloop_dot(
+        self,
+        progress: GenerationProgress | None = None,
+    ) -> GammaLoopTopologyData:
+        """Parse GammaLoop DOT syntax and load kinematics YAML."""
+        if self.request.kinematics_file is None:
+            raise ValueError("DOT mode requires --kinematics")
+        timings = GenerationTimings()
+        with timings.measure("DOT parse", progress=progress):
+            graph = parse_dot_file(self.source.path, self.request.graph_name)
+        with timings.measure("kinematics load/evaluation", progress=progress):
+            kinematics = load_kinematics(self.request.kinematics_file)
+        return GammaLoopTopologyData(
+            source=self.source,
+            graph=graph,
+            kinematics=kinematics,
+            timings=timings,
         )
 
     def printout_placeholder(self) -> DotTopologyPrintout:
-        """Return the structured DOT summary placeholder for CLI display."""
+        """Return the structured DOT summary printout for CLI display."""
         return DotTopologyPrintout(source=self.source)
 
     def build_topology(self) -> "TopologyDefinition":
         """Build a retained U/F topology definition from parsed DOT data."""
-        raise NotImplementedError(
-            "Building TopologyDefinition from GammaLoop DOT data is not "
-            "implemented yet.  This hook should call parse_gammaloop_dot(), "
-            "construct U/F Symbolica expressions, fill ParametricRepresentation "
-            "metadata, and avoid adding topology-specific branches to "
-            "SectorProcessor."
-        )
+        return _bundle_from_request(self.request).topology
 
     def issue_sector_definitions(self) -> list["SectorDefinition"]:
         """Issue declarative sector definitions for this DOT topology."""
-        raise NotImplementedError(
-            "Sector generation from GammaLoop DOT data is not implemented yet.  "
-            "This hook should call parse_gammaloop_dot() and return "
-            "declarative SectorDefinition objects with maps, Jacobians, "
-            "U/F monomials, measure/numerator monomials, and subtraction axes "
-            "already specified."
-        )
+        return _bundle_from_request(self.request).sectors
 
     def benchmark_request(self) -> object:
         """Build the future OneLOopBridge benchmark request for this topology."""
-        raise NotImplementedError(
-            "Benchmark mapping for arbitrary GammaLoop DOT topologies is not "
-            "implemented yet.  This hook should translate parsed DOT topology "
-            "data into the benchmark backend call or declare that no benchmark "
-            "is available for the topology."
-        )
+        return _bundle_from_request(self.request)
+
+
+_DOT_BUNDLE_CACHE: dict[tuple[object, ...], DotBuildBundle] = {}
+
+
+def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
+    """Return a stable cache key for pySecDec DOT generation."""
+    return (
+        request.dot_file,
+        request.kinematics_file,
+        request.graph_name,
+        request.sector_method,
+        request.normaliz_executable,
+        request.jit_compile_evaluators,
+        request.dual_evaluator_mode,
+        request.max_eps_order,
+    )
+
+
+def _bundle_from_request(
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> DotBuildBundle:
+    """Parse DOT/YAML and generate pySecDec-backed topology/sectors once."""
+    key = _request_cache_key(request)
+    cached = _DOT_BUNDLE_CACHE.get(key)
+    if cached is not None:
+        if progress is not None and progress.logger is not None:
+            progress.logger.info("generation cache hit: reused DOT bundle for %s", request.dot_file)
+        return cached
+    builder = GammaLoopDotTopologyBuilder.from_request(request)
+    data = builder.parse_gammaloop_dot(progress=progress)
+    bundle = build_dot_bundle(data.graph, data.kinematics, request, progress=progress)
+    bundle.timings.records = [*data.timings.records, *bundle.timings.records]
+    _DOT_BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def get_dot_bundle(
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> DotBuildBundle:
+    """Return the cached DOT build bundle for logging and pySecDec mode."""
+    return _bundle_from_request(request, progress=progress)
 
 
 def build_topology_from_dot_request(request: IntegralRequest) -> "TopologyDefinition":

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import math
+import multiprocessing as mp
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ import numpy as np
 from colorama import Fore, Style
 from symbolica import NumericalIntegrator
 
-from definitions import BenchmarkResult, HotPathTiming, IntegralRequest, IntegrationResult
+from definitions import HotPathTiming, IntegralRequest, IntegrationResult, SectorIntegrationResult, TargetDefinition
 from formatting import (
     apply_global_convention,
     format_complex,
@@ -27,8 +28,9 @@ from formatting import (
     selected_prefactor_values,
     summed_relative_error_percent,
 )
-from integrand import SectorProcessor, TopologyDefinition, build_topology
-from sectors_generator import SectorDefinition, generate_sectors
+from integrand import SectorProcessor, TopologyDefinition
+from sectors_generator import SectorDefinition
+from utils import format_complex_uncertainty
 
 try:
     import progressbar
@@ -69,6 +71,30 @@ class RunningStats:
         self.sumsq_re += float(np.sum(array.real * array.real))
         self.sumsq_im += float(np.sum(array.imag * array.imag))
 
+    def add_aggregate(
+        self,
+        count: int,
+        sum_re: float,
+        sum_im: float,
+        sumsq_re: float,
+        sumsq_im: float,
+    ) -> None:
+        """Add pre-reduced samples, allowing implicit zero contributions.
+
+        Per-sector results are additive only if every sector accumulator sees
+        every Monte Carlo sample, with zero contribution for samples assigned to
+        another top-level discrete sector.  Passing the full batch count together
+        with the nonzero sums implements exactly that without materializing
+        dense zero arrays.
+        """
+        if count <= 0:
+            return
+        self.count += int(count)
+        self.sum_re += float(sum_re)
+        self.sum_im += float(sum_im)
+        self.sumsq_re += float(sumsq_re)
+        self.sumsq_im += float(sumsq_im)
+
     @property
     def mean(self) -> complex:
         """Return the current Monte Carlo mean."""
@@ -100,19 +126,54 @@ class EvaluationBatch:
 
 _WORKER_SECTORS: list[SectorDefinition] | None = None
 _WORKER_PROCESSOR: SectorProcessor | None = None
+_PARENT_TOPOLOGY: TopologyDefinition | None = None
+_PARENT_SECTORS: list[SectorDefinition] | None = None
+_PARENT_REQUEST: IntegralRequest | None = None
 
 
-def _init_worker(request: IntegralRequest) -> None:
-    """Build per-process topology/sector state for worker reuse."""
+def _make_sector_processor(topology: TopologyDefinition, request: IntegralRequest) -> SectorProcessor:
+    """Construct a sector processor with runtime precision controls."""
+    return SectorProcessor(
+        topology,
+        stability_threshold=request.stability_threshold,
+        high_precision_stability_threshold=request.high_precision_stability_threshold,
+        stability_precision=request.stability_precision,
+        high_precision_stability_precision=request.high_precision_stability_precision,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+
+def _terminate_executor_workers(executor: ProcessPoolExecutor) -> None:
+    """Best-effort termination for running ProcessPoolExecutor workers.
+
+    Python 3.12's public shutdown API can cancel queued futures, but it does
+    not immediately stop workers already inside a heavy sector batch.  On a
+    keyboard interrupt we prefer returning the accumulated partial result and
+    terminating those workers rather than leaving orphan integrations alive.
+    """
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+    for process in list(processes.values()):
+        if process is not None and process.is_alive():
+            process.terminate()
+
+
+def _init_worker_from_parent() -> None:
+    """Attach fork-inherited prepared topology/sector state to a worker."""
     global _WORKER_SECTORS, _WORKER_PROCESSOR
-    topology = build_topology(request)
-    _WORKER_SECTORS = generate_sectors(request)
-    _WORKER_PROCESSOR = SectorProcessor(topology)
+    if _PARENT_TOPOLOGY is None or _PARENT_SECTORS is None or _PARENT_REQUEST is None:
+        raise RuntimeError(
+            "prepared FSD topology/sectors are unavailable in worker; "
+            "DOT multiprocessing requires a fork-capable Python runtime"
+        )
+    _WORKER_SECTORS = _PARENT_SECTORS
+    _WORKER_PROCESSOR = _make_sector_processor(_PARENT_TOPOLOGY, _PARENT_REQUEST)
 
 
 def _evaluate_records_worker(
     batch: EvaluationBatch,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, HotPathTiming]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, HotPathTiming]:
     """Evaluate one batch in a worker process."""
     if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
         raise RuntimeError("worker processor not initialized")
@@ -123,15 +184,16 @@ def _evaluate_records(
     processor: SectorProcessor,
     sectors: list[SectorDefinition],
     batch: EvaluationBatch,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, HotPathTiming]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, HotPathTiming]:
     """Evaluate a batch and return weighted coefficients and training values."""
     hot_start = time.perf_counter()
     timing = HotPathTiming()
     if batch.indices.size == 0:
         return (
             np.empty(0, dtype=int),
-            np.empty((0, 3), dtype=np.complex128),
+            np.empty((0, processor.topology.coefficient_count), dtype=np.complex128),
             np.empty(0, dtype=float),
+            np.zeros((len(sectors), 3), dtype=np.int64),
             timing,
         )
 
@@ -139,8 +201,9 @@ def _evaluate_records(
     sector_indices = batch.sector_indices
     coords = batch.coords
     weights = batch.weights
-    weighted = np.zeros((indices.size, 3), dtype=np.complex128)
+    weighted = np.zeros((indices.size, processor.topology.coefficient_count), dtype=np.complex128)
     training = np.zeros(indices.size, dtype=float)
+    precision_counts = np.zeros((len(sectors), 3), dtype=np.int64)
 
     for sector_index, sector in enumerate(sectors):
         mask = sector_indices == sector_index
@@ -148,12 +211,20 @@ def _evaluate_records(
             continue
         coeffs, train, sector_timing = processor.evaluate_batch(sector, coords[mask])
         timing.absorb(sector_timing)
+        precision_counts[sector_index, :] += np.asarray(
+            [
+                sector_timing.ordinary_precision_samples,
+                sector_timing.stability_precision_samples,
+                sector_timing.high_precision_samples,
+            ],
+            dtype=np.int64,
+        )
         weighted[mask, :] = coeffs * weights[mask, np.newaxis]
         training[mask] = train
 
     hot_elapsed = time.perf_counter() - hot_start
     timing.add_python(hot_elapsed - timing.total_seconds)
-    return indices, weighted, training, timing
+    return indices, weighted, training, precision_counts, timing
 
 
 def split_evaluation_batches(
@@ -321,6 +392,7 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
             f"{progress_color('it', Fore.CYAN)}:%(iteration)s/%(max_iter)s "
             f"{progress_color('smpl', Fore.CYAN)}:%(samples)s/%(target_samples)s "
             f"{progress_color('err%%', Fore.GREEN)}:%(relerr)s "
+            f"{progress_color('val', Fore.MAGENTA)}[{request.progress_value_order}]:%(value)s "
             f"{progress_color('pull', Fore.YELLOW)}: %(pull)s "
             f"{progress_color('t', Fore.BLUE)}:%(elapsed)s "
             f"{progress_color('eta', Fore.BLUE)}:%(eta)s "
@@ -333,6 +405,7 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
             "samples": "0",
             "target_samples": format_sample_target(request),
             "relerr": "n/a",
+            "value": "n/a",
             "pull": "n/a",
             "elapsed": "00:00:00",
             "eta": "n/a",
@@ -357,22 +430,56 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
 def live_progress_metrics(
     request: IntegralRequest,
     stats: list[RunningStats],
-    benchmark: BenchmarkResult,
-) -> tuple[float, float]:
+    target: TargetDefinition | None,
+) -> tuple[float, float | None]:
     """Compute live summed relative error and max pull for display."""
     sector_coeffs = [stat.mean for stat in stats]
     sector_errors = [stat.error for stat in stats]
     raw_coeffs, raw_errors = apply_global_convention(sector_coeffs, sector_errors, request)
-    display_coeffs, display_errors, display_bench, _ = selected_prefactor_values(
-        request, raw_coeffs, raw_errors, benchmark
+    display_coeffs, display_errors, _display_bench, _ = selected_prefactor_values(
+        request, raw_coeffs, raw_errors, None
     )
     relerr = summed_relative_error_percent(display_coeffs, display_errors)
+    if target is None:
+        return relerr, None
     pulls = [
         pull_value(coeff - ref, err)
-        for coeff, err, ref in zip(display_coeffs, display_errors, display_bench)
+        for coeff, err, ref in zip(display_coeffs, display_errors, target.coefficients)
     ]
     numeric_pulls = [pull for pull in pulls if pull is not None]
-    return relerr, max(numeric_pulls) if numeric_pulls else 0.0
+    return relerr, max(numeric_pulls) if numeric_pulls else None
+
+
+def _epsilon_order_from_label(label: str) -> int:
+    """Parse labels like eps^0 or eps^-2."""
+    text = str(label).strip()
+    if text == "eps^0":
+        return 0
+    if text.startswith("eps^"):
+        return int(text[4:])
+    raise ValueError(f"unsupported epsilon order label {label!r}")
+
+
+def live_progress_value(
+    request: IntegralRequest,
+    stats: list[RunningStats],
+) -> str:
+    """Return the selected Laurent coefficient with MC uncertainty."""
+    sector_coeffs = [stat.mean for stat in stats]
+    sector_errors = [stat.error for stat in stats]
+    raw_coeffs, raw_errors = apply_global_convention(sector_coeffs, sector_errors, request)
+    display_coeffs, display_errors, _display_bench, _ = selected_prefactor_values(
+        request, raw_coeffs, raw_errors, None
+    )
+    try:
+        selected_order = _epsilon_order_from_label(request.progress_value_order)
+    except ValueError:
+        selected_order = request.max_eps_order
+    min_order = request.max_eps_order - len(display_coeffs) + 1
+    index = selected_order - min_order
+    if index < 0 or index >= len(display_coeffs):
+        index = len(display_coeffs) - 1
+    return format_complex_uncertainty(display_coeffs[index], display_errors[index])
 
 
 def target_progress_fraction(relerr_percent: float, target_percent: float | None) -> float | None:
@@ -448,7 +555,7 @@ def update_progress_bar(
     bar: Any | None,
     request: IntegralRequest,
     stats: list[RunningStats],
-    benchmark: BenchmarkResult,
+    target: TargetDefinition | None,
     iteration: int,
     elapsed_seconds: float,
     avg_eval_us_per_sample_per_worker: float,
@@ -457,7 +564,7 @@ def update_progress_bar(
     """Refresh progress widgets from the current accumulators."""
     if bar is None:
         return
-    relerr, pull = live_progress_metrics(request, stats, benchmark)
+    relerr, pull = live_progress_metrics(request, stats, target)
     eta = estimate_eta_seconds(request, stats[0].count, elapsed_seconds, relerr)
     live_widget = getattr(bar, "fsd_live_widget", None)
     if live_widget is not None:
@@ -465,7 +572,8 @@ def update_progress_bar(
             iteration=str(iteration),
             samples=format_sample_count(stats[0].count),
             relerr=format_relerr_with_target(request, relerr),
-            pull=f"{pull:.2f}σ",
+            value=live_progress_value(request, stats),
+            pull="N/A" if pull is None else f"{pull:.2f}σ",
             elapsed=format_duration(elapsed_seconds),
             eta=format_eta(eta),
             avg_us=format_progress_scalar(avg_eval_us_per_sample_per_worker),
@@ -493,7 +601,7 @@ def update_progress_bar_timed(
     bar: Any | None,
     request: IntegralRequest,
     stats: list[RunningStats],
-    benchmark: BenchmarkResult,
+    target: TargetDefinition | None,
     iteration: int,
     elapsed_seconds: float,
     avg_eval_us_per_sample_per_worker: float,
@@ -507,7 +615,7 @@ def update_progress_bar_timed(
         bar,
         request,
         stats,
-        benchmark,
+        target,
         iteration,
         elapsed_seconds,
         avg_eval_us_per_sample_per_worker,
@@ -519,13 +627,13 @@ def update_progress_bar_timed(
 def target_accuracy_reached(
     request: IntegralRequest,
     stats: list[RunningStats],
-    benchmark: BenchmarkResult,
+    target: TargetDefinition | None,
     iteration: int,
 ) -> bool:
     """Return whether the requested relative target has been reached."""
     if request.target_rel_accuracy is None or iteration < request.min_iter:
         return False
-    relerr, _ = live_progress_metrics(request, stats, benchmark)
+    relerr, _ = live_progress_metrics(request, stats, target)
     return math.isfinite(relerr) and relerr <= request.target_rel_accuracy
 
 
@@ -533,34 +641,59 @@ def integrate(
     request: IntegralRequest,
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
-    benchmark: BenchmarkResult,
+    target: TargetDefinition | None,
 ) -> IntegrationResult:
     """Run the adaptive Monte Carlo integration and return raw coefficients."""
     if not sectors:
         raise ValueError("no sectors generated")
-    continuous_dim = sectors[0].integration_dim
-    if any(sector.integration_dim != continuous_dim for sector in sectors):
+    active_sector_ids = list(request.sectors) if request.sectors is not None else list(range(len(sectors)))
+    if not active_sector_ids:
+        raise ValueError("no active sectors selected")
+    active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
+    active_sector_ids_array = np.asarray(active_sector_ids, dtype=int)
+    continuous_dim = active_sectors[0].integration_dim
+    if any(sector.integration_dim != continuous_dim for sector in active_sectors):
         raise ValueError("all sectors must have the same integration dimension for the current Havana driver")
 
     # One discrete dimension chooses the sector, and each sector owns an
     # adaptive continuous Havana grid of the same dimension.  Lower-support
     # subtraction terms are localized into this same dimension by the processor.
     grid = NumericalIntegrator.discrete(
-        [NumericalIntegrator.continuous(continuous_dim, n_bins=request.bins) for _ in sectors]
+        [NumericalIntegrator.continuous(continuous_dim, n_bins=request.bins) for _ in active_sectors]
     )
     rng = grid.rng(request.seed, 0)
-    stats = [RunningStats(), RunningStats(), RunningStats()]
+    stats = [RunningStats() for _ in range(topology.coefficient_count)]
+    per_sector_stats = [
+        [RunningStats() for _ in range(topology.coefficient_count)]
+        for _sector in sectors
+    ]
+    per_sector_hits = [0 for _sector in sectors]
+    per_sector_precision_counts = [
+        {"ordinary": 0, "stability": 0, "high_precision": 0}
+        for _sector in sectors
+    ]
 
     processor: SectorProcessor | None = None
     executor: ProcessPoolExecutor | None = None
     if request.workers > 1:
+        if "fork" not in mp.get_all_start_methods():
+            if request.integral == "dot":
+                raise RuntimeError(
+                    "DOT multi-worker integration requires a fork-capable Python runtime so prepared "
+                    "pySecDec-generated sectors are inherited without regenerating; use --workers 1"
+                )
+            raise RuntimeError("multi-worker integration requires a fork-capable Python runtime")
+        global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
+        _PARENT_TOPOLOGY = topology
+        _PARENT_SECTORS = active_sectors
+        _PARENT_REQUEST = request
         executor = ProcessPoolExecutor(
             max_workers=request.workers,
-            initializer=_init_worker,
-            initargs=(request,),
+            mp_context=mp.get_context("fork"),
+            initializer=_init_worker_from_parent,
         )
     else:
-        processor = SectorProcessor(topology)
+        processor = _make_sector_processor(topology, request)
 
     bar = make_progress_bar(request)
     if bar is not None:
@@ -568,6 +701,36 @@ def integrate(
 
     start_time = time.perf_counter()
     hot_timing = HotPathTiming()
+    interrupted = False
+
+    def build_result() -> IntegrationResult:
+        """Materialize the current accumulators, including partial runs."""
+        return IntegrationResult(
+            raw_sector_coeffs=[stat.mean for stat in stats],
+            raw_sector_errors=[stat.error for stat in stats],
+            per_sector=[
+                SectorIntegrationResult(
+                    sector_id=sector_index,
+                    sector_name=sectors[sector_index].name,
+                    samples=per_sector_hits[sector_index],
+                    raw_sector_coeffs=[stat.mean for stat in sector_stats],
+                    raw_sector_errors=[stat.error for stat in sector_stats],
+                    precision_counts=per_sector_precision_counts[sector_index].copy(),
+                )
+                for sector_index, sector_stats in enumerate(per_sector_stats)
+            ],
+            samples=stats[0].count,
+            elapsed_seconds=time.perf_counter() - start_time,
+            avg_eval_us_per_sample_per_worker=avg_eval_us_per_sample_per_worker(
+                hot_timing, stats[0].count
+            ),
+            eval_seconds=hot_timing.eval_seconds,
+            python_seconds=hot_timing.python_seconds,
+            havana_seconds=hot_timing.havana_seconds,
+            python_overhead_fraction=hot_timing.python_overhead_fraction,
+            precision_counts=hot_timing.precision_counts,
+            interrupted=interrupted,
+        )
 
     try:
         iteration = 0
@@ -608,6 +771,7 @@ def integrate(
                 indices: np.ndarray,
                 w_part: np.ndarray,
                 t_part: np.ndarray,
+                precision_part: np.ndarray,
             ) -> bool:
                 # This is the point where a batch becomes part of the returned
                 # result.  Target-accuracy termination is checked only after
@@ -615,6 +779,48 @@ def integrate(
                 aggregate_start = time.perf_counter()
                 for coeff_index, stat in enumerate(stats):
                     stat.add_many(w_part[:, coeff_index])
+                local_sector_part = sector_indices[indices]
+                sector_part = active_sector_ids_array[local_sector_part]
+                hit_counts = np.bincount(sector_part, minlength=len(sectors))
+                for sector_index, hits in enumerate(hit_counts):
+                    per_sector_hits[sector_index] += int(hits)
+                for local_sector_index, sector_id in enumerate(active_sector_ids):
+                    counts = precision_part[local_sector_index]
+                    per_sector_precision_counts[sector_id]["ordinary"] += int(counts[0])
+                    per_sector_precision_counts[sector_id]["stability"] += int(counts[1])
+                    per_sector_precision_counts[sector_id]["high_precision"] += int(counts[2])
+                batch_count = int(indices.size)
+                for coeff_index in range(topology.coefficient_count):
+                    values = np.asarray(w_part[:, coeff_index], dtype=np.complex128)
+                    re_sums = np.bincount(
+                        sector_part,
+                        weights=values.real,
+                        minlength=len(sectors),
+                    )
+                    im_sums = np.bincount(
+                        sector_part,
+                        weights=values.imag,
+                        minlength=len(sectors),
+                    )
+                    re_sumsq = np.bincount(
+                        sector_part,
+                        weights=values.real * values.real,
+                        minlength=len(sectors),
+                    )
+                    im_sumsq = np.bincount(
+                        sector_part,
+                        weights=values.imag * values.imag,
+                        minlength=len(sectors),
+                    )
+                    for sector_index in active_sector_ids:
+                        sector_stats = per_sector_stats[sector_index]
+                        sector_stats[coeff_index].add_aggregate(
+                            batch_count,
+                            re_sums[sector_index],
+                            im_sums[sector_index],
+                            re_sumsq[sector_index],
+                            im_sumsq[sector_index],
+                        )
                 start_index = int(indices[0])
                 stop_index = int(indices[-1]) + 1
                 if stop_index - start_index == indices.size:
@@ -624,9 +830,9 @@ def integrate(
                 hot_timing.add_python(time.perf_counter() - aggregate_start)
 
                 havana_batch_start = time.perf_counter()
-                # The training observable is scalar and finite-part based.
-                # It steers the adaptive grid, while the Laurent coefficients
-                # themselves are accumulated in RunningStats above.
+                # The training observable is the norm of the last requested
+                # Laurent coefficient.  It steers the adaptive grid, while all
+                # coefficients themselves are accumulated in RunningStats above.
                 training_grid.add_training_samples(batch_samples, t_part)
                 hot_timing.add_havana(time.perf_counter() - havana_batch_start)
 
@@ -636,25 +842,29 @@ def integrate(
                     bar,
                     request,
                     stats,
-                    benchmark,
+                    target,
                     iteration,
                     elapsed_seconds,
                     avg_eval_us,
                     hot_timing,
                 )
-                return target_accuracy_reached(request, stats, benchmark, iteration)
+                return target_accuracy_reached(request, stats, target, iteration)
 
             stop_requested = False
             if executor is None:
                 assert processor is not None
                 for batch in batches:
-                    indices, w_part, t_part, worker_timing = _evaluate_records(processor, sectors, batch)
+                    indices, w_part, t_part, precision_part, worker_timing = _evaluate_records(
+                        processor,
+                        active_sectors,
+                        batch,
+                    )
                     hot_timing.absorb(worker_timing)
-                    if register_batch(indices, w_part, t_part):
+                    if register_batch(indices, w_part, t_part, precision_part):
                         stop_requested = True
                         break
             else:
-                pending: set[Future[tuple[np.ndarray, np.ndarray, np.ndarray, HotPathTiming]]] = set()
+                pending: set[Future[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, HotPathTiming]]] = set()
                 next_batch_index = 0
 
                 def submit_until_full() -> None:
@@ -679,10 +889,10 @@ def integrate(
                             future.cancel()
                             continue
                         result_start = time.perf_counter()
-                        indices, w_part, t_part, worker_timing = future.result()
+                        indices, w_part, t_part, precision_part, worker_timing = future.result()
                         hot_timing.add_python(time.perf_counter() - result_start)
                         hot_timing.absorb(worker_timing)
-                        if register_batch(indices, w_part, t_part):
+                        if register_batch(indices, w_part, t_part, precision_part):
                             stop_requested = True
                             # Futures that have not started can be cancelled.
                             # Running futures may finish in the background, but
@@ -709,11 +919,11 @@ def integrate(
             live_avg, live_err, live_chi = grid.update(1.5, 1.5)
             hot_timing.add_havana(time.perf_counter() - havana_update_start)
 
-            finite_err = stats[2].error
+            training_err = stats[topology.training_index].error
             if request.show_stats:
                 print(
-                    f"iter {iteration:3d}: finite raw sector-sum "
-                    f"{format_complex(stats[2].mean)} +- {format_complex_error(finite_err)} "
+                    f"iter {iteration:3d}: training raw sector-sum "
+                    f"{format_complex(stats[topology.training_index].mean)} +- {format_complex_error(training_err)} "
                     f"(havana train {live_avg:.6g} +- {live_err:.3g}, chi={live_chi:.3g})"
                 )
 
@@ -723,7 +933,7 @@ def integrate(
                 bar,
                 request,
                 stats,
-                benchmark,
+                target,
                 iteration,
                 elapsed_seconds,
                 avg_eval_us,
@@ -734,27 +944,29 @@ def integrate(
                 request.target_rel_accuracy is None
                 and request.max_iter >= 0
                 and iteration >= request.min_iter
-                and max(finite_err.real, finite_err.imag) < request.min_error
+                and max(training_err.real, training_err.imag) < request.min_error
             ):
                 break
-            if target_accuracy_reached(request, stats, benchmark, iteration):
+            if target_accuracy_reached(request, stats, target, iteration):
                 break
 
-        return IntegrationResult(
-            raw_sector_coeffs=[stat.mean for stat in stats],
-            raw_sector_errors=[stat.error for stat in stats],
-            samples=stats[0].count,
-            elapsed_seconds=time.perf_counter() - start_time,
-            avg_eval_us_per_sample_per_worker=avg_eval_us_per_sample_per_worker(
-                hot_timing, stats[0].count
-            ),
-            eval_seconds=hot_timing.eval_seconds,
-            python_seconds=hot_timing.python_seconds,
-            havana_seconds=hot_timing.havana_seconds,
-            python_overhead_fraction=hot_timing.python_overhead_fraction,
-        )
+        return build_result()
+    except KeyboardInterrupt:
+        interrupted = True
+        if not request.json:
+            print(
+                f"\n{Fore.YELLOW}Keyboard interrupt received; writing partial result "
+                f"with {stats[0].count} accumulated samples.{Style.RESET_ALL}"
+            )
+        return build_result()
     finally:
         if bar is not None:
             bar.finish(dirty=True)
         if executor is not None:
-            executor.shutdown()
+            if interrupted:
+                _terminate_executor_workers(executor)
+            executor.shutdown(wait=not interrupted, cancel_futures=True)
+        if request.workers > 1:
+            _PARENT_TOPOLOGY = None
+            _PARENT_SECTORS = None
+            _PARENT_REQUEST = None

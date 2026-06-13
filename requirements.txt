@@ -4,5 +4,8 @@ colorama
 prettytable
 progressbar2
 pytest
+pydot
+pyyaml
+pySecDec
 maturin
 patchelf

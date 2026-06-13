@@ -1,0 +1,24 @@
+digraph triple_box {
+  graph [label="triple_box"];
+  ext1 [style=invis];
+  ext2 [style=invis];
+  ext3 [style=invis];
+  ext4 [style=invis];
+  v1; v2; v3; v4; v5; v6; v7; v8;
+
+  v1 -> ext1 [id=0, name="p1", mom="p1"];
+  v2 -> ext2 [id=1, name="p2", mom="p2"];
+  v7 -> ext3 [id=2, name="p3", mom="p3"];
+  v8 -> ext4 [id=3, name="p4", mom="p4"];
+
+  v1 -> v2 [id=4, name="e0", mass="0"];
+  v2 -> v3 [id=5, name="e1", mass="0"];
+  v3 -> v4 [id=6, name="e2", mass="0"];
+  v4 -> v5 [id=7, name="e3", mass="0"];
+  v5 -> v6 [id=8, name="e4", mass="0"];
+  v6 -> v7 [id=9, name="e5", mass="0"];
+  v7 -> v8 [id=10, name="e6", mass="0"];
+  v8 -> v1 [id=11, name="e7", mass="0"];
+  v3 -> v8 [id=12, name="e8", mass="0"];
+  v5 -> v8 [id=13, name="e9", mass="0"];
+}

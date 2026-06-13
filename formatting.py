@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 import math
 from typing import Any
 
 from colorama import Fore, Style
 from prettytable import PrettyTable
+from symbolica import E
 
-from definitions import BenchmarkResult, EULER_GAMMA, IntegralRequest, JsonDict, ONELOOP_TO_FEYNMAN
+from definitions import (
+    BenchmarkResult,
+    EULER_GAMMA,
+    EpsilonExpansion,
+    IntegralRequest,
+    JsonDict,
+    ONELOOP_TO_FEYNMAN,
+    SectorIntegrationResult,
+    TargetDefinition,
+)
 from dot_topology import DotTopologyPrintout
 from integrand import TopologyDefinition
 from sectors_generator import SectorDefinition
@@ -37,6 +48,25 @@ def expression_text(expr: Any) -> str:
     return str(expr)
 
 
+def terminal_math_text(expr: Any) -> str:
+    """Format a Symbolica expression and use a readable terminal epsilon."""
+    return expression_text(expr).replace("eps", "ε")
+
+
+def affine_expression_text(expansion: EpsilonExpansion) -> str:
+    """Format ``base + eps_coeff*eps`` through Symbolica."""
+    expr = E(f"({expansion.base:.17g}) + ({expansion.eps_coeff:.17g})*eps")
+    return terminal_math_text(expr)
+
+
+def endpoint_power_text(variable: str, power: EpsilonExpansion) -> str:
+    """Format one endpoint power through Symbolica, e.g. ``x^(-1-ε)``."""
+    expr = E(
+        f"({variable})^(({power.base:.17g}) + ({power.eps_coeff:.17g})*eps)"
+    )
+    return terminal_math_text(expr)
+
+
 def monomial_power_text(variable_names: list[str], powers: list[int]) -> str:
     """Render a monomial from variable names and integer powers."""
     factors: list[str] = []
@@ -50,7 +80,7 @@ def monomial_power_text(variable_names: list[str], powers: list[int]) -> str:
 def kinematic_restrictions(request: IntegralRequest) -> str:
     """Return the human-readable restriction enforced by validation."""
     if request.integral == "dot":
-        return "valid .dot file path; GammaLoop parser/sector generation not implemented yet"
+        return "scalar Euclidean DOT topology; unit propagator powers; no FSD contour deformation"
     if request.integral == "triangle":
         if request.mode == "massive":
             return "m > 0 and s < 4 m^2"
@@ -86,6 +116,22 @@ def summary_data(
         "bins": request.bins,
         "workers": request.workers,
         "jit_compile_evaluators": request.jit_compile_evaluators,
+        "dual_evaluator_mode": request.dual_evaluator_mode,
+        "subtraction_backend": request.subtraction_backend,
+        "runtime_ready": (
+            "recursive endpoint subtraction; coefficient dual evaluators lazy"
+            if request.subtraction_backend == "recursive" and request.dual_evaluator_mode == "lazy"
+            else "recursive endpoint subtraction; coefficient evaluators pregenerated"
+            if request.subtraction_backend == "recursive"
+            else "endpoint subtraction formulas pregenerated; coefficient dual evaluators lazy"
+            if request.dual_evaluator_mode == "lazy"
+            else "all endpoint subtraction and coefficient evaluators pregenerated"
+        ),
+        "sectors": list(request.sectors) if request.sectors is not None else "all",
+        "stability_threshold": request.stability_threshold,
+        "high_precision_stability_threshold": request.high_precision_stability_threshold,
+        "stability_precision": request.stability_precision,
+        "high_precision_stability_precision": request.high_precision_stability_precision,
     }
     if request.dot_file is not None:
         header["dot_file"] = request.dot_file
@@ -95,14 +141,74 @@ def summary_data(
         parametric_data = {
             "loops": parametric.loop_count,
             "propagator_powers": parametric.propagator_powers,
-            "D": parametric.dimension.as_text(),
-            "Gamma argument": parametric.gamma_argument.as_text(),
-            "U exponent": parametric.u_exponent.as_text(),
-            "F exponent": parametric.f_exponent.as_text(),
+            "D": affine_expression_text(parametric.dimension),
+            "Gamma argument": affine_expression_text(parametric.gamma_argument),
+            "U exponent": affine_expression_text(parametric.u_exponent),
+            "F exponent": affine_expression_text(parametric.f_exponent),
             "parameter weights": parametric.parameter_weight_powers,
             "prefactor": parametric.prefactor_description,
             "convention": parametric.convention_description,
         }
+
+    sector_rows = [
+        {
+            "id": i,
+            "name": sector.name,
+            "variables": sector.variable_names,
+            "map": [
+                f"x{j}={expression_text(expr)}"
+                for j, expr in enumerate(sector.map_exprs)
+            ],
+            "regular_jacobian": expression_text(sector.regular_jacobian_expr),
+            "u_monomial": expression_text(sector.u_monomial_expr),
+            "f_monomial": expression_text(sector.f_monomial_expr),
+            "u_monomial_powers": sector.u_monomial_powers,
+            "f_monomial_powers": sector.f_monomial_powers,
+            "jacobian_monomial_powers": sector.jacobian_monomial_powers,
+            "measure_monomial_powers": sector.measure_monomial_powers,
+            "numerator_monomial_powers": sector.numerator_monomial_powers,
+            "singular_axes": [sector.variable_names[axis] for axis in sector.singular_axes],
+            "endpoint_powers": [
+                endpoint_power_text(
+                    sector.variable_names[axis],
+                    topology.endpoint_power(sector, axis),
+                )
+                for axis in sector.singular_axes
+            ],
+            "subtraction": sector.subtraction_type,
+            "description": sector.description,
+        }
+        for i, sector in enumerate(sectors)
+    ]
+    axis_counter = Counter(len(sector.singular_axes) for sector in sectors)
+    f_monomial_counter = Counter(tuple(sector.f_monomial_powers) for sector in sectors)
+    u_monomial_counter = Counter(tuple(sector.u_monomial_powers) for sector in sectors)
+    pole_counter = Counter(len(sector.singular_axes) for sector in sectors)
+    sector_stats = {
+        "total_sector_count": len(sectors),
+        "count_by_singular_axes": dict(sorted(axis_counter.items())),
+        "count_by_f_monomial": {str(key): value for key, value in f_monomial_counter.items()},
+        "count_by_u_monomial": {str(key): value for key, value in u_monomial_counter.items()},
+        "count_by_endpoint_pole_depth": dict(sorted(pole_counter.items())),
+        "max_integration_dimension": max((sector.integration_dim for sector in sectors), default=0),
+        "max_laurent_pole_order": -topology.laurent_min_order,
+    }
+    max_endpoint_taylor_order = max(
+        (max(sector.endpoint_taylor_orders) for sector in sectors if sector.endpoint_taylor_orders),
+        default=0,
+    )
+    validation = {
+        "sector_count": len(sectors),
+        "continuous_dimension": sectors[0].integration_dim if sectors else 0,
+        "expected_laurent_orders": topology.expected_laurent_orders,
+        "benchmark_available": benchmark_available,
+        "kinematic_restrictions": kinematic_restrictions(request),
+        "max_endpoint_taylor_order": max_endpoint_taylor_order,
+    }
+    if request.integral == "dot" and max_endpoint_taylor_order > 0:
+        validation["warning"] = (
+            "DOT sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint subtraction"
+        )
 
     return {
         "header": header,
@@ -112,42 +218,16 @@ def summary_data(
             "parameter_order": topology.evaluator_parameter_order,
             "parameter_values": topology.parameter_values,
             "dual_shapes": [sector.dual_shape for sector in sectors if sector.dual_shape],
+            "dual_evaluator_mode": request.dual_evaluator_mode,
+            "dual_evaluator_build_seconds": topology.dual_evaluator_build_seconds,
+            "subtraction_formula_count": len(topology._subtraction_formulas),
+            "endpoint_projector_formula_count": len(topology._endpoint_projector_formulas),
+            "subtraction_formula_build_seconds": topology.subtraction_formula_build_seconds,
             "parametric": parametric_data,
         },
-        "sectors": [
-            {
-                "id": i,
-                "name": sector.name,
-                "variables": sector.variable_names,
-                "map": [
-                    f"x{j}={expression_text(expr)}"
-                    for j, expr in enumerate(sector.map_exprs)
-                ],
-                "regular_jacobian": expression_text(sector.regular_jacobian_expr),
-                "u_monomial": expression_text(sector.u_monomial_expr),
-                "f_monomial": expression_text(sector.f_monomial_expr),
-                "u_monomial_powers": sector.u_monomial_powers,
-                "f_monomial_powers": sector.f_monomial_powers,
-                "jacobian_monomial_powers": sector.jacobian_monomial_powers,
-                "measure_monomial_powers": sector.measure_monomial_powers,
-                "numerator_monomial_powers": sector.numerator_monomial_powers,
-                "singular_axes": [sector.variable_names[axis] for axis in sector.singular_axes],
-                "endpoint_powers": [
-                    f"{sector.variable_names[axis]}^({topology.endpoint_power(sector, axis).as_text()})"
-                    for axis in sector.singular_axes
-                ],
-                "subtraction": sector.subtraction_type,
-                "description": sector.description,
-            }
-            for i, sector in enumerate(sectors)
-        ],
-        "validation": {
-            "sector_count": len(sectors),
-            "continuous_dimension": sectors[0].integration_dim if sectors else 0,
-            "expected_laurent_orders": topology.expected_laurent_orders,
-            "benchmark_available": benchmark_available,
-            "kinematic_restrictions": kinematic_restrictions(request),
-        },
+        "sectors": sector_rows,
+        "sector_stats": sector_stats,
+        "validation": validation,
     }
 
 
@@ -173,14 +253,39 @@ def print_preintegration_summary(
     symanzik.add_row([maybe_color("F", Fore.MAGENTA), data["symanzik"]["F"]])
     symanzik.add_row(["evaluator order", ", ".join(data["symanzik"]["parameter_order"])])
     symanzik.add_row(["parameter values", data["symanzik"]["parameter_values"]])
+    symanzik.add_row(["Taylor evaluator mode", data["symanzik"]["dual_evaluator_mode"]])
+    symanzik.add_row(["Taylor evaluator build time", format_seconds(data["symanzik"]["dual_evaluator_build_seconds"])])
+    symanzik.add_row(["subtraction formula count", data["symanzik"]["subtraction_formula_count"]])
+    symanzik.add_row(["endpoint projector count", data["symanzik"]["endpoint_projector_formula_count"]])
+    symanzik.add_row([
+        "subtraction formula build time",
+        format_seconds(data["symanzik"]["subtraction_formula_build_seconds"]),
+    ])
     for key, value in data["symanzik"]["parametric"].items():
         symanzik.add_row([key, value])
     unique_shapes = []
     for shape in data["symanzik"]["dual_shapes"]:
         if shape not in unique_shapes:
             unique_shapes.append(shape)
-    symanzik.add_row(["U/F dual shapes", unique_shapes if unique_shapes else "none"])
+    symanzik.add_row(["U/F Taylor shapes", unique_shapes if unique_shapes else "none"])
     print(symanzik)
+
+    if request.integral == "dot":
+        try:
+            from dot_topology import get_dot_bundle
+
+            timings = get_dot_bundle(request).timings
+            timing_table = PrettyTable()
+            timing_table.field_names = [
+                maybe_color("generation bucket", Fore.CYAN),
+                maybe_color("time", Fore.CYAN),
+            ]
+            for name, seconds in timings.bucket_totals().items():
+                timing_table.add_row([maybe_color(name, Fore.MAGENTA), format_seconds(seconds)])
+            timing_table.add_row([maybe_color("total recorded generation", Fore.MAGENTA), format_seconds(timings.total())])
+            print(timing_table)
+        except Exception:
+            pass
 
     sector_table = PrettyTable()
     sector_table.field_names = [
@@ -196,7 +301,11 @@ def print_preintegration_summary(
         maybe_color("subtraction", Fore.CYAN),
     ]
     sector_table.align = "l"
-    for sector in data["sectors"]:
+    sector_cap = 20
+    shown_sectors = data["sectors"][:sector_cap]
+    if len(data["sectors"]) > sector_cap:
+        print(maybe_color(f"showing {sector_cap}/{len(data['sectors'])} sectors", Fore.YELLOW))
+    for sector in shown_sectors:
         sector_table.add_row(
             [
                 sector["id"],
@@ -212,6 +321,12 @@ def print_preintegration_summary(
             ]
         )
     print(sector_table)
+
+    stats_table = PrettyTable()
+    stats_table.field_names = [maybe_color("sector statistic", Fore.CYAN), maybe_color("value", Fore.CYAN)]
+    for key, value in data["sector_stats"].items():
+        stats_table.add_row([maybe_color(str(key), Fore.MAGENTA), value])
+    print(stats_table)
 
     validation = PrettyTable()
     validation.field_names = [maybe_color("check", Fore.CYAN), maybe_color("value", Fore.CYAN)]
@@ -327,37 +442,61 @@ def apply_global_convention(
     request: IntegralRequest,
 ) -> tuple[list[complex], list[complex]]:
     """Apply gamma-scheme and stripped-convention shifts to sector coefficients."""
-    if request.integral == "dot":
-        raise NotImplementedError(
-            "Global prefactor/convention handling for DOT-file topologies is "
-            "not implemented yet.  It should be derived from the parsed "
-            "topology metadata rather than inferred from triangle/box rules."
-        )
+    def convolve_regular_factor(
+        coeffs_in: list[complex],
+        errors_in: list[complex],
+        factor_coeffs: list[complex],
+    ) -> tuple[list[complex], list[complex]]:
+        """Multiply a Laurent array by a regular epsilon series.
 
-    a, b, c = sector_coeffs
-    ea, eb, ec = sector_errors
+        Coefficients are stored from the deepest pole to the requested maximum
+        order.  ``factor_coeffs[n]`` is the coefficient of ``eps^n``.
+        """
+        coeffs_out = [0.0 + 0.0j for _ in coeffs_in]
+        errors_out = [0.0 + 0.0j for _ in errors_in]
+        for coeff_index, coeff in enumerate(coeffs_in):
+            for factor_index, factor_coeff in enumerate(factor_coeffs):
+                out_index = coeff_index + factor_index
+                if out_index >= len(coeffs_out):
+                    break
+                coeffs_out[out_index] += factor_coeff * coeff
+                errors_out[out_index] += abs(factor_coeff) * errors_in[coeff_index]
+        return coeffs_out, errors_out
+
+    if request.integral == "dot":
+        if request.prefactor_convention == "pysecdec":
+            from dot_topology import get_dot_bundle
+
+            prefactor = get_dot_bundle(request).topology.global_prefactor_coeffs or [1.0 + 0.0j]
+            return convolve_regular_factor(sector_coeffs, sector_errors, prefactor)
+        return sector_coeffs[:], sector_errors[:]
+
     if request.integral == "box":
         if request.mode == "massless":
-            coeffs = [a, b + a, c + b + (math.pi * math.pi / 6.0) * a]
-            errors = [
-                ea,
-                eb + ea,
-                ec + eb + (math.pi * math.pi / 6.0) * ea,
-            ]
-            return coeffs, errors
-        return [a, b, c], sector_errors
+            return convolve_regular_factor(
+                sector_coeffs,
+                sector_errors,
+                [1.0 + 0.0j, 1.0 + 0.0j, (math.pi * math.pi / 6.0) + 0.0j],
+            )
+        return sector_coeffs[:], sector_errors[:]
 
     if request.gamma_scheme == "full":
         g2 = 0.5 * EULER_GAMMA * EULER_GAMMA + math.pi * math.pi / 12.0
-        coeffs = [-a, -b + EULER_GAMMA * a, -c + EULER_GAMMA * b - g2 * a]
-        errors = [ea, eb + abs(EULER_GAMMA) * ea, ec + abs(EULER_GAMMA) * eb + abs(g2) * ea]
-        return coeffs, errors
+        signed = [-coeff for coeff in sector_coeffs]
+        return convolve_regular_factor(
+            signed,
+            sector_errors,
+            [1.0 + 0.0j, -EULER_GAMMA + 0.0j, g2 + 0.0j],
+        )
 
-    coeffs = [-a, -b, -c]
+    coeffs = [-coeff for coeff in sector_coeffs]
     errors = sector_errors[:]
     if request.mode == "massless":
-        coeffs[2] += (math.pi * math.pi / 6.0) * coeffs[0]
-        errors[2] = errors[2] + (math.pi * math.pi / 6.0) * errors[0]
+        return convolve_regular_factor(
+            coeffs,
+            errors,
+            [1.0 + 0.0j, 0.0 + 0.0j, (math.pi * math.pi / 6.0) + 0.0j],
+        )
     return coeffs, errors
 
 
@@ -365,18 +504,31 @@ def selected_prefactor_values(
     request: IntegralRequest,
     raw_coeffs: list[complex],
     raw_errors: list[complex],
-    benchmark: BenchmarkResult,
+    benchmark: BenchmarkResult | None,
 ) -> tuple[list[complex], list[complex], list[complex], complex]:
     """Select raw or Feynman-normalized display coefficients."""
     factor = benchmark.factor if benchmark is not None else ONELOOP_TO_FEYNMAN
+    bench_raw = list(benchmark.raw) if benchmark is not None else [0.0 + 0.0j for _ in raw_coeffs]
+    if len(bench_raw) < len(raw_coeffs):
+        bench_raw = [0.0 + 0.0j for _ in range(len(raw_coeffs) - len(bench_raw))] + bench_raw
+    elif len(bench_raw) > len(raw_coeffs):
+        bench_raw = bench_raw[-len(raw_coeffs) :]
+    if request.prefactor_convention in {"sector", "pysecdec"}:
+        return raw_coeffs, raw_errors, bench_raw, 1.0
     if request.prefactor_convention == "feynman":
         return (
             [factor * c for c in raw_coeffs],
             [abs(factor) * e for e in raw_errors],
-            [factor * value for value in benchmark.raw],
+            [factor * value for value in bench_raw],
             factor,
         )
-    return raw_coeffs, raw_errors, benchmark.raw, factor
+    return raw_coeffs, raw_errors, bench_raw, factor
+
+
+def laurent_labels_for_coefficients(request: IntegralRequest, count: int) -> list[str]:
+    """Return contiguous Laurent labels ending at the requested max order."""
+    min_order = request.max_eps_order - count + 1
+    return [f"eps^{order}" for order in range(min_order, request.max_eps_order + 1)]
 
 
 def format_complex(z: complex, digits: int = 8) -> str:
@@ -428,7 +580,7 @@ def compare_pull(diff: complex | None, err: complex) -> tuple[str, str]:
     """Return formatted pull text and row color."""
     pull = pull_value(diff, err)
     if pull is None:
-        return "-", Fore.WHITE
+        return "N/A", Fore.WHITE
     if pull <= 2.0:
         return f"{pull:.2f}σ", Fore.GREEN
     if pull <= 5.0:
@@ -436,11 +588,45 @@ def compare_pull(diff: complex | None, err: complex) -> tuple[str, str]:
     return f"{pull:.2f}σ", Fore.RED
 
 
+def precision_stats_summary(
+    counts: dict[str, int],
+    total_samples: int,
+    request: IntegralRequest,
+) -> JsonDict:
+    """Build JSON-friendly precision-escalation statistics."""
+    total = max(int(total_samples), 0)
+
+    def fraction(key: str) -> float:
+        if total <= 0:
+            return 0.0
+        return float(counts.get(key, 0)) / float(total)
+
+    return {
+        "total_samples": total,
+        "ordinary": {
+            "samples": int(counts.get("ordinary", 0)),
+            "fraction": fraction("ordinary"),
+        },
+        "stability": {
+            "samples": int(counts.get("stability", 0)),
+            "fraction": fraction("stability"),
+            "threshold": request.stability_threshold,
+            "precision_digits": request.stability_precision,
+        },
+        "high_precision": {
+            "samples": int(counts.get("high_precision", 0)),
+            "fraction": fraction("high_precision"),
+            "threshold": request.high_precision_stability_threshold,
+            "precision_digits": request.high_precision_stability_precision,
+        },
+    }
+
+
 def make_output(
     request: IntegralRequest,
     raw_coeffs: list[complex],
     raw_errors: list[complex],
-    benchmark: BenchmarkResult,
+    target: TargetDefinition | None,
     samples: int,
     elapsed_seconds: float,
     avg_eval_us_per_sample_per_worker: float,
@@ -449,12 +635,30 @@ def make_output(
     havana_seconds: float,
     python_overhead_fraction: float,
     summary: JsonDict,
+    precision_counts: dict[str, int] | None = None,
+    sector_results: list[JsonDict] | None = None,
+    interrupted: bool = False,
 ) -> JsonDict:
     """Assemble final output data before printing or JSON serialization."""
-    display_coeffs, display_errors, display_bench, factor = selected_prefactor_values(
-        request, raw_coeffs, raw_errors, benchmark
+    display_coeffs, display_errors, _display_bench, factor = selected_prefactor_values(
+        request, raw_coeffs, raw_errors, None
     )
+    labels = list(summary.get("validation", {}).get("expected_laurent_orders", []))
+    if len(labels) != len(raw_coeffs):
+        labels = laurent_labels_for_coefficients(request, len(raw_coeffs))
+    benchmark_available = target is not None
+    target_coeffs = target.coefficients if target is not None else [0.0 + 0.0j for _ in raw_coeffs]
+    target_errors = target.errors if target is not None else [0.0 + 0.0j for _ in raw_coeffs]
+    diffs = [
+        coeff - ref if target is not None else None
+        for coeff, ref in zip(display_coeffs, target_coeffs)
+    ]
+    pulls = [
+        pull_value(diff, err) if diff is not None else None
+        for diff, err in zip(diffs, display_errors)
+    ]
     return {
+        "schema_version": 1,
         "integral": request.integral,
         "mode": request.mode,
         "gamma_scheme": request.gamma_scheme,
@@ -466,33 +670,101 @@ def make_output(
         "eval_seconds": eval_seconds,
         "python_seconds": python_seconds,
         "havana_seconds": havana_seconds,
+        "dual_evaluator_build_seconds": summary.get("symanzik", {}).get(
+            "dual_evaluator_build_seconds", 0.0
+        ),
         "python_overhead_fraction": python_overhead_fraction,
+        "precision_stats": precision_stats_summary(precision_counts or {}, samples, request),
+        "interrupted": interrupted,
+        "benchmark_available": benchmark_available,
         "summary": summary,
+        "laurent_labels": labels,
+        "target": {
+            "source": target.source if target is not None else "none",
+            "convention": target.convention if target is not None else request.prefactor_convention,
+            "coefficients": target_coeffs if target is not None else [],
+            "errors": target_errors if target is not None else [],
+            "metadata": target.metadata if target is not None else {},
+        },
         "raw": {
-            "epsilon_minus_2": raw_coeffs[0],
-            "epsilon_minus_1": raw_coeffs[1],
-            "epsilon_0": raw_coeffs[2],
+            "coefficients": raw_coeffs,
             "errors": raw_errors,
         },
         "display": {
-            "epsilon_minus_2": display_coeffs[0],
-            "epsilon_minus_1": display_coeffs[1],
-            "epsilon_0": display_coeffs[2],
+            "coefficients": display_coeffs,
             "errors": display_errors,
-            "benchmark": display_bench,
+            "benchmark": target_coeffs,
         },
-        "benchmark": {
-            "raw": benchmark.raw,
-            "feynman": benchmark.feynman,
-            "factor": benchmark.factor,
+        "aggregate_results": {
+            "labels": labels,
+            "raw": {"coefficients": raw_coeffs, "errors": raw_errors},
+            "display": {"coefficients": display_coeffs, "errors": display_errors},
+            "target": {"coefficients": target_coeffs if target is not None else [], "errors": target_errors if target is not None else []},
+            "diff": diffs,
+            "pull": pulls,
         },
+        "sector_results": sector_results or [],
     }
+
+
+def build_sector_result_rows(
+    request: IntegralRequest,
+    sectors: list[SectorDefinition],
+    per_sector: list[SectorIntegrationResult],
+) -> list[JsonDict]:
+    """Build JSON-ready per-sector coefficient summaries."""
+    rows: list[JsonDict] = []
+    sector_by_id = {i: sector for i, sector in enumerate(sectors)}
+    for result in per_sector:
+        sector = sector_by_id.get(result.sector_id)
+        raw_coeffs, raw_errors = apply_global_convention(
+            result.raw_sector_coeffs,
+            result.raw_sector_errors,
+            request,
+        )
+        display_coeffs, display_errors, _bench, _factor = selected_prefactor_values(
+            request,
+            raw_coeffs,
+            raw_errors,
+            None,
+        )
+        rows.append(
+            {
+                "sector_id": result.sector_id,
+                "name": result.sector_name,
+                "samples": result.samples,
+                "precision_stats": precision_stats_summary(
+                    result.precision_counts,
+                    result.samples,
+                    request,
+                ),
+                "singular_axes": [
+                    sector.variable_names[axis] for axis in sector.singular_axes
+                ] if sector is not None else [],
+                "raw": {
+                    "coefficients": raw_coeffs,
+                    "errors": raw_errors,
+                },
+                "raw_sector": {
+                    "coefficients": result.raw_sector_coeffs,
+                    "errors": result.raw_sector_errors,
+                },
+                "display": {
+                    "coefficients": display_coeffs,
+                    "errors": display_errors,
+                },
+                "sort_keys": {
+                    "abs_central": max((abs(value) for value in display_coeffs), default=0.0),
+                    "abs_error": max((abs(value) for value in display_errors), default=0.0),
+                },
+            }
+        )
+    return rows
 
 
 def print_result_table(output: JsonDict) -> None:
     """Print the final coefficient comparison table and timing footer."""
-    labels = ["eps^-2", "eps^-1", "eps^0"]
-    keys = ["epsilon_minus_2", "epsilon_minus_1", "epsilon_0"]
+    labels = output.get("laurent_labels", ["eps^-2", "eps^-1", "eps^0"])
     convention = output["prefactor_convention"]
     table = PrettyTable()
     table.field_names = [
@@ -504,23 +776,26 @@ def print_result_table(output: JsonDict) -> None:
         maybe_color("pull", Fore.CYAN),
     ]
     display = output["display"]
-    for idx, key in enumerate(keys):
-        fsd_value = display[key]
+    benchmark_available = bool(output.get("benchmark_available", True))
+    for idx, label in enumerate(labels):
+        fsd_value = display["coefficients"][idx]
         err = display["errors"][idx]
-        bench_value = display["benchmark"][idx]
-        diff = fsd_value - bench_value
+        bench_value = display["benchmark"][idx] if benchmark_available else None
+        diff = fsd_value - bench_value if bench_value is not None else None
         pull_text, row_color = compare_pull(diff, err)
         table.add_row(
             [
-                maybe_color(labels[idx], Fore.MAGENTA),
+                maybe_color(label, Fore.MAGENTA),
                 maybe_color(format_complex_with_error(fsd_value, err), row_color),
                 format_percent(relative_error_percent(fsd_value, err)),
-                format_complex(bench_value),
-                maybe_color(format_complex_with_error(diff, err), row_color),
+                format_complex(bench_value) if bench_value is not None else maybe_color("N/A", Fore.WHITE),
+                maybe_color(format_complex_with_error(diff, err), row_color) if diff is not None else maybe_color("N/A", Fore.WHITE),
                 maybe_color(pull_text, row_color),
             ]
         )
     print(table)
+    if output.get("interrupted"):
+        print(maybe_color("Run interrupted: partial accumulated result was written.", Fore.YELLOW))
     print(
         maybe_color("Legend:", Fore.CYAN)
         + " convention "
@@ -533,7 +808,7 @@ def print_result_table(output: JsonDict) -> None:
         + maybe_color("MC err", Fore.YELLOW)
         + " is relative 1σ in percent; "
         + maybe_color("pull", Fore.MAGENTA)
-        + " uses the absolute 1σ error."
+        + " uses the absolute 1σ error; N/A means no reference backend was run."
     )
     total_timing = max(
         output["eval_seconds"] + output["python_seconds"] + output["havana_seconds"],
@@ -550,6 +825,8 @@ def print_result_table(output: JsonDict) -> None:
         + colored_kv("PythonT", format_seconds(output["python_seconds"]), Fore.YELLOW)
         + "  "
         + colored_kv("HavanaT", format_seconds(output["havana_seconds"]), Fore.BLUE)
+        + "  "
+        + colored_kv("TaylorGen", format_seconds(output["dual_evaluator_build_seconds"]), Fore.CYAN)
         + "  "
         + colored_kv("avg", f"{output['avg_eval_us_per_sample_per_worker']:.3g} μs/smpl/wkr", Fore.MAGENTA)
     )
@@ -570,6 +847,45 @@ def print_result_table(output: JsonDict) -> None:
         + " / "
         + maybe_color(">5σ", Fore.RED)
     )
+    precision = output.get("precision_stats", {})
+    if precision:
+        stability = precision.get("stability", {})
+        high = precision.get("high_precision", {})
+        ordinary = precision.get("ordinary", {})
+        print(
+            maybe_color("Precision:", Fore.CYAN)
+            + " "
+            + colored_kv(
+                "ordinary",
+                f"{ordinary.get('samples', 0)} ({format_percent(100.0 * float(ordinary.get('fraction', 0.0)))})",
+                Fore.GREEN,
+            )
+            + "  "
+            + colored_kv(
+                f"prec{stability.get('precision_digits', '?')}",
+                f"{stability.get('samples', 0)} ({format_percent(100.0 * float(stability.get('fraction', 0.0)))})",
+                Fore.YELLOW,
+            )
+            + "  "
+            + colored_kv(
+                f"prec{high.get('precision_digits', '?')}",
+                f"{high.get('samples', 0)} ({format_percent(100.0 * float(high.get('fraction', 0.0)))})",
+                Fore.RED,
+            )
+        )
+    generation = output.get("summary", {}).get("generation_timings")
+    if isinstance(generation, dict) and generation.get("headline"):
+        parts = []
+        for record in generation["headline"]:
+            if isinstance(record, dict):
+                parts.append(
+                    colored_kv(str(record.get("name")), format_seconds(float(record.get("seconds", 0.0))), Fore.MAGENTA)
+                )
+        total = generation.get("total")
+        if total is not None:
+            parts.append(colored_kv("total", format_seconds(float(total)), Fore.CYAN))
+        if parts:
+            print(maybe_color("Generation:", Fore.CYAN) + " " + "  ".join(parts))
 
 
 def json_default(obj: Any) -> Any:

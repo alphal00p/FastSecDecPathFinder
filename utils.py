@@ -2,7 +2,43 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
 import math
+from typing import Any
+
+
+def decimal_with_precision(value: Any, precision_digits: int) -> Decimal:
+    """Return a Decimal carrying the requested significant-digit precision.
+
+    Symbolica's ``*_with_prec`` evaluators inspect the Decimal payload they
+    receive.  A value such as ``Decimal("1.0")`` therefore carries too little
+    input precision even if the evaluator is asked for 1000 digits.  Formatting
+    through scientific notation pads finite float inputs to the requested
+    significant-digit count while preserving the sampled double value as the
+    source of truth.
+    """
+    digits = max(int(precision_digits), 1)
+    with localcontext() as context:
+        context.prec = digits
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return Decimal(str(numeric))
+        base = value if isinstance(value, Decimal) else Decimal(str(numeric))
+        if base.is_zero():
+            if digits == 1:
+                return Decimal("0")
+            return Decimal("0." + ("0" * (digits - 1)))
+        padded = format(base, f".{digits - 1}e")
+        return +Decimal(padded)
+
+
+def decimal_complex_with_precision(value: Any, precision_digits: int) -> tuple[Decimal, Decimal]:
+    """Return Symbolica's arbitrary-precision complex input tuple."""
+    z = complex(value)
+    return (
+        decimal_with_precision(z.real, precision_digits),
+        decimal_with_precision(z.imag, precision_digits),
+    )
 
 
 def _ndec(value: float, offset: int) -> int:

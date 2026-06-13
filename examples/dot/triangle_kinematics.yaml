@@ -1,0 +1,10 @@
+values:
+  s: -1.0
+  mt: 0.0
+replacements:
+  p0*p0: s
+  p1*p1: 0
+  p2*p2: 0
+  p1*p2: s/2
+  p0*p1: -s/2
+  p0*p2: -s/2

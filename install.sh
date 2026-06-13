@@ -22,7 +22,10 @@ done
 
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
-"${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+# pySecDec source builds compile bundled GiNaC documentation on some systems.
+# A conservative C locale avoids macOS failures when LC_ALL=C.UTF-8 is not
+# supported by the local Perl/makeinfo toolchain.
+LC_ALL=C LANG=C "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
 
 # Prefer a user-supplied checkout.  The clone option is only a convenience and
 # puts the external repository under ignored .deps/.

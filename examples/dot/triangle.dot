@@ -1,0 +1,15 @@
+digraph triangle {
+  graph [label="triangle"];
+  ext0 [style=invis];
+  ext1 [style=invis];
+  ext2 [style=invis];
+  v1; v2; v3;
+
+  ext0 -> v1 [id=0, name="p0", mom="p0"];
+  v2 -> ext1 [id=1, name="p1", mom="p1"];
+  v3 -> ext2 [id=2, name="p2", mom="p2"];
+
+  v1 -> v2 [id=3, name="e0", mass="mt"];
+  v2 -> v3 [id=4, name="e1", mass="mt"];
+  v3 -> v1 [id=5, name="e2", mass="mt"];
+}

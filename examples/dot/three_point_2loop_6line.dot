@@ -1,0 +1,18 @@
+digraph three_point_2loop_6line {
+  graph [label="three_point_2loop_6line"];
+  ext1 [style=invis];
+  ext2 [style=invis];
+  ext3 [style=invis];
+  v1; v2; v3; v4; v5;
+
+  v1 -> ext1 [id=0, name="p1", mom="p1"];
+  v2 -> ext2 [id=1, name="p2", mom="p2"];
+  v3 -> ext3 [id=2, name="p3", mom="p3"];
+
+  v1 -> v2 [id=3, name="e0", mass="mt"];
+  v2 -> v3 [id=4, name="e1", mass="mt"];
+  v3 -> v1 [id=5, name="e2", mass="mt"];
+  v1 -> v4 [id=6, name="e3", mass="mt"];
+  v4 -> v5 [id=7, name="e4", mass="mt"];
+  v5 -> v3 [id=8, name="e5", mass="mt"];
+}

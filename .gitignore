@@ -1,6 +1,8 @@
 .venv/
 .deps/
 external/
+.pysecdec_build/
+.pysecdec*/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -16,3 +18,10 @@ __pycache__/
 *.out
 *.synctex.gz
 *.toc
+
+# Generated integration outputs kept out of the source history.
+/result.json
+/docs/triple_box_fsd_result.json
+/examples/dot/result.json
+/examples/dot/double_box_validation_*.json
+/examples/dot/triangle_progress_smoke.json
