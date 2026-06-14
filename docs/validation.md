@@ -168,26 +168,25 @@ DOT triple box with FSD for the first two leading poles:
 
 ## Generation And Runtime Summary
 
-`FSD gen` is the total FSD-side generation time.  For DOT inputs this is the
-sum of U/F construction, sector generation/conversion, and Symbolica evaluator
-construction.  `pySecDec gen` is package generation plus compile plus load for
-the pySecDec generated integrator, when that path was run.  `avg FSD runtime`
-is the evaluator time per sample per worker reported by FSD.
+This table is intentionally topology-centric.  `FSD generation` is the time
+needed to prepare the FSD objects used by the run.  For DOT inputs this includes
+U/F construction, sector generation/conversion, and Symbolica evaluator
+construction.  `avg FSD runtime` is the evaluator time per sample per worker
+reported by FSD.
 
-| setup | engine | sectors | samples | wall [s] | FSD gen [s] | pySecDec gen [s] | pySecDec integ [s] | avg FSD runtime [us/smpl/wkr] |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| built-in triangle | FSD | 2 | 1,000,000 | 1.60 | n/a | n/a | n/a | 6.38 |
-| built-in box | FSD | 12 | 1,000,000 | 1.72 | n/a | n/a | n/a | 6.37 |
-| DOT double box | FSD | 140 | 3,000,000 | 84.28 | 0.615 | n/a | n/a | 18.23 |
-| DOT double box | pySecDec | 140 | n/a | 276.99 | 0.205 | 272.81 | 3.37 | n/a |
-| DOT triple box, leading two poles | FSD | 2792 | 2,000 | 1064.10 | 22.80 | n/a | n/a | 3177.71 |
-| DOT triple box, target attempt | pySecDec | 2792 | n/a | 600.04 timeout | 23.7 | >600 timeout | n/a | n/a |
+| topology | coefficients reported | target status | FSD generation [s] | avg FSD runtime [us/smpl/wkr] |
+|---|---|---|---:|---:|
+| triangle | `eps^-2..eps^0` | OneLOopBridge | n/a, built-in | 6.38 |
+| box | `eps^-2..eps^0` | OneLOopBridge | n/a, built-in | 6.37 |
+| double box | `eps^-4..eps^0` | stored pySecDec-convention target | 0.615 | 18.23 |
+| triple box | leading run: `eps^-6..eps^-5`; full probe: `eps^-6..eps^0` | no pySecDec target available | 22.80 leading; 25.28 full probe | 3177.71 leading; 3029 full probe |
 
-The double-box pySecDec generation time is dominated by compilation:
-6.07 s package generation, 266.73 s compile, and 0.005 s load.  The triple-box
-pySecDec run reached package generation but did not finish within the 600 s
-target-generation cap, so no pySecDec target was available for the FSD
-triple-box coefficients.
+Reference-generation timings are not mixed into the FSD runtime columns:
+
+| topology | reference engine | result |
+|---|---|---|
+| double box | pySecDec | completed: 6.07 s package generation, 266.73 s compile, 0.005 s load, 3.37 s integration |
+| triple box | pySecDec | not completed: package generation did not finish within the 600 s target attempt, so no pySecDec coefficients were produced |
 
 ## Built-In One-Loop Validation
 
@@ -248,7 +247,7 @@ The low-stat pySecDec comparison run produced:
 | `eps^-1` | 3.000086 | 0.006473 | 0.216% |
 | `eps^0` | -14.822466 | 0.024256 | 0.164% |
 
-## DOT Triple Box Leading Poles
+## DOT Triple Box Probes
 
 The triple box was generated and integrated by FSD for the first two leading
 Laurent coefficients only.  A matching pySecDec target was attempted but was
@@ -260,11 +259,27 @@ budget.
 | `eps^-6` | 0.136694 | 0.0956 | 69.9% | unavailable |
 | `eps^-5` | -1.952625 | 3.29 | 169% | unavailable |
 
-This is not a precision validation yet.  It validates that the DOT-to-sector
-path can generate the 2792-sector triple box and run through the leading two
-orders under the 30-minute budget, but the statistics are far from converged.
-The missing pySecDec target is currently the main blocker for a numerical
-agreement statement on this topology.
+An earlier full-pole FSD probe also ran through the complete requested range
+`eps^-6..eps^0`.  This is seven Laurent coefficients, starting at the
+three-loop deepest pole.  It is included here because it is the available
+all-orders three-loop result, but it is still a low-statistics probe and has no
+pySecDec target.
+
+| order | FSD full-pole probe | MC err | rel err | target |
+|---|---:|---:|---:|---|
+| `eps^-6` | 0.0798 | 0.2055 | 258% | unavailable |
+| `eps^-5` | -1.745 | 3.964 | 227% | unavailable |
+| `eps^-4` | -53.36 | 54.31 | 102% | unavailable |
+| `eps^-3` | -42.7 | 980.8 | 2300% | unavailable |
+| `eps^-2` | 1.614e4 | 1.846e4 | 114% | unavailable |
+| `eps^-1` | 1.788e5 | 1.613e5 | 90.2% | unavailable |
+| `eps^0` | 9.923e5 | 8.735e5 | 88.0% | unavailable |
+
+These are not precision validations yet.  They validate that the DOT-to-sector
+path can generate the 2792-sector triple box and run both the leading-pole and
+full-pole coefficient ranges, but the statistics are far from converged.  The
+missing pySecDec target is currently the main blocker for a numerical agreement
+statement on this topology.
 
 ## Diagnostic Runs
 
