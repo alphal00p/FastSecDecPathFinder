@@ -88,7 +88,7 @@ The generation buckets are:
 | three-point 2-loop, 6-line | iterative | 2 | 6 | 5 | 22 | 0 | `eps^0` | 0.0215 | 0.00364 | 0.00079 | 0.0259 |
 | three-point 3-loop, 8-line | iterative | 3 | 8 | 7 | 162 | 0 | `eps^0` | 0.0270 | 0.0448 | 0.00394 | 0.0758 |
 | double box | iterative | 2 | 7 | 6 | 140 | 0,1,2,3,4 | `eps^-4..eps^0` | 0.164 | 0.0306 | 0.300 | 0.494 |
-| triple box | geometric_ku | 3 | 10 | 9 | 298 | 0,1,2,3,4 | `eps^-4..eps^0` | 0.191 | 2.92 | 11.8 | 14.9 |
+| triple box | geometric_ku | 3 | 10 | 9 | 2792 | 0,1,2,3,4,5,6 | `eps^-6..eps^0` | 0.194 | 24.901 | 0.189 | 25.284 |
 
 The `geometric` sector method was not used because Normaliz was not available
 on `PATH`.  `geometric_ku` was used for the triple box because iterative
@@ -114,7 +114,7 @@ The ladder examples used the same FSD engine but with larger batches and four
 workers:
 
 - double box: `--samples-per-iter 20000 --batch-size 5000 --workers 4`
-- triple box: `--sector-method geometric_ku --samples-per-iter 10000 --batch-size 2000 --workers 4`
+- triple box full-pole probe: `--sector-method geometric_ku --symbolic-derivatives --subtraction-backend recursive --samples-per-iter 600 --batch-size 1 --workers 10`
 
 | case | samples | workers | elapsed [s] | EvalT [s] | PythonT [s] | HavanaT [s] | avg [us/smpl/wkr] |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -127,7 +127,7 @@ workers:
 | three-point 2-loop, 6-line | 4096 | 1 | 0.00997 | 0.00150 | 0.00675 | 0.00168 | 0.366 |
 | three-point 3-loop, 8-line | 4096 | 1 | 0.0515 | 0.00551 | 0.0380 | 0.00794 | 1.35 |
 | double box | 20000 | 4 | 2.62 | 5.77 | 4.31 | 0.0218 | 289 |
-| triple box | 10000 | 4 | 29.2 | 27.0 | 48.2 | 0.0508 | 2698 |
+| triple box full-pole probe | 600 | 10 | 202.3 | 1.82 | 1866.7 | 0.323 | 3029 |
 
 `EvalT` and `PythonT` are worker-summed work times, so they can exceed elapsed
 wall time in multi-worker runs.  The `avg` column normalizes `EvalT` by the
@@ -258,7 +258,7 @@ integrals have converged.
 | three-point 2-loop, 6-line | `eps^0 = 0.146775 +/- 0.004406` |
 | three-point 3-loop, 8-line | `eps^0 = 0.229907 +/- 0.008416` |
 | double box | `eps^-4 = 0.3146 +/- 0.0155`; `eps^-3 = -4.39 +/- 5.05`; `eps^-2 = -269.5 +/- 260.5`; `eps^-1 = -5.59e3 +/- 7.72e3`; `eps^0 = -7.39e4 +/- 1.29e5` |
-| triple box | `eps^-4 = 0.2330 +/- 0.0193`; `eps^-3 = 403.5 +/- 252.6`; `eps^-2 = 1.075e5 +/- 6.329e4`; `eps^-1 = 8.89e7 +/- 8.69e7`; `eps^0 = 4.36e9 +/- 4.30e9` |
+| triple box full-pole probe | `eps^-6 = 0.0798 +/- 0.2055`; `eps^-5 = -1.745 +/- 3.964`; `eps^-4 = -53.36 +/- 54.31`; `eps^-3 = -42.7 +/- 980.8`; `eps^-2 = 1.614e4 +/- 1.846e4`; `eps^-1 = 1.788e5 +/- 1.613e5`; `eps^0 = 9.923e5 +/- 8.735e5` |
 
 ## pySecDec Comparison Policy
 
