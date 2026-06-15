@@ -55,6 +55,7 @@ class ParametricRepresentation:
 class IntegralRequest:
     """Fully validated CLI configuration passed through the implementation."""
 
+    run_file: str | None
     integral: str
     dot_file: str | None
     kinematics_file: str | None
@@ -70,6 +71,7 @@ class IntegralRequest:
     progress_value_order: str
     max_eps_order: int
     target_args: tuple[str, ...] | None
+    refresh_target: bool
     show_results: str | None
     sort_sector_results: str
     result_path: str
@@ -94,6 +96,13 @@ class IntegralRequest:
     jit_compile_evaluators: bool
     dual_evaluator_mode: str
     subtraction_backend: str
+    ibp_reduce_to_log_endpoint: bool
+    direct_projector_cache_term_threshold: int
+    force_regular_taylor_formulas: bool
+    regular_taylor_signature_limit: int
+    regular_taylor_formula_volume_limit: int
+    regular_taylor_formula_axis_limit: int
+    chain_rule_formula_signature_limit: int
     stability_threshold: float
     high_precision_stability_threshold: float
     stability_precision: int

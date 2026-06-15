@@ -22,6 +22,19 @@ __pycache__/
 # Generated integration outputs kept out of the source history.
 /result.json
 /docs/triple_box_fsd_result.json
-/examples/dot/result.json
-/examples/dot/double_box_validation_*.json
-/examples/dot/triangle_progress_smoke.json
+/examples/outputs/result.json
+/examples/outputs/*_result.json
+/examples/outputs/triple_box_all_*.json
+/examples/outputs/triple_box_*_probe.json
+/examples/outputs/triple_box_*_smoke.json
+/examples/outputs/triple_box_psd*.json
+/examples/outputs/double_box_validation_*.json
+/examples/outputs/triangle_progress_smoke.json
+/examples/outputs/*.prof
+/assets/subtraction_formulae/*.json
+!/assets/subtraction_formulae/.gitkeep
+!/assets/subtraction_formulae/README.md
+!/assets/subtraction_formulae/curated/
+!/assets/subtraction_formulae/curated/.gitkeep
+!/assets/subtraction_formulae/curated/README.md
+!/assets/subtraction_formulae/curated/*.json

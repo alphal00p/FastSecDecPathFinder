@@ -19,6 +19,7 @@ import shutil
 import sys
 
 from colorama import Fore, Style, init as colorama_init
+import yaml
 
 from benchmark import check_oneloop_bridge, compute_benchmark
 from definitions import IntegralRequest, TargetDefinition
@@ -77,6 +78,32 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--stability-precision must be positive")
     if request.high_precision_stability_precision <= 0:
         raise ValueError("--high-precision-stability-precision must be positive")
+    if (
+        request.ibp_reduce_to_log_endpoint
+        and request.subtraction_backend != "projector-formula"
+    ):
+        raise ValueError(
+            "--IBP_reduce_to_log_endpoint is only supported with "
+            "--subtraction-backend projector-formula"
+        )
+    if (
+        request.force_regular_taylor_formulas
+        and request.subtraction_backend != "projector-formula"
+    ):
+        raise ValueError(
+            "--force-regular-taylor-formulas is only supported with "
+            "--subtraction-backend projector-formula"
+        )
+    if request.regular_taylor_signature_limit < 0:
+        raise ValueError("--regular-taylor-signature-limit must be >= 0")
+    if request.regular_taylor_formula_volume_limit < 0:
+        raise ValueError("--regular-taylor-formula-volume-limit must be >= 0")
+    if request.regular_taylor_formula_axis_limit < 0:
+        raise ValueError("--regular-taylor-formula-axis-limit must be >= 0")
+    if request.chain_rule_formula_signature_limit < 0:
+        raise ValueError("--chain-rule-formula-signature-limit must be >= 0")
+    if request.direct_projector_cache_term_threshold < 0:
+        raise ValueError("--direct-projector-cache-term-threshold must be >= 0")
 
     if request.integral == "dot":
         if request.dot_file is None:
@@ -146,10 +173,100 @@ def validate_request(request: IntegralRequest) -> None:
     raise ValueError(f"unsupported integral {request.integral!r}")
 
 
-def parse_args() -> argparse.Namespace:
-    """Build the CLI parser and return parsed command-line options."""
+def _normalise_run_key(key: str) -> str:
+    """Map YAML option keys to argparse destination names."""
+    return str(key).strip().replace("-", "_").lower()
+
+
+def _is_numeric_token(token: object) -> bool:
+    """Return whether a target token should be interpreted as a number."""
+    try:
+        float(str(token))
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_yaml_path(value: object, base_dir: Path) -> str:
+    """Resolve one YAML path relative to the run-file directory."""
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return str(path)
+    return str((base_dir / path).resolve())
+
+
+def _load_run_defaults(run_file: str | None) -> dict[str, object]:
+    """Load CLI defaults from a YAML run preset.
+
+    YAML keys mirror long CLI options without the leading ``--`` and may use
+    either kebab-case or snake_case.  Path-like values in the YAML are resolved
+    relative to the YAML file location; explicit CLI paths remain untouched by
+    this helper because argparse applies them after defaults are installed.
+    """
+    if run_file is None:
+        return {}
+    run_path = Path(run_file).expanduser().resolve()
+    data = yaml.safe_load(run_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{run_path}: run preset must contain a YAML mapping")
+
+    base_dir = run_path.parent
+    defaults: dict[str, object] = {"run_file": str(run_path)}
+    path_keys = {
+        "dot_file",
+        "kinematics",
+        "normaliz_executable",
+        "pysecdec_workdir",
+        "result_path",
+        "log_file",
+        "show_results",
+    }
+    for raw_key, raw_value in data.items():
+        key = _normalise_run_key(raw_key)
+        value = raw_value
+        if key in {
+            "pregenerate_dual_evaluators",
+            "lazy_dual_evaluators_generation",
+            "pregenerate_single_overall_dual_evaluator",
+            "symbolic_derivatives",
+        }:
+            if bool(value):
+                defaults["dual_evaluator_mode"] = {
+                    "pregenerate_dual_evaluators": "pregenerate",
+                    "lazy_dual_evaluators_generation": "lazy",
+                    "pregenerate_single_overall_dual_evaluator": "single-overall",
+                    "symbolic_derivatives": "symbolic-derivatives",
+                }[key]
+            continue
+        if key in path_keys and value is not None:
+            value = _resolve_yaml_path(value, base_dir)
+        elif key == "target" and value is not None:
+            tokens = value if isinstance(value, list) else [value]
+            resolved_tokens: list[str] = []
+            for token in tokens:
+                if str(token) == "pysecdec" or _is_numeric_token(token):
+                    resolved_tokens.append(str(token))
+                else:
+                    resolved_tokens.append(_resolve_yaml_path(token, base_dir))
+            value = resolved_tokens
+        elif key == "sectors" and value is not None:
+            value = [int(item) for item in (value if isinstance(value, list) else [value])]
+        defaults[key] = value
+    return defaults
+
+
+def build_parser(defaults: dict[str, object] | None = None) -> argparse.ArgumentParser:
+    """Build the CLI parser, optionally seeded with YAML defaults."""
+    defaults = defaults or {}
     parser = argparse.ArgumentParser(
         description="FSD modular black-box sector-decomposition prototype."
+    )
+    parser.set_defaults(**defaults)
+    parser.add_argument(
+        "--run",
+        dest="run_file",
+        default=defaults.get("run_file"),
+        help="YAML run preset. Explicit CLI flags override values from the file.",
     )
     parser.add_argument(
         "--integral",
@@ -245,7 +362,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stability-precision",
         type=int,
-        default=32,
+        default=100,
         help="Decimal digits used for Symbolica evaluator calls below --stability-threshold.",
     )
     parser.add_argument(
@@ -301,13 +418,76 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--subtraction-backend",
         choices=["formula", "projector-formula", "recursive"],
-        default="formula",
+        default="projector-formula",
         help=(
             "Endpoint subtraction evaluator. 'formula' uses pregenerated Symbolica "
             "subtraction-formula evaluators; 'projector-formula' uses smaller "
             "endpoint-only Symbolica projectors fed by black-box Taylor data; "
             "'recursive' uses the vectorized recursive Taylor subtraction "
             "implementation and skips formula generation."
+        ),
+    )
+    parser.add_argument(
+        "--regular-taylor-signature-limit",
+        type=int,
+        default=256,
+        help=(
+            "Maximum regular-Taylor source-request workload to pregenerate for "
+            "the projector-formula backend. Larger values can use the "
+            "regular_taylor_* JSON cache but may be slow on a cold cache."
+        ),
+    )
+    parser.add_argument(
+        "--regular-taylor-formula-volume-limit",
+        type=int,
+        default=64,
+        help=(
+            "Maximum product of (Taylor order + 1) for a universal "
+            "regular-Taylor formula prepared in all-sector projector-formula "
+            "mode. Larger values prepare more formulas but can make cold "
+            "Symbolica evaluator builds slow."
+        ),
+    )
+    parser.add_argument(
+        "--regular-taylor-formula-axis-limit",
+        type=int,
+        default=5,
+        help=(
+            "Maximum number of singular Taylor axes for universal "
+            "regular-Taylor formulas prepared by default. Higher-axis "
+            "signatures are left to the fallback path to avoid long cold "
+            "Symbolica builds."
+        ),
+    )
+    parser.add_argument(
+        "--force-regular-taylor-formulas",
+        action="store_true",
+        help=(
+            "Lift the regular-Taylor formula guards for projector-formula mode. "
+            "This is intended for cache-warming and viability studies of the "
+            "expensive universal high-axis formulas; cold generation can be slow."
+        ),
+    )
+    parser.add_argument(
+        "--chain-rule-formula-signature-limit",
+        type=int,
+        default=256,
+        help=(
+            "Maximum mapped-derivative chain-rule formula count to pregenerate "
+            "in symbolic-derivative projector-formula mode. Larger values move "
+            "more chain-rule composition into Symbolica but can make cold "
+            "generation slow for all-sector high-loop runs."
+        ),
+    )
+    parser.add_argument(
+        "--direct-projector-cache-term-threshold",
+        type=int,
+        default=54,
+        help=(
+            "When IBP endpoint lowering is enabled, use a shipped direct "
+            "endpoint-projector cache asset instead for sectors whose IBP "
+            "compound projector would require at least this many child terms. "
+            "Set to 0 to always prefer IBP."
         ),
     )
     parser.add_argument("--show-stats", action="store_true")
@@ -345,11 +525,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         nargs="+",
-        default=None,
+        default=defaults.get("target_args", defaults.get("target")),
         help=(
             "Reference target: numeric re/im pairs from deepest pole upward, "
             "'pysecdec' for DOT mode, or a previous result.json path."
         ),
+    )
+    parser.add_argument(
+        "--refresh-target",
+        action="store_true",
+        help="Regenerate file-backed pySecDec targets instead of reusing an existing file.",
     )
     parser.add_argument("--show-results", default=None, help="Show a stored result.json and exit.")
     parser.add_argument(
@@ -366,10 +551,44 @@ def parse_args() -> argparse.Namespace:
         default="index",
         help="Sorting mode used by --show-results sector tables.",
     )
+    parser.add_argument(
+        "--IBP_reduce_to_log_endpoint",
+        "--ibp-reduce-to-log-endpoint",
+        dest="ibp_reduce_to_log_endpoint",
+        action="store_true",
+        help=(
+            "For --subtraction-backend projector-formula, lower y^(-n+c eps) "
+            "endpoints to logarithmic y^(-1+c eps) endpoints by integration by parts."
+        ),
+    )
+    parser.add_argument(
+        "--no-IBP_reduce_to_log_endpoint",
+        "--no-ibp-reduce-to-log-endpoint",
+        dest="ibp_reduce_to_log_endpoint",
+        action="store_false",
+        help=(
+            "Disable IBP endpoint lowering, overriding a run YAML file that "
+            "enabled --ibp-reduce-to-log-endpoint."
+        ),
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--log-file", default=None)
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of tables.")
-    return parser.parse_args()
+    parser.set_defaults(**defaults)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Build the CLI parser and return parsed command-line options."""
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--run", dest="run_file", default=None)
+    pre_args, _unknown = pre_parser.parse_known_args(argv)
+    try:
+        defaults = _load_run_defaults(pre_args.run_file)
+    except Exception as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    parser = build_parser(defaults)
+    return parser.parse_args(argv)
 
 
 def build_request(args: argparse.Namespace) -> IntegralRequest:
@@ -388,7 +607,25 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
             if dot_file is not None
             else str(Path.cwd() / "result.json")
         )
+    target_args: tuple[str, ...] | None
+    if args.target is None:
+        target_args = None
+    elif isinstance(args.target, (list, tuple)):
+        target_args = tuple(str(item) for item in args.target)
+    else:
+        target_args = (str(args.target),)
+    force_regular_taylor_formulas = bool(args.force_regular_taylor_formulas)
+    regular_taylor_signature_limit = int(args.regular_taylor_signature_limit)
+    regular_taylor_formula_volume_limit = int(args.regular_taylor_formula_volume_limit)
+    regular_taylor_formula_axis_limit = int(args.regular_taylor_formula_axis_limit)
+    chain_rule_formula_signature_limit = int(args.chain_rule_formula_signature_limit)
+    if force_regular_taylor_formulas:
+        regular_taylor_signature_limit = max(regular_taylor_signature_limit, 1_000_000)
+        regular_taylor_formula_volume_limit = max(regular_taylor_formula_volume_limit, 1_000_000)
+        regular_taylor_formula_axis_limit = max(regular_taylor_formula_axis_limit, 32)
+
     return IntegralRequest(
+        run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
         integral="dot" if dot_file is not None else args.integral,
         dot_file=dot_file,
         kinematics_file=kinematics_file,
@@ -403,7 +640,8 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         keep_pysecdec_workdir=args.keep_pysecdec_workdir,
         progress_value_order=args.progress_value_order,
         max_eps_order=args.max_eps_order,
-        target_args=tuple(args.target) if args.target is not None else None,
+        target_args=target_args,
+        refresh_target=args.refresh_target,
         show_results=args.show_results,
         sort_sector_results=args.sort_sector_results,
         result_path=result_path,
@@ -428,6 +666,13 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         jit_compile_evaluators=args.jit_compile_evaluators,
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
+        ibp_reduce_to_log_endpoint=args.ibp_reduce_to_log_endpoint,
+        direct_projector_cache_term_threshold=args.direct_projector_cache_term_threshold,
+        force_regular_taylor_formulas=force_regular_taylor_formulas,
+        regular_taylor_signature_limit=regular_taylor_signature_limit,
+        regular_taylor_formula_volume_limit=regular_taylor_formula_volume_limit,
+        regular_taylor_formula_axis_limit=regular_taylor_formula_axis_limit,
+        chain_rule_formula_signature_limit=chain_rule_formula_signature_limit,
         stability_threshold=args.stability_threshold,
         high_precision_stability_threshold=args.high_precision_stability_threshold,
         stability_precision=args.stability_precision,
@@ -583,6 +828,58 @@ def _pysecdec_target(
     )
 
 
+def _ensure_target_parent(path: Path) -> None:
+    """Create at most the immediate target parent directory."""
+    parent = path.expanduser().parent
+    if parent.exists():
+        return
+    if parent.parent.exists():
+        parent.mkdir()
+        return
+    raise ValueError(
+        f"cannot create target parent {parent}; create deeper parent directories explicitly"
+    )
+
+
+def _write_pysecdec_target_file(
+    request: IntegralRequest,
+    path: Path,
+    summary: dict,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Generate a DOT pySecDec target and persist it as a reusable result file."""
+    if request.integral != "dot":
+        raise ValueError("missing file-backed targets can only be generated in DOT mode")
+    if request.prefactor_convention != "pysecdec":
+        raise ValueError("file-backed pySecDec targets require --prefactor-convention pysecdec")
+    _ensure_target_parent(path)
+    target = _pysecdec_target(request, summary, logger=logger)
+    output = {
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "command": sys.argv,
+        "integral": request.integral,
+        "mode": request.mode,
+        "prefactor_convention": request.prefactor_convention,
+        "request": request_metadata(request),
+        "environment": environment_metadata(),
+        "summary": summary,
+        "target": {
+            "source": target.source,
+            "convention": target.convention,
+            "coefficients": target.coefficients,
+            "errors": target.errors,
+            "metadata": {**target.metadata, "generated_path": str(path.expanduser())},
+        },
+        "pysecdec": {
+            "coeffs": target.coefficients,
+            "errors": target.errors,
+            "timings": summary.get("pysecdec_timings", {}),
+        },
+    }
+    write_result_json(output, path)
+
+
 def resolve_target(
     request: IntegralRequest,
     topology,
@@ -605,7 +902,17 @@ def resolve_target(
                 )
                 return target
             candidate_path = Path(token).expanduser()
-            if candidate_path.is_file():
+            if candidate_path.is_file() and not request.refresh_target:
+                target = target_from_result_file(candidate_path, request.prefactor_convention)
+                return TargetDefinition(
+                    source=target.source,
+                    convention=target.convention,
+                    coefficients=_align_coefficients(target.coefficients, topology.coefficient_count),
+                    errors=_align_coefficients(target.errors, topology.coefficient_count),
+                    metadata=target.metadata,
+                )
+            if not _is_numeric_token(token):
+                _write_pysecdec_target_file(request, candidate_path, summary, logger=logger)
                 target = target_from_result_file(candidate_path, request.prefactor_convention)
                 return TargetDefinition(
                     source=target.source,
@@ -695,18 +1002,43 @@ def main() -> int:
             generation_progress.close()
         print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
         return 2
-    topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode)
+    active_sectors = (
+        [sectors[sector_id] for sector_id in request.sectors]
+        if request.sectors is not None
+        else sectors
+    )
+    topology.regular_taylor_formula_signature_limit = request.regular_taylor_signature_limit
+    topology.regular_taylor_formula_volume_limit = request.regular_taylor_formula_volume_limit
+    topology.regular_taylor_formula_axis_limit = request.regular_taylor_formula_axis_limit
+    topology.chain_rule_formula_signature_limit = request.chain_rule_formula_signature_limit
+    topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
+    topology.prepare_dual_evaluators(active_sectors, request.dual_evaluator_mode)
+    extra_dual_build_before = topology.dual_evaluator_build_seconds
     if request.subtraction_backend == "formula":
-        topology.prepare_subtraction_formulas(sectors, progress=generation_progress)
+        topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
     elif request.subtraction_backend == "projector-formula":
-        topology.prepare_endpoint_projector_formulas(sectors, progress=generation_progress)
+        topology.prepare_endpoint_projector_formulas(active_sectors, progress=generation_progress)
+        topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
+        topology.prepare_chain_rule_formulas(active_sectors, progress=generation_progress)
     if generation_progress is not None:
         generation_progress.close()
         generation_progress = None
     if request.integral == "dot" and topology.subtraction_formula_build_seconds > 0.0:
         if request.subtraction_backend == "projector-formula":
             signature_count = len(topology._endpoint_projector_formulas)
-            detail = f"{signature_count} endpoint projector signature(s)"
+            regular_count = len(getattr(topology, "_regular_taylor_formulas", {}))
+            skipped_regular = getattr(topology, "regular_taylor_formulas_skipped", 0)
+            curated_regular = getattr(
+                topology, "regular_taylor_formulas_from_curated_cache", 0
+            )
+            detail = (
+                f"{signature_count} endpoint projector signature(s), "
+                f"{regular_count} regular Taylor signature(s)"
+            )
+            if curated_regular:
+                detail += f", {curated_regular} curated regular Taylor asset(s)"
+            if skipped_regular:
+                detail += f", skipped {skipped_regular} regular Taylor signature(s)"
         else:
             signature_count = len(topology._subtraction_formulas)
             detail = f"{signature_count} formula signature(s)"
@@ -715,6 +1047,32 @@ def main() -> int:
             topology.subtraction_formula_build_seconds,
             detail=detail,
         )
+    if request.integral == "dot":
+        extra_dual_build = topology.dual_evaluator_build_seconds - extra_dual_build_before
+        if extra_dual_build > 0.0:
+            get_dot_bundle(request).timings.add(
+                "Symbolica dual evaluator build",
+                extra_dual_build,
+                detail="regular Taylor source shapes",
+            )
+        if topology.chain_rule_formula_build_seconds > 0.0:
+            get_dot_bundle(request).timings.add(
+                "Symbolica chain-rule formula build",
+                topology.chain_rule_formula_build_seconds,
+                detail=(
+                    f"{len(getattr(topology, '_chain_rule_formulas', {}))} "
+                    "mapped derivative formula(s)"
+                ),
+            )
+        elif getattr(topology, "chain_rule_formulas_skipped", 0):
+            get_dot_bundle(request).timings.add(
+                "Symbolica chain-rule formula build",
+                0.0,
+                detail=(
+                    f"skipped {topology.chain_rule_formulas_skipped} "
+                    "mapped derivative formula(s)"
+                ),
+            )
     summary = summary_data(request, topology, sectors, benchmark_available=False)
     if request.integral == "dot":
         summary["generation_timings"] = get_dot_bundle(request).timings.to_summary_dict()
@@ -780,6 +1138,15 @@ def main() -> int:
         request,
     )
     summary.setdefault("symanzik", {})["dual_evaluator_build_seconds"] = topology.dual_evaluator_build_seconds
+    summary.setdefault("symanzik", {})[
+        "chain_rule_formula_build_seconds"
+    ] = topology.chain_rule_formula_build_seconds
+    summary.setdefault("symanzik", {})[
+        "chain_rule_formula_count"
+    ] = len(getattr(topology, "_chain_rule_formulas", {}))
+    summary.setdefault("symanzik", {})[
+        "chain_rule_formulas_skipped"
+    ] = getattr(topology, "chain_rule_formulas_skipped", 0)
     sector_rows = build_sector_result_rows(request, sectors, integration.per_sector)
     output = make_output(
         request=request,

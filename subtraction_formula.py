@@ -18,10 +18,23 @@ series, epsilon/log expansion, or Laurent coefficient convolution itself.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from functools import lru_cache
 from itertools import product
+import os
+from pathlib import Path
+import tempfile
 from typing import Any
 
 from symbolica import E, Replacement, S
+
+
+ENDPOINT_PROJECTOR_CACHE_VERSION = 1
+REGULAR_TAYLOR_CACHE_VERSION = 3
+DEFAULT_ENDPOINT_PROJECTOR_CACHE_DIR = (
+    Path(__file__).resolve().parent / "assets" / "subtraction_formulae"
+)
 
 
 def build_subtraction_formula_symbolica(
@@ -55,9 +68,10 @@ def build_subtraction_formula_symbolica(
 
 def build_endpoint_projector_formula_symbolica(
     topology: Any,
-    sector: Any,
+    sector: Any | None,
     signature: tuple[Any, ...],
     formula_class: type,
+    ibp_reduce_to_log_endpoint: bool = False,
 ) -> Any:
     """Build the endpoint-only projector formula for a lower cache signature.
 
@@ -67,13 +81,26 @@ def build_endpoint_projector_formula_symbolica(
     the evaluator reusable across sectors that share only endpoint powers,
     Taylor orders, and Laurent range.
     """
-    ctx = _EndpointProjectorContext(topology, sector, signature)
+    cached = _load_endpoint_projector_formula_from_cache(
+        topology,
+        signature,
+        formula_class,
+    )
+    if cached is not None:
+        return cached
+
+    ctx = _EndpointProjectorContext(
+        topology,
+        sector,
+        signature,
+        ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
+    )
     outputs = ctx.build_outputs()
     evaluators = [
         expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
         for expr in outputs
     ]
-    return formula_class(
+    formula = formula_class(
         signature=signature,
         input_names=ctx.input_names,
         input_symbols=ctx.input_symbols,
@@ -83,6 +110,461 @@ def build_endpoint_projector_formula_symbolica(
         zero_subsets=ctx.zero_subsets,
         taylor_orders=ctx.taylor_orders,
         coefficient_layout=ctx.coefficient_layout,
+        ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
+    )
+    _write_endpoint_projector_formula_to_cache(formula)
+    return formula
+
+
+def build_regular_taylor_formula_symbolica(
+    topology: Any,
+    sector: Any,
+    signature: tuple[Any, ...],
+    formula_class: type,
+) -> Any:
+    """Build a Symbolica evaluator for regular ``g_s`` Taylor coefficients.
+
+    This is the companion to the lower-signature endpoint projector.  It still
+    treats U and F as black boxes: the formula inputs are sector coordinates and
+    already-computed Taylor coefficients of the mapped U, F, and regular
+    Jacobian.  Symbolica owns only the algebra that combines those coefficients
+    into the regular epsilon/Taylor coefficients ``g_{S,alpha,r}``.
+    """
+    cached = _load_regular_taylor_formula_from_cache(
+        topology,
+        signature,
+        formula_class,
+    )
+    if cached is not None:
+        return cached
+
+    ctx = _RegularTaylorContext(topology, sector, signature)
+    if ctx.uses_residual_inputs:
+        formula = _build_regular_taylor_dualized_formula(topology, ctx, signature, formula_class)
+        _write_regular_taylor_formula_to_cache(formula)
+        return formula
+
+    outputs = ctx.build_outputs()
+    evaluators = [
+        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
+        for expr in outputs
+    ]
+    formula = formula_class(
+        signature=signature,
+        input_names=ctx.input_names,
+        input_symbols=ctx.input_symbols,
+        output_expressions=outputs,
+        evaluators=evaluators,
+        output_layout=ctx.output_layout,
+        input_layout=ctx.input_layout,
+        max_orders=ctx.max_orders,
+        zero_positions=ctx.zero_positions,
+    )
+    _write_regular_taylor_formula_to_cache(formula)
+    return formula
+
+
+def _build_regular_taylor_dualized_formula(
+    topology: Any,
+    ctx: "_RegularTaylorContext",
+    signature: tuple[Any, ...],
+    formula_class: type,
+) -> Any:
+    """Build a v2 regular formula by dualizing one scalar Symbolica evaluator."""
+    expr = ctx._regular_expression()
+    dual_symbols = [ctx.eps, *ctx.taus]
+    evaluator_symbols = [*dual_symbols, *ctx.input_symbols]
+    output_layout: list[tuple[tuple[int, ...], int]] = []
+    dual_shape: list[tuple[int, ...]] = []
+    for multi_index, regular_order in ctx.requested_outputs:
+        output_layout.append((multi_index, regular_order))
+        dual_shape.append(
+            (
+                int(regular_order),
+                *tuple(int(value) for value in multi_index),
+                *tuple(0 for _ in ctx.input_symbols),
+            )
+        )
+    evaluator = expr.evaluator(
+        evaluator_symbols,
+        jit_compile=topology.jit_compile_evaluators,
+    )
+    evaluator.dualize([list(mi) for mi in dual_shape])
+    return formula_class(
+        signature=signature,
+        input_names=ctx.input_names,
+        input_symbols=ctx.input_symbols,
+        output_expressions=[expr],
+        evaluators=[evaluator],
+        output_layout=output_layout,
+        input_layout=ctx.input_layout,
+        max_orders=ctx.max_orders,
+        zero_positions=ctx.zero_positions,
+        evaluator_input_symbols=evaluator_symbols,
+        evaluator_dual_shape=dual_shape,
+        dual_variable_count=len(dual_symbols),
+    )
+
+
+def _endpoint_projector_cache_dir() -> Path:
+    """Return the endpoint-projector formula cache directory."""
+    configured = os.environ.get("FSD_SUBTRACTION_FORMULA_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_ENDPOINT_PROJECTOR_CACHE_DIR
+
+
+def _signature_payload(signature: tuple[Any, ...]) -> dict[str, Any]:
+    """Return a JSON-stable topology-independent cache signature."""
+    return {
+        "schema_version": ENDPOINT_PROJECTOR_CACHE_VERSION,
+        "kind": "endpoint-projector",
+        "signature": _jsonable(signature),
+    }
+
+
+def _endpoint_projector_cache_path(signature: tuple[Any, ...]) -> Path:
+    """Return the cache path for one endpoint-projector signature."""
+    payload = _signature_payload(signature)
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return _endpoint_projector_cache_dir() / f"endpoint_projector_{digest}.json"
+
+
+def _cache_read_paths(path: Path) -> list[Path]:
+    """Return generated and curated cache locations for one formula filename."""
+    root = _endpoint_projector_cache_dir()
+    curated = root / "curated" / path.name
+    # Curated assets are treated as part of the FSD source distribution.  They
+    # should take precedence over exploratory generated cache files with the
+    # same signature, which may have been produced by older local experiments.
+    return [curated, path] if curated != path else [path]
+
+
+def regular_taylor_formula_has_curated_cache(signature: tuple[Any, ...]) -> bool:
+    """Return whether a vetted regular-Taylor asset exists for ``signature``."""
+    path = _regular_taylor_cache_path(signature)
+    curated = _endpoint_projector_cache_dir() / "curated" / path.name
+    if not curated.is_file():
+        return False
+    try:
+        data = json.loads(curated.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return data.get("signature_payload") == _regular_taylor_signature_payload(signature)
+
+
+def endpoint_projector_formula_has_curated_cache(signature: tuple[Any, ...]) -> bool:
+    """Return whether a vetted endpoint-projector asset exists for ``signature``."""
+    return _endpoint_projector_formula_has_curated_cache(
+        signature,
+        str(_endpoint_projector_cache_dir()),
+    )
+
+
+@lru_cache(maxsize=None)
+def _endpoint_projector_formula_has_curated_cache(
+    signature: tuple[Any, ...],
+    cache_dir: str,
+) -> bool:
+    """Cached implementation keyed by both signature and cache directory."""
+    path = _endpoint_projector_cache_path(signature)
+    curated = Path(cache_dir) / "curated" / path.name
+    if not curated.is_file():
+        return False
+    try:
+        data = json.loads(curated.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return data.get("signature_payload") == _signature_payload(signature)
+
+
+endpoint_projector_formula_has_curated_cache.cache_clear = (  # type: ignore[attr-defined]
+    _endpoint_projector_formula_has_curated_cache.cache_clear
+)
+
+
+def _regular_taylor_signature_payload(signature: tuple[Any, ...]) -> dict[str, Any]:
+    """Return a JSON-stable cache signature for regular-Taylor formulae."""
+    return {
+        "schema_version": REGULAR_TAYLOR_CACHE_VERSION,
+        "kind": "regular-taylor",
+        "signature": _jsonable(signature),
+    }
+
+
+def _regular_taylor_cache_path(signature: tuple[Any, ...]) -> Path:
+    """Return the cache path for one regular-Taylor formula."""
+    payload = _regular_taylor_signature_payload(signature)
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return _endpoint_projector_cache_dir() / f"regular_taylor_{digest}.json"
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert nested tuples and scalar values into stable JSON data."""
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in sorted(value.items())}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _tuple_deep(value: Any) -> Any:
+    """Convert JSON lists back into tuples recursively for signatures/layouts."""
+    if isinstance(value, list):
+        return tuple(_tuple_deep(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _tuple_deep(item) for key, item in value.items()}
+    return value
+
+
+def _load_endpoint_projector_formula_from_cache(
+    topology: Any,
+    signature: tuple[Any, ...],
+    formula_class: type,
+) -> Any | None:
+    """Load a cached endpoint-projector expression, if available."""
+    path = _endpoint_projector_cache_path(signature)
+    for candidate in _cache_read_paths(path):
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            if data.get("signature_payload") != _signature_payload(signature):
+                continue
+            input_names = [str(name) for name in data["input_names"]]
+            input_symbols = [S(name) for name in input_names]
+            outputs = [E(text) for text in data["output_expressions"]]
+            evaluators = [
+                expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
+                for expr in outputs
+            ]
+            coefficient_layout = [
+                _coefficient_key_from_json(item)
+                for item in data["coefficient_layout"]
+            ]
+            return formula_class(
+                signature=signature,
+                input_names=input_names,
+                input_symbols=input_symbols,
+                output_expressions=outputs,
+                evaluators=evaluators,
+                laurent_orders=[int(order) for order in data["laurent_orders"]],
+                zero_subsets=[tuple(int(x) for x in subset) for subset in data["zero_subsets"]],
+                taylor_orders=[int(order) for order in data["taylor_orders"]],
+                coefficient_layout=coefficient_layout,
+                ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
+            )
+        except Exception:
+            # A stale or hand-edited cache file should never make generation fail.
+            # The freshly generated expression below will atomically replace it.
+            continue
+    return None
+
+
+def _write_endpoint_projector_formula_to_cache(formula: Any) -> None:
+    """Atomically store parseable expression strings for a projector formula."""
+    path = _endpoint_projector_cache_path(formula.signature)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "signature_payload": _signature_payload(formula.signature),
+        "input_names": list(formula.input_names),
+        "output_expressions": [str(expr) for expr in formula.output_expressions],
+        "laurent_orders": list(formula.laurent_orders),
+        "zero_subsets": [list(subset) for subset in formula.zero_subsets],
+        "taylor_orders": list(formula.taylor_orders),
+        "coefficient_layout": [
+            _coefficient_key_to_json(key) for key in formula.coefficient_layout
+        ],
+        "ibp_reduce_to_log_endpoint": bool(formula.ibp_reduce_to_log_endpoint),
+    }
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def _load_regular_taylor_formula_from_cache(
+    topology: Any,
+    signature: tuple[Any, ...],
+    formula_class: type,
+) -> Any | None:
+    """Load a cached regular-Taylor expression, if available."""
+    path = _regular_taylor_cache_path(signature)
+    for candidate in _cache_read_paths(path):
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            if data.get("signature_payload") != _regular_taylor_signature_payload(signature):
+                continue
+            mode = str(data.get("mode", "explicit"))
+            input_names = [str(name) for name in data["input_names"]]
+            input_symbols = [S(name) for name in input_names]
+            if mode == "dualized":
+                outputs = [E(str(data["scalar_expression"]))]
+                evaluator_input_names = [str(name) for name in data["evaluator_input_names"]]
+                evaluator_input_symbols = [S(name) for name in evaluator_input_names]
+                evaluator_dual_shape = [
+                    tuple(int(value) for value in item)
+                    for item in data["evaluator_dual_shape"]
+                ]
+                evaluator = outputs[0].evaluator(
+                    evaluator_input_symbols,
+                    jit_compile=topology.jit_compile_evaluators,
+                )
+                evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
+                evaluators = [evaluator]
+            else:
+                outputs = [E(text) for text in data["output_expressions"]]
+                evaluator_input_symbols = []
+                evaluator_dual_shape = []
+                evaluators = [
+                    expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
+                    for expr in outputs
+                ]
+            return formula_class(
+                signature=signature,
+                input_names=input_names,
+                input_symbols=input_symbols,
+                output_expressions=outputs,
+                evaluators=evaluators,
+                output_layout=[
+                    _regular_output_layout_from_json(item)
+                    for item in data["output_layout"]
+                ],
+                input_layout=[
+                    _regular_input_layout_from_json(item)
+                    for item in data["input_layout"]
+                ],
+                max_orders=[int(order) for order in data["max_orders"]],
+                zero_positions=tuple(int(position) for position in data["zero_positions"]),
+                evaluator_input_symbols=evaluator_input_symbols,
+                evaluator_dual_shape=evaluator_dual_shape,
+                dual_variable_count=int(data.get("dual_variable_count", 0)),
+            )
+        except Exception:
+            continue
+    return None
+
+
+def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
+    """Atomically store parseable expression strings for a regular formula."""
+    path = _regular_taylor_cache_path(formula.signature)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "signature_payload": _regular_taylor_signature_payload(formula.signature),
+        "mode": "dualized" if getattr(formula, "evaluator_dual_shape", None) else "explicit",
+        "input_names": list(formula.input_names),
+        "output_layout": [
+            _regular_output_layout_to_json(item) for item in formula.output_layout
+        ],
+        "input_layout": [
+            _regular_input_layout_to_json(item) for item in formula.input_layout
+        ],
+        "max_orders": list(formula.max_orders),
+        "zero_positions": list(formula.zero_positions),
+    }
+    if getattr(formula, "evaluator_dual_shape", None):
+        data["scalar_expression"] = str(formula.output_expressions[0])
+        data["evaluator_input_names"] = [
+            str(symbol) for symbol in formula.evaluator_input_symbols
+        ]
+        data["evaluator_dual_shape"] = [
+            [int(value) for value in multi_index]
+            for multi_index in formula.evaluator_dual_shape
+        ]
+        data["dual_variable_count"] = int(formula.dual_variable_count)
+    else:
+        data["output_expressions"] = [str(expr) for expr in formula.output_expressions]
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def _regular_output_layout_to_json(key: tuple[tuple[int, ...], int]) -> dict[str, Any]:
+    """Serialize one regular-Taylor output descriptor."""
+    multi, regular_order = key
+    return {
+        "multi": [int(value) for value in multi],
+        "regular_order": int(regular_order),
+    }
+
+
+def _regular_output_layout_from_json(data: dict[str, Any]) -> tuple[tuple[int, ...], int]:
+    """Deserialize one regular-Taylor output descriptor."""
+    return (
+        tuple(int(value) for value in data.get("multi", [])),
+        int(data.get("regular_order", 0)),
+    )
+
+
+def _regular_input_layout_to_json(key: tuple[str, tuple[int, ...]]) -> dict[str, Any]:
+    """Serialize one regular-Taylor input coefficient descriptor."""
+    kind, multi = key
+    return {
+        "kind": str(kind),
+        "multi": [int(value) for value in multi],
+    }
+
+
+def _regular_input_layout_from_json(data: dict[str, Any]) -> tuple[str, tuple[int, ...]]:
+    """Deserialize one regular-Taylor input coefficient descriptor."""
+    return (
+        str(data.get("kind", "")),
+        tuple(int(value) for value in data.get("multi", [])),
+    )
+
+
+def _coefficient_key_to_json(key: tuple[Any, ...]) -> dict[str, Any]:
+    """Serialize one regular-coefficient input descriptor."""
+    boundary, zero, multi, regular_order = _normalise_coefficient_key(key)
+    return {
+        "boundary": list(boundary),
+        "zero": list(zero),
+        "multi": list(multi),
+        "regular_order": int(regular_order),
+    }
+
+
+def _coefficient_key_from_json(data: dict[str, Any]) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]:
+    """Deserialize one regular-coefficient input descriptor."""
+    return (
+        tuple(int(x) for x in data.get("boundary", [])),
+        tuple(int(x) for x in data.get("zero", [])),
+        tuple(int(x) for x in data.get("multi", [])),
+        int(data.get("regular_order", 0)),
+    )
+
+
+def _normalise_coefficient_key(key: tuple[Any, ...]) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]:
+    """Accept legacy three-field keys and return the four-field layout."""
+    if len(key) == 3:
+        zero, multi, regular_order = key
+        boundary: tuple[int, ...] = ()
+    elif len(key) == 4:
+        boundary, zero, multi, regular_order = key
+    else:
+        raise ValueError(f"invalid endpoint-projector coefficient key: {key!r}")
+    return (
+        tuple(int(x) for x in boundary),
+        tuple(int(x) for x in zero),
+        tuple(int(x) for x in multi),
+        int(regular_order),
     )
 
 
@@ -365,12 +847,29 @@ class _FormulaContext:
 class _EndpointProjectorContext:
     """State container for one endpoint-only subtraction projector."""
 
-    def __init__(self, topology: Any, sector: Any, signature: tuple[Any, ...]) -> None:
+    def __init__(
+        self,
+        topology: Any,
+        sector: Any | None,
+        signature: tuple[Any, ...],
+        ibp_reduce_to_log_endpoint: bool = False,
+    ) -> None:
         self.topology = topology
         self.sector = sector
         self.signature = signature
-        self.axes = list(sector.singular_axes)
-        self.n_axes = len(self.axes)
+        self.ibp_reduce_to_log_endpoint = bool(ibp_reduce_to_log_endpoint)
+        if (
+            isinstance(signature, tuple)
+            and len(signature) >= 7
+            and signature[0] == "endpoint-projector"
+        ):
+            self.n_axes = int(signature[3])
+            self.axes = list(range(self.n_axes)) if sector is None else list(sector.singular_axes)
+        else:
+            if sector is None:
+                raise ValueError("sector-free endpoint formula requires a v2 signature")
+            self.axes = list(sector.singular_axes)
+            self.n_axes = len(self.axes)
         self.eps = S("ep_eps")
         self.y_symbols = [S(f"ep_y{position}") for position in range(self.n_axes)]
         self.bases, self.eps_coeffs, self.taylor_orders = self._endpoint_power_data()
@@ -380,14 +879,54 @@ class _EndpointProjectorContext:
         ]
         self.input_names = [f"ep_y{position}" for position in range(self.n_axes)]
         self.input_symbols = list(self.y_symbols)
-        self.coeff_symbols: dict[tuple[tuple[int, ...], tuple[int, ...], int], Any] = {}
-        self.coefficient_layout: list[tuple[tuple[int, ...], tuple[int, ...], int]] = []
-        self._build_coefficient_symbols()
+        self.coeff_symbols: dict[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int],
+            Any,
+        ] = {}
+        self.coefficient_layout: list[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]
+        ] = []
+        if not self.ibp_reduce_to_log_endpoint:
+            self._build_coefficient_symbols()
 
     def _endpoint_power_data(self) -> tuple[list[int], list[float], list[int]]:
         bases: list[int] = []
         eps_coeffs: list[float] = []
         taylor_orders: list[int] = []
+        if (
+            isinstance(self.signature, tuple)
+            and len(self.signature) >= 7
+            and self.signature[0] == "endpoint-projector"
+        ):
+            endpoint_powers = self.signature[4]
+            declared_orders = self.signature[5]
+            for endpoint_power, declared_order in zip(endpoint_powers, declared_orders):
+                base, eps_coeff = endpoint_power
+                rounded_base = round(float(base))
+                if float(base) >= -1.0e-12:
+                    raise ValueError(
+                        f"endpoint projector signature has non-singular power {base!r}"
+                    )
+                if abs(float(base) - rounded_base) > 1.0e-12:
+                    raise ValueError(
+                        f"endpoint projector signature has non-integer power {base!r}"
+                    )
+                if abs(float(eps_coeff)) <= 1.0e-15:
+                    raise ValueError(
+                        f"endpoint projector signature has no epsilon regulator: {endpoint_power!r}"
+                    )
+                required_order = int(-rounded_base - 1)
+                if int(declared_order) < required_order:
+                    raise ValueError(
+                        f"endpoint projector signature Taylor order {declared_order} "
+                        f"is too small; need {required_order}"
+                    )
+                bases.append(int(rounded_base))
+                eps_coeffs.append(float(eps_coeff))
+                taylor_orders.append(required_order)
+            return bases, eps_coeffs, taylor_orders
+        if self.sector is None:
+            raise ValueError("sector-free endpoint formula requires endpoint powers in signature")
         for axis in self.axes:
             endpoint_power = self.topology.endpoint_power(self.sector, axis)
             rounded_base = round(endpoint_power.base)
@@ -425,19 +964,15 @@ class _EndpointProjectorContext:
                 self.taylor_orders[position] if position in subset else 0
                 for position in range(self.n_axes)
             ]
-            mask = _subset_mask(subset)
             for multi_index in _multi_indices(max_orders):
                 for regular_order in range(self.topology.coefficient_count):
-                    name = f"ep_g_{mask}_{_multi_suffix(multi_index)}_{regular_order}"
-                    symbol = S(name)
-                    key = (subset, multi_index, regular_order)
-                    self.coeff_symbols[key] = symbol
-                    self.coefficient_layout.append(key)
-                    self.input_names.append(name)
-                    self.input_symbols.append(symbol)
+                    self._coeff((), subset, multi_index, regular_order)
 
     def build_outputs(self) -> list[Any]:
         """Return Symbolica expressions for all requested Laurent coefficients."""
+        if self.ibp_reduce_to_log_endpoint:
+            return self._build_outputs_ibp()
+
         total_expr = E("0")
         position_range = list(range(self.n_axes))
         for integrated_flags in product((False, True), repeat=self.n_axes):
@@ -468,7 +1003,7 @@ class _EndpointProjectorContext:
                     term *= self._integrated_denominator_expr(integrated_positions, multi_index)
                     if active_positions:
                         term *= (self.eps * active_eps_log).exp()
-                    term *= self._regular_eps_series(zero_positions, multi_index)
+                    term *= self._regular_eps_series((), zero_positions, multi_index)
                     total_expr += term
 
         eps_series = total_expr.series(
@@ -484,17 +1019,46 @@ class _EndpointProjectorContext:
 
     def _regular_eps_series(
         self,
+        boundary_subset: tuple[int, ...],
         subset: tuple[int, ...],
         multi_index: tuple[int, ...],
     ) -> Any:
         out = E("0")
         for regular_order in range(self.topology.coefficient_count):
-            symbol = self.coeff_symbols[(subset, multi_index, regular_order)]
+            symbol = self._coeff(boundary_subset, subset, multi_index, regular_order)
             if regular_order == 0:
                 out += symbol
             else:
                 out += symbol * _expr_int_power(self.eps, regular_order)
         return out
+
+    def _coeff(
+        self,
+        boundary_subset: tuple[int, ...],
+        zero_subset: tuple[int, ...],
+        multi_index: tuple[int, ...],
+        regular_order: int,
+    ) -> Any:
+        """Return or create one regular Taylor/Laurent coefficient symbol."""
+        boundary = tuple(sorted(int(position) for position in boundary_subset))
+        zero = tuple(sorted(int(position) for position in zero_subset))
+        multi = tuple(int(value) for value in multi_index)
+        key = (boundary, zero, multi, int(regular_order))
+        symbol = self.coeff_symbols.get(key)
+        if symbol is not None:
+            return symbol
+        name = (
+            f"ep_g_b{_subset_mask(boundary)}"
+            f"_z{_subset_mask(zero)}"
+            f"_{_multi_suffix(multi)}"
+            f"_{int(regular_order)}"
+        )
+        symbol = S(name)
+        self.coeff_symbols[key] = symbol
+        self.coefficient_layout.append(key)
+        self.input_names.append(name)
+        self.input_symbols.append(symbol)
+        return symbol
 
     def _active_endpoint_factor(self, active_positions: list[int]) -> tuple[Any, Any]:
         base = E("1")
@@ -528,12 +1092,393 @@ class _EndpointProjectorContext:
             out /= _expr_number(offset) + _expr_number(self.eps_coeffs[position]) * self.eps
         return out
 
+    def _build_outputs_ibp(self) -> list[Any]:
+        """Return outputs after IBP-lowering all higher endpoint powers.
+
+        Each original axis ``y^(-n+c eps)`` is analytically continued to a sum
+        of boundary-at-one terms plus a logarithmic endpoint integral carrying
+        ``n-1`` derivatives of the regular function.  The remaining logarithmic
+        endpoints are then handled by the same localized plus-projector
+        inclusion-exclusion used by the non-IBP formula.
+        """
+        total_expr = E("0")
+        for prefactor, boundary_subset, derivative_multi, active_positions in self._ibp_terms():
+            active_positions = list(active_positions)
+            for integrated_flags in product((False, True), repeat=len(active_positions)):
+                integrated_positions = [
+                    position
+                    for position, flag in zip(active_positions, integrated_flags)
+                    if flag
+                ]
+                live_positions = [
+                    position
+                    for position, flag in zip(active_positions, integrated_flags)
+                    if not flag
+                ]
+                active_base, active_eps_log = self._log_endpoint_factor(live_positions)
+                for taylor_flags in product((False, True), repeat=len(live_positions)):
+                    projected_positions = [
+                        position
+                        for position, flag in zip(live_positions, taylor_flags)
+                        if flag
+                    ]
+                    sign = -1 if len(projected_positions) % 2 else 1
+                    zero_positions = tuple(
+                        sorted(set(integrated_positions) | set(projected_positions))
+                    )
+                    term = _expr_number(sign) * prefactor * active_base
+                    term *= self._log_integrated_denominator_expr(integrated_positions)
+                    if live_positions:
+                        term *= (self.eps * active_eps_log).exp()
+                    term *= _expr_number(_multi_factorial(derivative_multi))
+                    term *= self._regular_eps_series(
+                        tuple(sorted(boundary_subset)),
+                        zero_positions,
+                        derivative_multi,
+                    )
+                    total_expr += term
+
+        eps_series = total_expr.series(
+            self.eps,
+            0,
+            self.topology.coefficient_count,
+            depth_is_absolute=False,
+        )
+        return [
+            eps_series.get_coefficient(order)
+            for order in self.topology.laurent_orders
+        ]
+
+    def _ibp_terms(
+        self,
+    ) -> list[tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int, ...]]]:
+        """Enumerate topology-independent IBP terms for all endpoint axes."""
+        zero_multi = tuple(0 for _ in range(self.n_axes))
+        terms: list[tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = [
+            (E("1"), (), zero_multi, tuple(range(self.n_axes)))
+        ]
+        for position, base in enumerate(self.bases):
+            required_order = int(-int(base) - 1)
+            if required_order <= 0:
+                continue
+            eps_coeff = self.eps_coeffs[position]
+            next_terms: list[
+                tuple[Any, tuple[int, ...], tuple[int, ...], tuple[int, ...]]
+            ] = []
+            for prefactor, boundary_subset, derivative_multi, active_positions in terms:
+                if position not in active_positions:
+                    next_terms.append((prefactor, boundary_subset, derivative_multi, active_positions))
+                    continue
+                denominators: list[Any] = []
+                for shift in range(required_order):
+                    offset = int(base) + shift + 1
+                    denominators.append(
+                        _expr_number(offset) + _expr_number(eps_coeff) * self.eps
+                    )
+                    boundary_derivative = list(derivative_multi)
+                    boundary_derivative[position] += shift
+                    boundary_prefactor = prefactor * _expr_number((-1) ** shift)
+                    for denominator in denominators:
+                        boundary_prefactor /= denominator
+                    next_terms.append(
+                        (
+                            boundary_prefactor,
+                            tuple(sorted((*boundary_subset, position))),
+                            tuple(boundary_derivative),
+                            tuple(active for active in active_positions if active != position),
+                        )
+                    )
+                continuing_derivative = list(derivative_multi)
+                continuing_derivative[position] += required_order
+                continuing_prefactor = prefactor * _expr_number((-1) ** required_order)
+                for denominator in denominators:
+                    continuing_prefactor /= denominator
+                next_terms.append(
+                    (
+                        continuing_prefactor,
+                        boundary_subset,
+                        tuple(continuing_derivative),
+                        active_positions,
+                    )
+                )
+            terms = next_terms
+        return terms
+
+    def _log_endpoint_factor(self, active_positions: list[int]) -> tuple[Any, Any]:
+        """Return the sampled factor for already-lowered logarithmic endpoints."""
+        base = E("1")
+        eps_log = E("0")
+        for position in active_positions:
+            coord = self.y_symbols[position]
+            base /= coord
+            eps_log += _expr_number(self.eps_coeffs[position]) * coord.log()
+        return base, eps_log
+
+    def _log_integrated_denominator_expr(self, integrated_positions: list[int]) -> Any:
+        """Return analytic denominators for logarithmic endpoint projectors."""
+        out = E("1")
+        for position in integrated_positions:
+            out /= _expr_number(self.eps_coeffs[position]) * self.eps
+        return out
+
+
+class _RegularTaylorContext:
+    """Symbolica expression builder for regular-function Taylor coefficients."""
+
+    def __init__(self, topology: Any, sector: Any, signature: tuple[Any, ...]) -> None:
+        self.topology = topology
+        self.sector = sector
+        self.signature = signature
+        if len(signature) < 2 or signature[0] != "regular-taylor":
+            raise ValueError(f"invalid regular Taylor signature: {signature!r}")
+        self.version = int(signature[1])
+        self.uses_residual_inputs = self.version >= 2
+        if self.uses_residual_inputs:
+            if len(signature) < 9:
+                raise ValueError(f"invalid regular Taylor residual-input signature: {signature!r}")
+            self.integration_dim = 0
+            self.axes = list(range(int(signature[2])))
+            self.n_axes = int(signature[2])
+            self.zero_positions = ()
+            if self.version >= 3:
+                requested_outputs = [
+                    (tuple(int(value) for value in multi), int(regular_order))
+                    for multi, regular_order in signature[3]
+                ]
+                if not requested_outputs:
+                    requested_outputs = [
+                        (tuple(0 for _ in range(self.n_axes)), 0)
+                    ]
+                self.requested_outputs = _ancestor_closed_output_pairs(
+                    requested_outputs,
+                    self.n_axes,
+                )
+                self.coefficient_multis = _ancestor_closed_multis(
+                    [multi for multi, _regular_order in self.requested_outputs],
+                    self.n_axes,
+                )
+                self.max_orders = [
+                    max((multi[position] for multi in self.coefficient_multis), default=0)
+                    for position in range(self.n_axes)
+                ]
+            else:
+                self.max_orders = [int(order) for order in signature[3]]
+                self.requested_outputs = [
+                    (multi, int(regular_order))
+                    for regular_order in range(topology.coefficient_count)
+                    for multi in _multi_indices(self.max_orders)
+                ]
+                self.coefficient_multis = _multi_indices(self.max_orders)
+            self.regular_endpoint_powers: list[tuple[float, float]] = []
+        else:
+            if len(signature) < 15:
+                raise ValueError(f"invalid regular Taylor v1 signature: {signature!r}")
+            self.integration_dim = int(signature[2])
+            self.axes = [int(axis) for axis in signature[3]]
+            self.n_axes = len(self.axes)
+            self.zero_positions = tuple(int(position) for position in signature[11])
+            self.max_orders = [int(order) for order in signature[12]]
+            self.requested_outputs = [
+                (multi, int(regular_order))
+                for regular_order in range(topology.coefficient_count)
+                for multi in _multi_indices(self.max_orders)
+            ]
+            self.coefficient_multis = _multi_indices(self.max_orders)
+            self.regular_endpoint_powers = [
+                (float(base), float(eps_coeff)) for base, eps_coeff in signature[13]
+            ]
+        self.eps = S("rg_eps")
+        self.taus = [S(f"rg_tau{position}") for position in range(self.n_axes)]
+        self.y_symbols = [S(f"rg_y{axis}") for axis in range(self.integration_dim)]
+        self.input_names = [f"rg_y{axis}" for axis in range(self.integration_dim)]
+        self.input_symbols = list(self.y_symbols)
+        self.output_layout: list[tuple[tuple[int, ...], int]] = []
+        self.input_layout: list[tuple[str, tuple[int, ...]]] = []
+        self.coeff_symbols: dict[tuple[str, tuple[int, ...]], Any] = {}
+        self.monomial_pref_symbol = S("rg_monomial_pref")
+        self.monomial_log_symbol = S("rg_monomial_log")
+        if self.uses_residual_inputs:
+            self.input_names.extend(["rg_monomial_pref", "rg_monomial_log"])
+            self.input_symbols.extend([self.monomial_pref_symbol, self.monomial_log_symbol])
+
+    def build_outputs(self) -> list[Any]:
+        """Return expressions for all requested regular Taylor coefficients."""
+        expr = self._regular_expression()
+        expr = expr.series(
+            self.eps,
+            0,
+            self.topology.coefficient_count - 1,
+        ).to_expression()
+        for tau, max_order in zip(self.taus, self.max_orders):
+            if max_order:
+                expr = expr.series(tau, 0, max_order).to_expression()
+
+        coefficient_map = _coefficient_list_map(
+            expr,
+            [self.eps, *self.taus],
+            max_orders=[self.topology.coefficient_count - 1, *self.max_orders],
+        )
+        outputs: list[Any] = []
+        for multi_index, regular_order in self.requested_outputs:
+            outputs.append(
+                coefficient_map.get(
+                    (int(regular_order), *tuple(int(value) for value in multi_index)),
+                    E("0"),
+                )
+            )
+            self.output_layout.append((multi_index, regular_order))
+        return outputs
+
+    def _regular_expression(self) -> Any:
+        j_expr = self._jacobian_taylor_expr()
+        u_expr = self._residual_taylor_expr("u", self.sector.u_monomial_powers)
+        f_expr = self._residual_taylor_expr("f", self.sector.f_monomial_powers)
+        monomial_pref, monomial_log = self._regular_monomial_exprs()
+        template_j = S("rg_template_J")
+        template_u = S("rg_template_U")
+        template_f = S("rg_template_F")
+        template_m = S("rg_template_M")
+        template_l = S("rg_template_L")
+        expr = template_m * template_j
+        expr *= _expr_real_power(template_u, self.topology.u_power_base)
+        expr *= _expr_real_power(template_f, -self.topology.f_power_base)
+        epsilon_log = (
+            template_l
+            + _expr_number(self.topology.eps_log_u_coeff) * template_u.log()
+            + _expr_number(self.topology.eps_log_f_coeff) * template_f.log()
+        )
+        expr *= (self.eps * epsilon_log).exp()
+        return expr.replace_multiple(
+            [
+                Replacement(template_j, j_expr),
+                Replacement(template_u, u_expr),
+                Replacement(template_f, f_expr),
+                Replacement(template_m, monomial_pref),
+                Replacement(template_l, monomial_log),
+            ]
+        )
+
+    def _jacobian_taylor_expr(self) -> Any:
+        out = E("0")
+        for multi in self.coefficient_multis:
+            out += self._coeff("j", multi) * _tau_monomial(self.taus, multi)
+        return out
+
+    def _residual_taylor_expr(self, kind: str, monomial_powers: list[int]) -> Any:
+        if self.uses_residual_inputs:
+            out = E("0")
+            for multi in self.coefficient_multis:
+                out += self._coeff(kind, multi) * _tau_monomial(self.taus, multi)
+            return out
+
+        axis_position = {axis: position for position, axis in enumerate(self.axes)}
+        zero_positions = set(self.zero_positions)
+        out = E("0")
+        for residual_multi in _multi_indices(self.max_orders):
+            polynomial_multi = [0 for _ in self.axes]
+            denominator = E("1")
+            for axis, power_value in enumerate(monomial_powers):
+                position = axis_position.get(axis)
+                power = int(power_value)
+                if position is not None and position in zero_positions:
+                    polynomial_multi[position] = power + int(residual_multi[position])
+                elif power:
+                    denominator *= _expr_int_power(self.y_symbols[axis], power)
+            out += (
+                self._coeff(kind, tuple(polynomial_multi))
+                / denominator
+                * _tau_monomial(self.taus, residual_multi)
+            )
+        return out
+
+    def _regular_monomial_exprs(self) -> tuple[Any, Any]:
+        if self.uses_residual_inputs:
+            return self.monomial_pref_symbol, self.monomial_log_symbol
+
+        singular = set(self.axes)
+        base_value = E("1")
+        eps_log = E("0")
+        for axis, (base, eps_coeff) in enumerate(self.regular_endpoint_powers):
+            if axis in singular:
+                continue
+            coord = self.y_symbols[axis]
+            if abs(base) > 1.0e-15:
+                base_value *= _expr_int_power(
+                    coord,
+                    _integer_coordinate_power(base, f"regular Taylor axis {axis}"),
+                )
+            if abs(eps_coeff) > 1.0e-15:
+                eps_log += _expr_number(eps_coeff) * coord.log()
+        return base_value, eps_log
+
+    def _coeff(self, kind: str, multi_index: tuple[int, ...]) -> Any:
+        multi = tuple(int(value) for value in multi_index)
+        key = (kind, multi)
+        symbol = self.coeff_symbols.get(key)
+        if symbol is not None:
+            return symbol
+        name = f"rg_{kind}_{_multi_suffix(multi)}"
+        symbol = S(name)
+        self.coeff_symbols[key] = symbol
+        self.input_layout.append(key)
+        self.input_names.append(name)
+        self.input_symbols.append(symbol)
+        return symbol
+
 
 def _multi_indices(max_orders: list[int]) -> list[tuple[int, ...]]:
     if not max_orders:
         return [()]
     ranges = [range(int(order) + 1) for order in max_orders]
     return [tuple(values) for values in product(*ranges)]
+
+
+def _ancestor_closed_multis(
+    multi_indices: list[tuple[int, ...]],
+    rank: int,
+) -> list[tuple[int, ...]]:
+    """Return the component-wise ancestor closure of a sparse multi-index set."""
+    closed: set[tuple[int, ...]] = set()
+    zero = tuple(0 for _ in range(rank))
+    closed.add(zero)
+    for multi in multi_indices:
+        if len(multi) != rank:
+            raise ValueError(f"regular Taylor output rank mismatch: {multi!r}")
+        for ancestor in product(*[range(int(value) + 1) for value in multi]):
+            closed.add(tuple(int(value) for value in ancestor))
+    ordered = sorted(closed, key=lambda item: (sum(item), item))
+    if zero in ordered:
+        ordered.remove(zero)
+        ordered.insert(0, zero)
+    return ordered
+
+
+def _ancestor_closed_output_pairs(
+    output_pairs: list[tuple[tuple[int, ...], int]],
+    rank: int,
+) -> list[tuple[tuple[int, ...], int]]:
+    """Return ancestor closure in the combined ``(eps,tau...)`` dual shape."""
+    closed: set[tuple[tuple[int, ...], int]] = set()
+    for multi, regular_order in output_pairs:
+        if len(multi) != rank:
+            raise ValueError(f"regular Taylor output rank mismatch: {multi!r}")
+        for eps_order in range(int(regular_order) + 1):
+            for ancestor in product(*[range(int(value) + 1) for value in multi]):
+                closed.add((tuple(int(value) for value in ancestor), int(eps_order)))
+    zero = (tuple(0 for _ in range(rank)), 0)
+    closed.add(zero)
+    return sorted(closed, key=lambda item: (item[1], sum(item[0]), item[0]))
+
+
+def _multi_factorial(multi_index: tuple[int, ...]) -> int:
+    """Return the product of factorials for a multi-index."""
+    out = 1
+    for value in multi_index:
+        factor = 1
+        for integer in range(2, int(value) + 1):
+            factor *= integer
+        out *= factor
+    return out
 
 
 def _subset_mask(subset: tuple[int, ...]) -> str:
@@ -602,3 +1547,53 @@ def _coefficient_multi(expr: Any, tau_symbols: list[Any], multi_index: tuple[int
         order_int = int(order)
         out = out.series(tau, 0, order_int).get_coefficient(order_int)
     return out
+
+
+def _coefficient_list_map(
+    expr: Any,
+    variables: list[Any],
+    max_orders: list[int],
+) -> dict[tuple[int, ...], Any]:
+    """Return exact polynomial coefficients keyed by exponent tuple.
+
+    ``Expression.coefficient_list`` extracts all monomial coefficients in one
+    pass.  The generated regular-Taylor variables have simple ASCII names, so
+    the returned monomial keys can be decoded without symbolic pattern matching.
+    This avoids repeatedly calling ``series`` for every epsilon/Taylor output.
+    """
+    variable_names = [str(variable) for variable in variables]
+    out: dict[tuple[int, ...], Any] = {}
+    for monomial, coefficient in expr.coefficient_list(*variables):
+        powers = _coefficient_list_monomial_powers(monomial, variable_names)
+        if len(powers) != len(max_orders):
+            continue
+        if any(power < 0 or power > int(limit) for power, limit in zip(powers, max_orders)):
+            continue
+        out[powers] = coefficient
+    return out
+
+
+def _coefficient_list_monomial_powers(
+    monomial: Any,
+    variable_names: list[str],
+) -> tuple[int, ...]:
+    """Decode a Symbolica monomial key returned by ``coefficient_list``."""
+    text = str(monomial)
+    powers = [0 for _ in variable_names]
+    if text == "1":
+        return tuple(powers)
+    index_by_name = {name: index for index, name in enumerate(variable_names)}
+    for factor in text.split("*"):
+        if "^" in factor:
+            name, power_text = factor.split("^", 1)
+            power = int(power_text)
+        else:
+            name = factor
+            power = 1
+        index = index_by_name.get(name)
+        if index is None:
+            raise ValueError(
+                f"unexpected coefficient-list monomial factor {factor!r} in {text!r}"
+            )
+        powers[index] += power
+    return tuple(powers)

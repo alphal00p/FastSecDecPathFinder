@@ -3,6 +3,7 @@ numpy
 colorama
 prettytable
 progressbar2
+psutil
 pytest
 pydot
 pyyaml

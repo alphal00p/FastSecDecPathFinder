@@ -35,6 +35,8 @@ The derivation and implementation notes are kept in `docs/`:
 - `docs/FastSecDec.pdf`: compiled PDF.
 - `docs/performance.md`: low-statistics generation/runtime measurements for
   built-in examples, DOT examples, and the double/triple box ladder probes.
+- `docs/validation.md`: current target comparisons and endpoint-stability
+  probes.
 
 ## Setup
 
@@ -106,6 +108,17 @@ FSD_RUN_PYSECDEC_COMPARE=1 .venv/bin/python -m pytest -q
 
 ## Usage
 
+Reusable run presets are available under `examples/runs`.  YAML option keys
+match long CLI option names without the leading `--`, and explicit CLI flags
+override the YAML values:
+
+```sh
+.venv/bin/python FSD.py --run examples/runs/dot_box.yaml --max-iter 1
+```
+
+The corresponding DOT graphs and kinematics live in `examples/graphs`, while
+persistent targets and run outputs live in `examples/outputs`.
+
 Triangle massive:
 
 ```sh
@@ -134,8 +147,8 @@ GammaLoop DOT-file topology path with FSD/Havana integration:
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/triangle.dot \
-  --kinematics examples/dot/triangle_kinematics.yaml \
+  --dot-file examples/graphs/triangle.dot \
+  --kinematics examples/graphs/triangle_kinematics.yaml \
   --sector-method iterative \
   --dot-engine fsd
 ```
@@ -153,8 +166,8 @@ Run pySecDec’s generated integrator instead:
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/box.dot \
-  --kinematics examples/dot/box_kinematics.yaml \
+  --dot-file examples/graphs/box.dot \
+  --kinematics examples/graphs/box_kinematics.yaml \
   --sector-method iterative \
   --dot-engine pysecdec
 ```
@@ -163,8 +176,8 @@ Run both engines and compare in the same display convention:
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/box.dot \
-  --kinematics examples/dot/box_kinematics.yaml \
+  --dot-file examples/graphs/box.dot \
+  --kinematics examples/graphs/box_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
@@ -176,32 +189,32 @@ smoke comparisons:
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/kite_2loop.dot \
-  --kinematics examples/dot/kite_2loop_kinematics.yaml \
+  --dot-file examples/graphs/kite_2loop.dot \
+  --kinematics examples/graphs/kite_2loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/self_energy_3loop.dot \
-  --kinematics examples/dot/self_energy_3loop_kinematics.yaml \
+  --dot-file examples/graphs/self_energy_3loop.dot \
+  --kinematics examples/graphs/self_energy_3loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_2loop.dot \
-  --kinematics examples/dot/three_point_2loop_kinematics.yaml \
+  --dot-file examples/graphs/three_point_2loop.dot \
+  --kinematics examples/graphs/three_point_2loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_3loop.dot \
-  --kinematics examples/dot/three_point_3loop_kinematics.yaml \
+  --dot-file examples/graphs/three_point_3loop.dot \
+  --kinematics examples/graphs/three_point_3loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
@@ -210,16 +223,16 @@ The progressively larger three-point examples are:
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_2loop_6line.dot \
-  --kinematics examples/dot/three_point_2loop_6line_kinematics.yaml \
+  --dot-file examples/graphs/three_point_2loop_6line.dot \
+  --kinematics examples/graphs/three_point_2loop_6line_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
 
 ```sh
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_3loop_8line.dot \
-  --kinematics examples/dot/three_point_3loop_8line_kinematics.yaml \
+  --dot-file examples/graphs/three_point_3loop_8line.dot \
+  --kinematics examples/graphs/three_point_3loop_8line_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 ```
@@ -282,8 +295,13 @@ dual shapes.  `--symbolic-derivatives` builds ordinary non-dual Symbolica
 evaluators for symbolic U/F partial derivatives with respect to the original
 Feynman parameters and then composes them with sector-map Taylor jets by an
 explicit chain rule.  The derivative evaluators are shared across sectors.
+For selected hard DOT sectors, FSD can pregenerate Symbolica chain-rule
+composition formulas as well; their build time is reported as `ChainGen` and
+large all-sector request sets are guarded to avoid impractical generation.
 
-Choose the endpoint-subtraction backend:
+The default endpoint-subtraction backend is now `projector-formula`, which is
+the black-box path used by the DOT examples.  The older full-formula and
+recursive backends remain useful diagnostics:
 
 ```sh
 .venv/bin/python FSD.py --s -1.0 --m 0 --subtraction-backend recursive
@@ -298,6 +316,146 @@ include the sector-specific U/F/J monomial and Taylor-coefficient layout.
 only by endpoint powers, Taylor orders, and Laurent range; sector-specific
 regular coefficients are still obtained from the black-box U/F/J Taylor path
 and then passed into the shared projector evaluator.
+
+For sectors with higher endpoint powers, enable the IBP-lowered projector path:
+
+```sh
+.venv/bin/python FSD.py \
+  --run examples/runs/dot_triple_box.yaml \
+  --IBP_reduce_to_log_endpoint
+```
+
+Run files can be overridden from the CLI.  The triple-box preset enables IBP
+lowering, but a selected-sector comparison can disable it explicitly:
+
+```sh
+.venv/bin/python FSD.py \
+  --run examples/runs/dot_triple_box.yaml \
+  --no-ibp-reduce-to-log-endpoint \
+  --sectors 62
+```
+
+The IBP mode lowers endpoints such as `y^(-2+c eps)` and `y^(-3+c eps)` to
+logarithmic child projectors plus boundary and derivative terms.  Independently
+of that toggle, the formula cache under `assets/subtraction_formulae` stores
+endpoint-projector and regular-Taylor expression strings.  These formulae are
+universal for their endpoint/Taylor signature, so curated cache files are FSD
+assets.  The shipped `assets/subtraction_formulae/curated` directory contains
+the validated endpoint-projector cache set and a small validated regular-Taylor
+set.  These assets are default-on source data rather than a local warm-cache
+accident.
+When IBP lowering would produce a large compound tree, FSD automatically uses a
+curated direct endpoint projector instead if one is shipped for that exact
+universal signature.  The default switch point is controlled by:
+
+```sh
+--direct-projector-cache-term-threshold 54
+```
+
+Set the threshold to `0` to always prefer the IBP compound projector.  The
+summary reports how many sectors and endpoint signatures used the direct
+curated override.
+
+The curated endpoint-projector set currently contains 488 universal formulae,
+about 49 MB.  They are small enough to be treated as shipped FSD code, so a
+matching sector uses the direct formula by default rather than requiring a
+warm-cache or opt-in mode.  On the triple-box leading-pole smoke this switches
+all depth-six endpoint sectors to the direct endpoint-projector path.
+
+The first curated regular-Taylor signatures are the six small `PSD213`-class
+signatures that showed evaluator-dominated runtime; they add only about
+100 KiB.  Exploratory JSON cache files in the cache root are ignored by git by
+default because the full triple-box regular-Taylor cache can be hundreds of MB
+and should only be promoted after a runtime comparison justifies it.  The
+loader prefers a curated copy over a local generated copy with the same
+signature.  The regular-Taylor layer is guarded by
+`--regular-taylor-signature-limit`,
+`--regular-taylor-formula-volume-limit`, and
+`--regular-taylor-formula-axis-limit`.  These caps keep cold generation fast by
+leaving high-axis or large Taylor-box signatures on the Python fallback path;
+the triple-box default prepares the cheaper universal formulas and skips the
+hard six-axis ones unless a vetted curated asset exists for that exact
+signature.  In that case the direct formula is used by default, and the
+curated signature also bypasses the cold-build signature-count cap because it
+is treated as already generated source data rather than new work for the
+current run.  The additional
+`--chain-rule-formula-signature-limit` guard controls the Symbolica
+chain-rule composition formulas used by the symbolic-derivative path.  Those
+formulas are not U/F-specific, but they still depend on the sector-map jet
+layout, so they are guarded separately from the universal endpoint-projector
+and regular-Taylor assets.
+
+For cache-warming experiments, the guarded path can be disabled explicitly:
+
+```sh
+.venv/bin/python FSD.py \
+  --run examples/runs/dot_triple_box.yaml \
+  --sectors 62 \
+  --max-eps-order -5 \
+  --force-regular-taylor-formulas
+```
+
+This is intentionally not the default.  The resulting regular-Taylor formulae
+are universal for their endpoint/Taylor signature and are stored under
+`assets/subtraction_formulae`, so a cold build can be expensive once while a
+warm-cache run may be useful for runtime studies.  Promote only the signatures
+that show a clear benefit into `assets/subtraction_formulae/curated`; those
+promoted assets then become normal default FSD behavior.  The lower-level cap
+flags remain available for partial comparisons such as “six axes, but only
+small Taylor volume”.
+
+To inspect generated versus curated formula assets:
+
+```sh
+scripts/inspect_subtraction_cache.py
+```
+
+To promote a validated generated formula into the curated source asset set:
+
+```sh
+scripts/promote_subtraction_formula_asset.py regular_taylor_<hash>.json
+```
+
+Use `--dry-run` first when checking large assets.  Promotion is deliberately
+explicit because curated regular-Taylor formulae become default behavior for the
+matching universal signature.
+
+For exploratory long runs, especially Symbolica dualization probes that may
+not react to `Ctrl-C`, launch FSD through the local watchdog wrapper:
+
+```sh
+./run_with_memory_watch.py \
+  --limit-gb 30 \
+  --timeout-seconds 600 \
+  --poll-seconds 0.5 \
+  -- .venv/bin/python FSD.py --run examples/runs/dot_triple_box.yaml
+```
+
+The wrapper owns the child process group and can interrupt it on timeout or
+memory limit without a separate external `kill` command.  It prefers `psutil`
+for process-tree RSS accounting, so it can run inside the normal sandbox once
+the requirements are installed.  To stop it manually, create the watched stop
+file from the same directory:
+
+```sh
+touch stop.order
+```
+
+The wrapper removes stale stop files at startup and removes the observed stop
+file before terminating the child group.  In restricted sandboxes RSS polling
+may be unavailable; the wall-time timeout and stop-file path still work.
+
+Near endpoint points can be promoted to multiprecision evaluator calls:
+
+```sh
+.venv/bin/python FSD.py \
+  --run examples/runs/dot_double_box.yaml \
+  --stability-threshold 1e-8 \
+  --high-precision-stability-threshold 1e-12
+```
+
+The defaults are `1e-8` at 100 digits and `1e-12` at 1000 digits.  The
+result JSON records global and per-sector precision-tier hit counts.
 
 Stop when the summed relative MC error reaches a percent target:
 
@@ -420,7 +578,8 @@ DOT/FSD-only runs report `N/A` unless `--dot-engine both` or `--target
 pysecdec` is used.
 The timing footer reports total Symbolica evaluator time `EvalT`, measured
 Python hot-path time `PythonT`, Havana time `HavanaT`, Taylor evaluator setup
-time `TaylorGen`, and the corresponding profile percentages.
+time `TaylorGen`, chain-rule composition formula setup time `ChainGen`, and
+the corresponding profile percentages.
 
 ## Current Scope
 

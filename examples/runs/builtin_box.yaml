@@ -1,0 +1,14 @@
+integral: box
+mode: massless
+s12: -1.0
+s23: -1.0
+m: 0.0
+prefactor-convention: raw
+subtraction-backend: projector-formula
+max-eps-order: 0
+samples-per-iter: 50000
+batch-size: 5000
+max-iter: 3
+min-iter: 1
+workers: 1
+result-path: ../outputs/builtin_box_result.json

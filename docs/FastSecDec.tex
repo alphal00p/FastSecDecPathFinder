@@ -1503,6 +1503,8 @@ The command-line option
 \end{lstlisting}
 selects how the endpoint algebra is evaluated after the sector data and U/F
 coefficient evaluators have been prepared.
+The default backend is \texttt{projector-formula}; the other two paths are kept
+as diagnostics and cross-checks.
 
 The \texttt{recursive} backend is the direct vectorized Python/Numpy
 implementation of Eq.~\eqref{eq:recursive-subtraction}.  It obtains the
@@ -1559,6 +1561,249 @@ signatures.  The present \texttt{projector-formula} backend is therefore a
 lower-signature generated-formula path.  It does not yet remove all Python
 cost, because the regular coefficients \(g_{s,\alpha,r}^{(Z)}\) are still
 assembled by the shared Python/Numpy Taylor-series layer.
+
+A further runtime accelerator prepares regular-Taylor coefficient formulae.
+These formulae still do not contain \(\U\), \(\F\), or any sector-map
+substitution.  Their inputs are only sector coordinates and already computed
+Taylor coefficients of the mapped regular Jacobian, \(\U\), and \(\F\).  The
+Symbolica evaluator then performs the residual monomial division, the
+\(\U\)- and \(\F\)-power algebra, the logarithms, and the regular epsilon
+expansion that produces \(g_{s,\alpha,r}^{(Z)}\).  In symbolic-derivative mode
+the evaluator is fed only the ancestor-closed Taylor shape required by the
+corresponding regular formula, rather than the full sector dual shape.  When a
+selected sector has a small enough family of regular signatures, FSD can also
+pregenerate Symbolica chain-rule composition formulae for those minimized
+regular Taylor shapes.  These formulae receive numerical original-parameter
+derivatives of \(\U\) or \(\F\) and numerical sector-map Taylor coefficients;
+they do not contain \(\U\), \(\F\), or \(X_s\) after substitution.  In that
+mode the chain-rule reconstruction of the needed U/F jets is moved into
+Symbolica evaluators instead of being assembled in Python.  This is currently
+enabled when the chain-rule formula request workload is moderate.  The
+original sector-specific signature would expand to \(101018\) regular formulae
+for the full triple-box all-sector run.  Lower residual-input signatures and
+sparse output requests make the prepared family much smaller, but some
+high-axis formulae remain expensive to build cold.  The current default
+therefore prepares only regular formulae with at most five Taylor axes and
+Taylor-box volume at most \(64\), controlled by
+\texttt{--regular-taylor-formula-axis-limit} and
+\texttt{--regular-taylor-formula-volume-limit}.  In the triple-box run this
+prepares \(147\) regular formulae, uses \(6\) curated regular-Taylor assets,
+skips \(29\) harder high-axis formulae, uses shipped direct endpoint-projector
+assets for \(382\) sectors across \(55\) endpoint signatures, and keeps
+all-sector generation near \(5.6\) seconds.  A selected \texttt{PSD62}
+diagnostic shows why the guard is needed: even with the sparse output signature
+that avoids the full Cartesian Taylor box, trying to build eight six-axis
+regular formulae took about \(226\) seconds.  The resulting one-sample runtime
+was evaluator-dominated, but the guarded default avoids cold-building that
+formula family and keeps generation acceptable.  The remaining sparse path now propagates
+the sparse endpoint output-pair request down to the black-box Taylor source
+shape and is much faster than the old dense rectangular fallback, but it is
+still not the desired production runtime for the hardest triple-box sectors.
+For a selected \texttt{PSD649} leading-pole probe, pregenerated chain-rule
+formulae reduce the diagnostic from \(124.6\) seconds of Python time for two
+samples to \(32.2\) seconds for ten samples, with no precision rescue.  The
+lowered chain-rule signature removes sector names and map-expression strings
+from the key; caching the resulting map-jet layout, reusing the structural map
+layout at runtime, and caching one-index ancestor closures reduce chain-rule
+formula preparation from about \(6.3\) seconds to about \(3.8\) seconds.  A
+curated direct endpoint-projector asset for the same universal endpoint
+signature gives a much better selected-sector path: ten ordinary-precision
+samples take \(0.368\) seconds of Python time and \(0.054\) seconds of
+Symbolica evaluator time, with compatible central values.  In the current
+threshold-\(54\) default, selected \(4000\)-sample, \(10\)-worker probes of
+\texttt{PSD814} and \texttt{PSD855} use direct cached endpoint projectors and
+reach \(6.7\%\) relative MC error on the deepest pole without any precision
+rescue.  These probes are stable, but still Python-heavy; the remaining issue
+for high-depth signatures is regular-source sparse series assembly and
+variance, not endpoint numerical instability.  A direct chain-rule lookup cache
+now avoids recomputing the structural chain-rule signature after pregeneration,
+which gives a modest reduction in the short \texttt{PSD814} profile.  The
+regular fallback also reuses the same sparse convolution ladder for integer
+powers and logarithms, and evaluates all requested original-parameter
+derivatives through one Symbolica multi-output evaluator.  A selected
+\(4000\)-sample \texttt{PSD814} profile now gives
+\(\texttt{PythonT}=41.78\,\mathrm{s}\), \(\texttt{EvalT}=16.45\,\mathrm{s}\),
+and \(4.11\times 10^3\) evaluator microseconds per sample per worker.  This is
+still Python-heavy, but removes one repeated sparse-series construction and
+reduces per-derivative evaluator dispatch in the guarded fallback.  Forcing
+high-axis regular-Taylor formulae for the same sector was stopped after
+\(180\) seconds before integration, at moderate RSS, so the current default
+keeps direct endpoint projectors enabled but leaves unvetted high-axis
+regular-Taylor formulae behind the guard.  A focused \texttt{PSD1057}
+forced-formula probe gives the same conclusion for a different all-sector
+contributor: with \(400\) requested samples and one worker, it produced no
+result file after \(301\) seconds and plateaued near \(11.4\) GiB RSS before
+the watchdog timeout stopped it.  The bottleneck in that mode is therefore
+cold construction of the oversized regular formula, not Monte Carlo sampling.
+For the full active triple-box sector set, the chain-rule request count exceeds
+the guard and is reported as skipped; this avoids turning all-sector generation
+into a long cold-build phase.
+For leading-pole probes, sectors whose endpoint pole depth is too shallow to
+overlap the requested Laurent range are now returned as exact zero before any
+endpoint-subtraction algebra is assembled.  This removes guaranteed-zero
+shallow sectors from the hot path, but it does not by itself fuse the
+regular-source assembly feeding genuinely high-depth sectors.
+The Symbolica \texttt{functions=} evaluator hook was inspected as a possible
+way to delegate more of the sparse composition, but it supplies symbolic
+function definitions that are inlined into the evaluator; it is not a runtime
+Python callback mechanism.  The useful directions are therefore smaller
+universal generated expressions, better Symbolica-side factorization, or a
+native sparse-series primitive.
+
+\subsection{IBP lowering and endpoint-projector cache}
+
+The optional command-line flag
+\begin{lstlisting}[style=fsdcode]
+--IBP_reduce_to_log_endpoint
+\end{lstlisting}
+is implemented for the \texttt{projector-formula} backend.  Its purpose is to
+avoid evaluating endpoint projectors directly on powers such as
+\(y^{-2+c\eps}\) or \(y^{-3+c\eps}\).  For one endpoint variable, the
+elementary integration-by-parts identity used by the implementation is
+\begin{equation}
+  \int_0^1 dy\, y^{-n+c\eps}\,h(y)
+  =
+  \frac{h(1)}{c\eps-n+1}
+  -
+  \frac{1}{c\eps-n+1}
+  \int_0^1 dy\,y^{-n+1+c\eps}\,h'(y),
+  \qquad n>1 .
+\end{equation}
+Applying this repeatedly reduces the sampled endpoint power to a logarithmic
+endpoint \(y^{-1+c\eps}\).  In multiple endpoint variables, the code applies
+the same lowering independently on each axis and enumerates the resulting
+boundary and derivative terms.  The extra derivatives are not a new kind of
+input: they are further Taylor coefficients of the same black-box regular
+function \(g_s\), recovered from the already available dual or symbolic
+derivative evaluator path.
+Run-file settings can be overridden explicitly:
+\begin{lstlisting}[style=fsdcode]
+--no-ibp-reduce-to-log-endpoint
+\end{lstlisting}
+This is useful for selected-sector diagnostics because the non-IBP projector
+can have fewer child Taylor requests even when the all-sector non-IBP formula
+generation is too expensive.
+
+The implementation is deliberately split into topology-independent endpoint
+blocks.  An IBP-lowered sector is represented as
+\begin{equation}
+  I_{s,k}^{\rm IBP}(y)
+  =
+  \sum_{\tau\in{\cal T}_s}
+  \sum_{r}
+  b_{\tau,r}\,
+  \mathcal{P}_{\tau,k-r}
+  \!\left(
+    y_{\tau},\,
+    \left\{
+      \partial_y^{\alpha_\tau}
+      g_{s,\beta,r'}(y_{\bar B_\tau},0_{B_\tau})
+    \right\}
+  \right),
+\end{equation}
+where \({\cal T}_s\) is the finite set of IBP boundary/derivative terms,
+\(b_{\tau,r}\) are the epsilon-series coefficients of the IBP rational
+prefactors, and \(\mathcal{P}_{\tau}\) is a logarithmic endpoint-projector
+formula.  The projectors \(\mathcal{P}_{\tau}\) know nothing about the
+topology, U, F, masses, or sector-map variable names; they only know endpoint
+powers, Taylor orders, and the requested Laurent range.
+
+These endpoint-projector and regular-Taylor formulae are cached in
+\begin{lstlisting}[style=fsdcode]
+assets/subtraction_formulae
+\end{lstlisting}
+The cache stores parseable Symbolica expression strings and metadata, not
+compiled evaluator objects.  The validated endpoint-projector cache files and a
+small validated regular-Taylor subset are kept in the curated cache
+subdirectory and are treated as FSD source assets.  They are therefore
+default-on and need not be regenerated in a fresh checkout.  Regular-Taylor
+cache files are promoted much more selectively: they become default behavior
+only after the corresponding evaluator has shown a runtime benefit, because a
+cached expression only removes cold formula generation, not necessarily hot
+evaluator cost.  The first curated regular-Taylor subset is the six small
+\texttt{PSD213}-class signatures, adding about \(100\) KiB.  On a cache hit,
+generation only parses the cached expressions and rebuilds the Symbolica
+evaluators.  The curated endpoint-projector subset currently contains \(488\)
+validated universal formulae, about \(49\) MB, and is treated as shipped FSD
+source data.  For the current triple-box leading-pole smoke, all \(1972\)
+sectors and prepared formulae were generated in about \(5.6\) seconds:
+\(0.18\) seconds for U/F construction, \(1.11\) seconds for sector generation,
+and \(4.29\) seconds for Symbolica evaluator construction.  The same run
+prepared \(147\) regular-Taylor formula signatures, skipped \(29\) harder
+regular signatures behind the default guard, and selected direct cached
+endpoint projectors for \(382\) sectors across \(55\) endpoint signatures.
+When IBP lowering would produce a large compound endpoint tree and a direct
+endpoint-projector formula is already curated for that exact universal
+signature, FSD uses the direct cached endpoint projector by default.  The
+threshold is controlled by
+\begin{lstlisting}[style=fsdcode]
+--direct-projector-cache-term-threshold 54
+\end{lstlisting}
+and can be set to \(0\) to always prefer the IBP compound projector.  This
+policy keeps the all-sector non-IBP cold-generation path disabled while letting
+validated direct endpoint projectors become ordinary FSD source assets.
+The shipped triple-box run preset now sets this threshold to \(0\) for the
+complete all-sector six-order run, because the faster selected-sector direct
+endpoint-projector path can spike close to or above a \(30\) GiB memory budget
+when all sectors are sampled on \(10\) workers.  With
+\texttt{batch-size=1}, \(\eps^{-6}\ldots\eps^{-1}\), and a \(30\) GiB
+watchdog, the run was interrupted at \(324\) seconds wall time when RSS reached
+\(30.19\) GiB.  The partial result contained \(370\) accumulated samples,
+used no precision-rescue evaluations, and produced
+\[
+\begin{array}{c|rrrrrr}
+  & \eps^{-6} & \eps^{-5} & \eps^{-4}
+  & \eps^{-3} & \eps^{-2} & \eps^{-1} \\ \hline
+  \mathrm{FSD} &
+  0.145(154) & 2.05(3.02) & -72.4(67.0) &
+  -805(593) & -2159(4303) & -984(24956)
+\end{array}
+\]
+in the pySecDec display convention.  This is a memory/runtime stress result,
+not a precision validation.
+At runtime, the IBP child terms share one regular Taylor envelope for each
+boundary/zero projector, so repeated child requests for smaller Taylor boxes
+reuse the largest already-required box.  In the symbolic-derivative backend,
+the U and F Taylor reconstructions also share the same sector-map Taylor
+context before applying their separate black-box derivative evaluators.  These
+optimizations are useful, but IBP still introduces additional boundary and
+derivative child projectors.  In the legacy selected-sector comparison for
+\texttt{PSD213}, a 400-sample leading-pole run without IBP used \(32\) regular
+signatures and took about \(0.88\) seconds in Python plus \(5.63\) seconds in
+Symbolica evaluator calls.  The corresponding IBP run used \(108\) regular
+signatures and took about \(1.91\) seconds in Python plus \(7.38\) seconds in
+Symbolica evaluator calls.  The current sparse residual-input path for the
+same non-IBP sector uses \(6\) regular signatures; a 400-sample run spent about
+\(0.34\) seconds in Python and \(4.24\) seconds in Symbolica evaluator calls.
+The central value was unchanged within Monte Carlo precision, but the IBP path
+was slower in the legacy comparison.
+A current selected-sector \texttt{PSD62} diagnostic reinforces this point.  With
+the run preset's IBP lowering enabled, the sector uses many logarithmic child
+projectors.  With \texttt{--no-ibp-reduce-to-log-endpoint}, the same leading
+two coefficients are obtained from a direct higher-power endpoint projector.
+For \(10000\) ordinary-precision samples, the no-IBP control found
+\(\eps^{-5}=-0.0734(70)\), i.e. a \(9.52\%\) relative Monte Carlo error, with
+no precision-rescue samples.  In the current threshold-\(54\) default, the
+depth-six representative sectors \texttt{PSD814} and \texttt{PSD855} use
+direct cached endpoint projectors.  With \(4000\) samples on \(10\) workers
+they both reached \(\eps^{-6}=-0.000680(45)\), a \(6.7\%\) relative MC error,
+without any precision-rescue sample.  The \(\eps^{-5}\) coefficient is
+sector-dependent and can be compatible with zero, so relative errors there are
+less diagnostic.  These are selected-sector convergence checks, not an
+all-sector triple-box validation.
+
+The numerical role of IBP lowering is stability and algebraic control, not a
+guaranteed raw per-sample speedup.  The stability rescue itself comes from the
+full multiprecision path: near an endpoint, the sample, sector-map jets, U/F/J
+Taylor coefficients, projector inputs, and final projector evaluator call are
+all promoted to the requested Decimal precision and evaluated through
+Symbolica's \texttt{evaluate\_complex\_with\_prec} API before the final sector
+weight is cast back to double precision.  In the \texttt{PSD213} point probe
+with all singular coordinates set to \(10^{-12}\), ordinary double precision
+produced non-finite lower Laurent coefficients, \(32\) and \(80\) digits were
+still unstable for the deepest lower orders, and \(160\) and \(300\) digits
+agreed in the displayed coefficients.  The default high-precision tier of
+\(1000\) digits is therefore conservative for this endpoint-stability probe.
 
 \subsection{Havana sampling and stopping}
 
@@ -1817,52 +2062,52 @@ The same triangle and box can be routed through DOT input and pySecDec sector
 generation, for example
 \begin{lstlisting}[style=fsdcode]
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/triangle.dot \
-  --kinematics examples/dot/triangle_kinematics.yaml \
+  --dot-file examples/graphs/triangle.dot \
+  --kinematics examples/graphs/triangle_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/box.dot \
-  --kinematics examples/dot/box_kinematics.yaml \
+  --dot-file examples/graphs/box.dot \
+  --kinematics examples/graphs/box_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 \end{lstlisting}
 The compact multi-loop DOT smoke checks are
 \begin{lstlisting}[style=fsdcode]
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/kite_2loop.dot \
-  --kinematics examples/dot/kite_2loop_kinematics.yaml \
+  --dot-file examples/graphs/kite_2loop.dot \
+  --kinematics examples/graphs/kite_2loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/self_energy_3loop.dot \
-  --kinematics examples/dot/self_energy_3loop_kinematics.yaml \
+  --dot-file examples/graphs/self_energy_3loop.dot \
+  --kinematics examples/graphs/self_energy_3loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_2loop.dot \
-  --kinematics examples/dot/three_point_2loop_kinematics.yaml \
+  --dot-file examples/graphs/three_point_2loop.dot \
+  --kinematics examples/graphs/three_point_2loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_3loop.dot \
-  --kinematics examples/dot/three_point_3loop_kinematics.yaml \
+  --dot-file examples/graphs/three_point_3loop.dot \
+  --kinematics examples/graphs/three_point_3loop_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_2loop_6line.dot \
-  --kinematics examples/dot/three_point_2loop_6line_kinematics.yaml \
+  --dot-file examples/graphs/three_point_2loop_6line.dot \
+  --kinematics examples/graphs/three_point_2loop_6line_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/three_point_3loop_8line.dot \
-  --kinematics examples/dot/three_point_3loop_8line_kinematics.yaml \
+  --dot-file examples/graphs/three_point_3loop_8line.dot \
+  --kinematics examples/graphs/three_point_3loop_8line_kinematics.yaml \
   --sector-method iterative \
   --dot-engine both
 \end{lstlisting}

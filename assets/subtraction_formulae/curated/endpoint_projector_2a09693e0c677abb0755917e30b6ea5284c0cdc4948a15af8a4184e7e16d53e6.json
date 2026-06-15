@@ -1,0 +1,203 @@
+{
+  "coefficient_layout": [
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0
+      ]
+    }
+  ],
+  "ibp_reduce_to_log_endpoint": false,
+  "input_names": [
+    "ep_y0",
+    "ep_g_bnone_znone_m0_0",
+    "ep_g_bnone_znone_m0_1",
+    "ep_g_bnone_znone_m0_2",
+    "ep_g_bnone_znone_m0_3",
+    "ep_g_bnone_znone_m0_4",
+    "ep_g_bnone_znone_m0_5",
+    "ep_g_bnone_znone_m0_6",
+    "ep_g_bnone_z0_m0_0",
+    "ep_g_bnone_z0_m0_1",
+    "ep_g_bnone_z0_m0_2",
+    "ep_g_bnone_z0_m0_3",
+    "ep_g_bnone_z0_m0_4",
+    "ep_g_bnone_z0_m0_5",
+    "ep_g_bnone_z0_m0_6"
+  ],
+  "laurent_orders": [
+    -6,
+    -5,
+    -4,
+    -3,
+    -2,
+    -1,
+    0
+  ],
+  "output_expressions": [
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "-ep_g_bnone_z0_m0_0",
+    "-ep_g_bnone_z0_m0_1+ep_g_bnone_znone_m0_0/ep_y0-ep_g_bnone_z0_m0_0/ep_y0"
+  ],
+  "signature_payload": {
+    "kind": "endpoint-projector",
+    "schema_version": 1,
+    "signature": [
+      "endpoint-projector",
+      2,
+      false,
+      1,
+      [
+        [
+          -1,
+          -1.0
+        ]
+      ],
+      [
+        0
+      ],
+      [
+        -6,
+        -5,
+        -4,
+        -3,
+        -2,
+        -1,
+        0
+      ]
+    ]
+  },
+  "taylor_orders": [
+    0
+  ],
+  "zero_subsets": [
+    [],
+    [
+      0
+    ]
+  ]
+}

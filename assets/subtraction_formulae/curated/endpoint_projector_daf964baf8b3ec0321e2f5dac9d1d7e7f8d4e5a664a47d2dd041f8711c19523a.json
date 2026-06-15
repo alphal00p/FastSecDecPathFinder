@@ -1,0 +1,606 @@
+{
+  "coefficient_layout": [
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "ibp_reduce_to_log_endpoint": false,
+  "input_names": [
+    "ep_y0",
+    "ep_y1",
+    "ep_y2",
+    "ep_y3",
+    "ep_g_bnone_znone_m0_0_0_0_0",
+    "ep_g_bnone_znone_m0_0_0_0_1",
+    "ep_g_bnone_z3_m0_0_0_0_0",
+    "ep_g_bnone_z3_m0_0_0_0_1",
+    "ep_g_bnone_z2_m0_0_0_0_0",
+    "ep_g_bnone_z2_m0_0_0_0_1",
+    "ep_g_bnone_z2_3_m0_0_0_0_0",
+    "ep_g_bnone_z2_3_m0_0_0_0_1",
+    "ep_g_bnone_z1_m0_0_0_0_0",
+    "ep_g_bnone_z1_m0_0_0_0_1",
+    "ep_g_bnone_z1_3_m0_0_0_0_0",
+    "ep_g_bnone_z1_3_m0_0_0_0_1",
+    "ep_g_bnone_z1_2_m0_0_0_0_0",
+    "ep_g_bnone_z1_2_m0_0_0_0_1",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_m0_0_0_0_0",
+    "ep_g_bnone_z0_m0_0_0_0_1",
+    "ep_g_bnone_z0_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_2_m0_0_0_0_0",
+    "ep_g_bnone_z0_2_m0_0_0_0_1",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_1"
+  ],
+  "laurent_orders": [
+    -6,
+    -5
+  ],
+  "output_expressions": [
+    "0",
+    "0"
+  ],
+  "signature_payload": {
+    "kind": "endpoint-projector",
+    "schema_version": 1,
+    "signature": [
+      "endpoint-projector",
+      2,
+      false,
+      4,
+      [
+        [
+          -1,
+          -1.0
+        ],
+        [
+          -1,
+          -2.0
+        ],
+        [
+          -1,
+          -1.0
+        ],
+        [
+          -1,
+          -3.0
+        ]
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        -6,
+        -5
+      ]
+    ]
+  },
+  "taylor_orders": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "zero_subsets": [
+    [],
+    [
+      3
+    ],
+    [
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      1
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      2,
+      3
+    ],
+    [
+      0
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      2,
+      3
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      1,
+      3
+    ],
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      0,
+      1,
+      2,
+      3
+    ]
+  ]
+}

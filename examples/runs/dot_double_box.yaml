@@ -1,0 +1,16 @@
+dot-file: ../graphs/double_box.dot
+kinematics: ../graphs/double_box_kinematics.yaml
+dot-engine: fsd
+sector-method: iterative
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+ibp-reduce-to-log-endpoint: true
+symbolic-derivatives: true
+max-eps-order: 0
+target: ../outputs/dot_double_box_pysecdec_target.json
+samples-per-iter: 100000
+batch-size: 10000
+max-iter: 3
+min-iter: 1
+workers: 1
+result-path: ../outputs/dot_double_box_result.json

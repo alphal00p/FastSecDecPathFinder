@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 import os
 import re
+import subprocess
 import sys
+import time
+import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +42,27 @@ from formatting import (
     print_result_table,
     pull_value,
     selected_prefactor_values,
+    summary_data,
 )
 from integrand import (
+    EndpointProjectorFormulaDefinition,
+    RegularTaylorFormulaDefinition,
     SectorProcessor,
     TopologyDefinition,
+    _multi_set_cache_key,
+    _regular_taylor_signature_axis_count,
+    _regular_taylor_signature_volume,
+    _series_log_allowed,
+    _series_mul,
+    _series_mul_allowed,
+    _series_pow_real_and_log_allowed,
+    _series_pow_real_allowed,
+    build_regular_taylor_formula,
     build_subtraction_formula_legacy,
     build_topology,
 )
+from subtraction_formula import build_endpoint_projector_formula_symbolica
+from subtraction_formula import endpoint_projector_formula_has_curated_cache
 import integrator as integrator_module
 from integrator import integrate
 from kinematics import load_kinematics
@@ -57,6 +75,7 @@ from symbolica import S
 def make_request(**overrides: Any) -> IntegralRequest:
     """Build a deterministic, low-statistics integration request for tests."""
     data = {
+        "run_file": None,
         "integral": "triangle",
         "dot_file": None,
         "kinematics_file": None,
@@ -72,6 +91,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "progress_value_order": "eps^0",
         "max_eps_order": 0,
         "target_args": None,
+        "refresh_target": False,
         "show_results": None,
         "sort_sector_results": "index",
         "result_path": str(Path.cwd() / "result.json"),
@@ -96,9 +116,16 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "jit_compile_evaluators": False,
         "dual_evaluator_mode": "pregenerate",
         "subtraction_backend": "formula",
+        "ibp_reduce_to_log_endpoint": False,
+        "direct_projector_cache_term_threshold": 54,
+        "force_regular_taylor_formulas": False,
+        "regular_taylor_signature_limit": 256,
+        "regular_taylor_formula_volume_limit": 64,
+        "regular_taylor_formula_axis_limit": 5,
+        "chain_rule_formula_signature_limit": 256,
         "stability_threshold": 1.0e-8,
         "high_precision_stability_threshold": 1.0e-12,
-        "stability_precision": 32,
+        "stability_precision": 100,
         "high_precision_stability_precision": 1000,
         "show_stats": False,
         "no_progress": True,
@@ -130,6 +157,8 @@ def prepare_generated_evaluators(
         topology.prepare_subtraction_formulas(sectors)
     elif subtraction_backend == "projector-formula":
         topology.prepare_endpoint_projector_formulas(sectors)
+        topology.prepare_regular_taylor_formulas(sectors)
+        topology.prepare_chain_rule_formulas(sectors)
     elif subtraction_backend != "recursive":
         raise ValueError(f"unsupported test subtraction backend {subtraction_backend!r}")
 
@@ -140,6 +169,8 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     default_request = build_request(parse_args())
     assert default_request.dual_evaluator_mode == "pregenerate"
     assert default_request.sector_method == "iterative"
+    assert default_request.direct_projector_cache_term_threshold == 54
+    assert default_request.subtraction_backend == "projector-formula"
 
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--lazy-dual-evaluators-generation"])
     assert build_request(parse_args()).dual_evaluator_mode == "lazy"
@@ -152,6 +183,34 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
 
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--sectors", "3", "7"])
     assert build_request(parse_args()).sectors == (3, 7)
+
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--regular-taylor-signature-limit", "512"])
+    assert build_request(parse_args()).regular_taylor_signature_limit == 512
+
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--regular-taylor-formula-volume-limit", "81"])
+    assert build_request(parse_args()).regular_taylor_formula_volume_limit == 81
+
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--regular-taylor-formula-axis-limit", "6"])
+    assert build_request(parse_args()).regular_taylor_formula_axis_limit == 6
+
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--chain-rule-formula-signature-limit", "17"])
+    assert build_request(parse_args()).chain_rule_formula_signature_limit == 17
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "FSD.py",
+            "--subtraction-backend",
+            "projector-formula",
+            "--force-regular-taylor-formulas",
+        ],
+    )
+    forced_request = build_request(parse_args())
+    assert forced_request.force_regular_taylor_formulas is True
+    assert forced_request.regular_taylor_signature_limit >= 1_000_000
+    assert forced_request.regular_taylor_formula_volume_limit >= 1_000_000
+    assert forced_request.regular_taylor_formula_axis_limit >= 32
 
     custom_result = PROJECT_ROOT / "custom-result.json"
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--result-path", str(custom_result)])
@@ -168,6 +227,1748 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     )
     with pytest.raises(SystemExit):
         parse_args()
+
+
+def test_run_yaml_resolves_paths_and_cli_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run presets load before normal parsing, while explicit CLI flags win."""
+    run_file = PROJECT_ROOT / "examples/runs/dot_double_box.yaml"
+    args = parse_args(
+        [
+            "--run",
+            str(run_file),
+            "--samples-per-iter",
+            "123",
+            "--no-progress",
+        ]
+    )
+    request = build_request(args)
+
+    assert request.run_file == str(run_file.resolve())
+    assert request.dot_file == str((PROJECT_ROOT / "examples/graphs/double_box.dot").resolve())
+    assert request.kinematics_file == str(
+        (PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml").resolve()
+    )
+    assert request.target_args == (
+        str((PROJECT_ROOT / "examples/outputs/dot_double_box_pysecdec_target.json").resolve()),
+    )
+    assert request.samples_per_iter == 123
+    assert request.no_progress is True
+    assert request.dual_evaluator_mode == "symbolic-derivatives"
+    assert request.ibp_reduce_to_log_endpoint is True
+
+
+def test_run_yaml_ibp_can_be_disabled_from_cli() -> None:
+    """The triple-box preset enables IBP, but CLI flags can turn it off."""
+    run_file = PROJECT_ROOT / "examples/runs/dot_triple_box.yaml"
+    request = build_request(
+        parse_args(
+            [
+                "--run",
+                str(run_file),
+                "--no-ibp-reduce-to-log-endpoint",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert request.ibp_reduce_to_log_endpoint is False
+
+
+def test_direct_projector_cache_threshold_cli_option() -> None:
+    """The curated direct-projector override threshold is user configurable."""
+    request = build_request(
+        parse_args(
+            [
+                "--direct-projector-cache-term-threshold",
+                "64",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert request.direct_projector_cache_term_threshold == 64
+
+
+def test_all_example_run_presets_parse_and_resolve_paths() -> None:
+    """Every shipped run preset remains wired to the reorganized examples tree."""
+    run_files = sorted((PROJECT_ROOT / "examples/runs").glob("*.yaml"))
+
+    assert {path.name for path in run_files} == {
+        "builtin_box.yaml",
+        "builtin_triangle.yaml",
+        "dot_box.yaml",
+        "dot_double_box.yaml",
+        "dot_triangle.yaml",
+        "dot_triple_box.yaml",
+    }
+    for run_file in run_files:
+        request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
+        assert request.run_file == str(run_file.resolve())
+        assert request.result_path is not None
+        assert Path(request.result_path).parent == (PROJECT_ROOT / "examples/outputs").resolve()
+        if request.dot_file is not None:
+            assert Path(request.dot_file).is_file()
+            assert Path(request.kinematics_file or "").is_file()
+        if request.target_args:
+            for target in request.target_args:
+                target_path = Path(target)
+                if target_path.suffix == ".json":
+                    assert target_path.parent == (PROJECT_ROOT / "examples/outputs").resolve()
+
+
+def test_ibp_lowering_requires_projector_formula_backend() -> None:
+    """IBP endpoint lowering is deliberately scoped to projector formulas."""
+    request = make_request(
+        ibp_reduce_to_log_endpoint=True,
+        subtraction_backend="formula",
+    )
+    with pytest.raises(ValueError, match="projector-formula"):
+        validate_request(request)
+
+
+def test_force_regular_taylor_formulas_requires_projector_formula_backend() -> None:
+    """The expensive cache-warming regular-Taylor mode is projector-only."""
+    request = make_request(
+        force_regular_taylor_formulas=True,
+        subtraction_backend="formula",
+    )
+    with pytest.raises(ValueError, match="projector-formula"):
+        validate_request(request)
+
+
+def test_endpoint_projector_formula_cache_is_topology_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Endpoint projector cache signatures do not include topology names."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    signature = topology.endpoint_projector_signature(sectors[0])
+
+    topology.prepare_endpoint_projector_formulas([sectors[0]])
+    files = sorted(tmp_path.glob("endpoint_projector_*.json"))
+    assert len(files) == 1
+    payload = files[0].read_text(encoding="utf-8")
+    assert "C0(" not in payload
+    assert "triangle" not in payload
+    assert "x0" not in payload
+
+    second_topology = build_topology(request)
+    second_topology.prepare_endpoint_projector_formulas([sectors[0]])
+    assert sorted(tmp_path.glob("endpoint_projector_*.json")) == files
+    assert signature in second_topology._endpoint_projector_formulas
+
+
+def test_endpoint_projector_cache_loads_curated_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Formula assets can be shipped under the curated cache subdirectory."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    sector = sectors[0]
+    signature = topology.endpoint_projector_signature(sector)
+
+    topology.prepare_endpoint_projector_formulas([sector])
+    files = sorted(tmp_path.glob("endpoint_projector_*.json"))
+    assert len(files) == 1
+    curated = tmp_path / "curated"
+    curated.mkdir()
+    curated_file = curated / files[0].name
+    files[0].replace(curated_file)
+    assert not sorted(tmp_path.glob("endpoint_projector_*.json"))
+
+    def forbidden_build_outputs(_self: Any) -> list[Any]:
+        raise AssertionError("endpoint projector generation bypassed curated cache")
+
+    monkeypatch.setattr(
+        "subtraction_formula._EndpointProjectorContext.build_outputs",
+        forbidden_build_outputs,
+    )
+    second_topology = build_topology(request)
+    second_topology.prepare_endpoint_projector_formulas([sector])
+    assert signature in second_topology._endpoint_projector_formulas
+
+
+def test_curated_direct_projector_overrides_large_ibp_compound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A shipped direct projector can replace a large IBP child-projector tree."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    base_topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0,),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-2.0, 1.0),
+            parameter_weight_powers=(0.0,),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+        ibp_reduce_to_log_endpoint=False,
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=1,
+        variable_names=["y"],
+        map_exprs=[E("y")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1],
+        jacobian_monomial_powers=[0],
+        singular_axes=[0],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1],
+    )
+
+    direct_signature = base_topology.endpoint_projector_signature(sector)
+    base_topology.prepare_endpoint_projector_formulas([sector])
+    generated = sorted(tmp_path.glob("endpoint_projector_*.json"))
+    assert len(generated) == 1
+    curated = tmp_path / "curated"
+    curated.mkdir()
+    generated[0].replace(curated / generated[0].name)
+    endpoint_projector_formula_has_curated_cache.cache_clear()
+    assert endpoint_projector_formula_has_curated_cache(direct_signature)
+
+    hybrid_topology = replace(
+        base_topology,
+        ibp_reduce_to_log_endpoint=True,
+        direct_projector_cache_term_threshold=1,
+    )
+    hybrid_signature = hybrid_topology.endpoint_projector_signature(sector)
+    hybrid_topology.prepare_endpoint_projector_formulas([sector])
+    formula = hybrid_topology.endpoint_projector_formula_for(sector)
+
+    assert hybrid_signature == direct_signature
+    assert formula.ibp_reduce_to_log_endpoint is False
+    assert hybrid_topology.endpoint_projector_direct_cache_override_sectors == 1
+    assert hybrid_topology.endpoint_projector_direct_cache_override_signatures == 1
+
+
+def test_curated_direct_projector_threshold_zero_keeps_ibp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Threshold zero disables the direct cached-projector override."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0,),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-2.0, 1.0),
+            parameter_weight_powers=(0.0,),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+        ibp_reduce_to_log_endpoint=True,
+        direct_projector_cache_term_threshold=0,
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=1,
+        variable_names=["y"],
+        map_exprs=[E("y")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1],
+        jacobian_monomial_powers=[0],
+        singular_axes=[0],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1],
+    )
+
+    assert topology.endpoint_projector_signature(sector)[2] is True
+
+
+def test_promote_subtraction_formula_asset_script(tmp_path: Path) -> None:
+    """Validated generated formulas can be promoted into curated source assets."""
+    cache_file = tmp_path / "endpoint_projector_test.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "signature_payload": {
+                    "schema_version": 1,
+                    "kind": "endpoint-projector",
+                    "signature": ["endpoint-projector", 2, False, 1, [[-1, 1.0]], [0], [-1, 0]],
+                },
+                "input_names": ["sf_y0", "sf_c_0_0_0_0_re", "sf_c_0_0_0_0_im"],
+                "output_expressions": ["sf_c_0_0_0_0_re"],
+                "laurent_orders": [-1, 0],
+                "zero_subsets": [[]],
+                "taylor_orders": [0],
+                "coefficient_layout": [
+                    {
+                        "zero_subset": [],
+                        "boundary_subset": [],
+                        "multi_index": [0],
+                        "regular_order": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    script = PROJECT_ROOT / "scripts" / "promote_subtraction_formula_asset.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--cache-dir",
+            str(tmp_path),
+            cache_file.name,
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    curated_file = tmp_path / "curated" / cache_file.name
+    assert curated_file.is_file()
+    assert cache_file.read_text(encoding="utf-8") == curated_file.read_text(encoding="utf-8")
+
+
+def test_sparse_integer_power_avoids_log_exp_path() -> None:
+    """Integer U/F powers are expanded by binomial products in fallback mode."""
+    n_rows = 2
+    max_orders = [2]
+    allowed = {(0,), (1,), (2,)}
+    series = {
+        (0,): np.asarray([2.0, 4.0], dtype=np.complex128),
+        (1,): np.asarray([0.3, -0.8], dtype=np.complex128),
+    }
+
+    inverse_square = _series_pow_real_allowed(
+        series,
+        -2.0,
+        max_orders,
+        n_rows,
+        allowed,
+    )
+    q = series[(1,)] / series[(0,)]
+    np.testing.assert_allclose(inverse_square[(0,)], series[(0,)] ** -2)
+    np.testing.assert_allclose(inverse_square[(1,)], series[(0,)] ** -2 * (-2.0 * q))
+    np.testing.assert_allclose(inverse_square[(2,)], series[(0,)] ** -2 * (3.0 * q**2))
+
+    square = _series_pow_real_allowed(series, 2.0, max_orders, n_rows, allowed)
+    np.testing.assert_allclose(square[(0,)], series[(0,)] ** 2)
+    np.testing.assert_allclose(square[(1,)], 2.0 * series[(0,)] * series[(1,)])
+    np.testing.assert_allclose(square[(2,)], series[(1,)] ** 2)
+
+
+def test_sparse_power_and_log_helper_matches_separate_paths() -> None:
+    """Combined integer-power/log series reuse preserves the old algebra."""
+    n_rows = 3
+    max_orders = [2, 1]
+    allowed = {
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (2, 0),
+        (1, 1),
+        (2, 1),
+    }
+    series = {
+        (0, 0): np.asarray([2.0, 3.0, 5.0], dtype=np.complex128),
+        (1, 0): np.asarray([0.2, -0.1, 0.4], dtype=np.complex128),
+        (0, 1): np.asarray([0.05, 0.3, -0.2], dtype=np.complex128),
+        (1, 1): np.asarray([0.01, -0.02, 0.03], dtype=np.complex128),
+    }
+
+    combined_power, combined_log = _series_pow_real_and_log_allowed(
+        series,
+        -3.0,
+        max_orders,
+        n_rows,
+        allowed,
+    )
+    separate_power = _series_pow_real_allowed(series, -3.0, max_orders, n_rows, allowed)
+    separate_log = _series_log_allowed(series, max_orders, n_rows, allowed)
+
+    assert set(combined_power) == set(separate_power)
+    assert set(combined_log) == set(separate_log)
+    for key in separate_power:
+        np.testing.assert_allclose(combined_power[key], separate_power[key], rtol=1.0e-12, atol=1.0e-12)
+    for key in separate_log:
+        np.testing.assert_allclose(combined_log[key], separate_log[key], rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_series_mul_allowed_fast_paths_match_rectangular_product() -> None:
+    """Constant and single-term sparse products agree with the generic product."""
+    n_rows = 2
+    max_orders = [2, 2]
+    allowed = {
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (2, 0),
+        (1, 1),
+        (0, 2),
+    }
+    constant = {
+        (0, 0): np.asarray([2.0, -3.0], dtype=np.complex128),
+    }
+    single = {
+        (1, 0): np.asarray([0.5, 0.25], dtype=np.complex128),
+    }
+    general = {
+        (0, 0): np.asarray([1.0, 2.0], dtype=np.complex128),
+        (0, 1): np.asarray([3.0, -1.0], dtype=np.complex128),
+        (1, 0): np.asarray([0.25, 0.5], dtype=np.complex128),
+    }
+
+    for left, right in ((constant, general), (general, constant), (single, general), (general, single)):
+        fast = _series_mul_allowed(left, right, allowed)
+        dense = {
+            key: value
+            for key, value in _series_mul(left, right, max_orders).items()
+            if key in allowed
+        }
+        assert set(fast) == set(dense)
+        for key in dense:
+            np.testing.assert_allclose(fast[key], dense[key], rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_regular_taylor_formula_cache_reuses_expression_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Warm regular-Taylor cache hits must not rebuild Symbolica expressions."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    sector = sectors[0]
+    topology.prepare_endpoint_projector_formulas([sector])
+    topology.prepare_regular_taylor_formulas([sector])
+    files = sorted(tmp_path.glob("regular_taylor_*.json"))
+    assert files
+    payload = files[0].read_text(encoding="utf-8")
+    assert "triangle" not in payload
+    assert "C0(" not in payload
+
+    def forbidden_build_outputs(_self: Any) -> list[Any]:
+        raise AssertionError("regular Taylor expression generation bypassed cache")
+
+    monkeypatch.setattr(
+        "subtraction_formula._RegularTaylorContext.build_outputs",
+        forbidden_build_outputs,
+    )
+    second_topology = build_topology(request)
+    second_topology.prepare_endpoint_projector_formulas([sector])
+    second_topology.prepare_regular_taylor_formulas([sector])
+    assert sorted(tmp_path.glob("regular_taylor_*.json")) == files
+    assert second_topology._regular_taylor_formulas
+
+
+def test_curated_regular_taylor_assets_bypass_cold_build_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Curated high-axis assets are part of FSD and bypass cold-build guards."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    topology = build_topology(request)
+    topology.regular_taylor_dual_shape_limit = 0
+    sectors = generate_sectors(request)
+    sector = sectors[0]
+    signature = (
+        "regular-taylor",
+        3,
+        6,
+        (((0, 0, 0, 0, 0, 0), 0),),
+        float(topology.u_power_base),
+        float(topology.f_power_base),
+        float(topology.eps_log_u_coeff),
+        float(topology.eps_log_f_coeff),
+        tuple(topology.laurent_orders),
+    )
+
+    def fake_requests(_sector: SectorDefinition) -> list[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]]:
+        return [(signature, (), (0, 0, 0, 0, 0, 0))]
+
+    def fake_formula(
+        _topology: TopologyDefinition,
+        _sector: SectorDefinition,
+        _signature: tuple[Any, ...],
+    ) -> RegularTaylorFormulaDefinition:
+        return RegularTaylorFormulaDefinition(
+            signature=_signature,
+            input_names=[],
+            input_symbols=[],
+            output_expressions=[],
+            evaluators=[],
+            output_layout=[],
+            input_layout=[],
+            max_orders=[0, 0, 0, 0, 0, 0],
+            zero_positions=(),
+        )
+
+    monkeypatch.setattr(topology, "regular_taylor_requests_for_sector", fake_requests)
+    monkeypatch.setattr(
+        "integrand.regular_taylor_formula_has_curated_cache",
+        lambda candidate: candidate == signature,
+    )
+    monkeypatch.setattr("integrand.build_regular_taylor_formula", fake_formula)
+
+    topology.prepare_regular_taylor_formulas([sector])
+
+    assert signature in topology._regular_taylor_formulas
+    assert topology.regular_taylor_formulas_from_curated_cache == 1
+    assert topology.regular_taylor_formulas_skipped == 0
+
+
+def test_curated_regular_taylor_assets_bypass_signature_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cold-build count cap must not disable shipped curated formulas."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    topology = build_topology(request)
+    topology.regular_taylor_formula_signature_limit = 0
+    topology.regular_taylor_formula_volume_limit = 64
+    topology.regular_taylor_formula_axis_limit = 5
+    sectors = generate_sectors(request)
+    sector = sectors[0]
+    cold_signature = (
+        "regular-taylor",
+        2,
+        1,
+        (0,),
+        float(topology.u_power_base),
+        float(topology.f_power_base),
+        float(topology.eps_log_u_coeff),
+        float(topology.eps_log_f_coeff),
+        tuple(topology.laurent_orders),
+    )
+    curated_signature = (
+        "regular-taylor",
+        3,
+        6,
+        (((0, 0, 0, 0, 0, 0), 0),),
+        float(topology.u_power_base),
+        float(topology.f_power_base),
+        float(topology.eps_log_u_coeff),
+        float(topology.eps_log_f_coeff),
+        tuple(topology.laurent_orders),
+    )
+
+    def fake_requests(_sector: SectorDefinition) -> list[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]]:
+        return [
+            (cold_signature, (0,), (1,)),
+            (curated_signature, (), (0, 0, 0, 0, 0, 0)),
+        ]
+
+    def fake_formula(
+        _topology: TopologyDefinition,
+        _sector: SectorDefinition,
+        _signature: tuple[Any, ...],
+    ) -> RegularTaylorFormulaDefinition:
+        assert _signature == curated_signature
+        return RegularTaylorFormulaDefinition(
+            signature=_signature,
+            input_names=[],
+            input_symbols=[],
+            output_expressions=[],
+            evaluators=[],
+            output_layout=[],
+            input_layout=[],
+            max_orders=[0, 0, 0, 0, 0, 0],
+            zero_positions=(),
+        )
+
+    monkeypatch.setattr(topology, "regular_taylor_requests_for_sector", fake_requests)
+    monkeypatch.setattr(
+        "integrand.regular_taylor_formula_has_curated_cache",
+        lambda candidate: candidate == curated_signature,
+    )
+    monkeypatch.setattr("integrand.build_regular_taylor_formula", fake_formula)
+
+    topology.prepare_regular_taylor_formulas([sector])
+
+    assert set(topology._regular_taylor_formulas) == {curated_signature}
+    assert topology.regular_taylor_formulas_from_curated_cache == 1
+    assert topology.regular_taylor_formulas_skipped == 1
+
+
+def test_regular_taylor_requests_skip_finite_sectors() -> None:
+    """Finite sectors do not need endpoint-projector regular Taylor formulas."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    assert sectors[0].singular_axes == []
+    assert topology.regular_taylor_requests_for_sector(sectors[0]) == []
+
+
+def test_regular_taylor_low_signature_is_axis_permutation_invariant() -> None:
+    """Large-sector regular formula cache keys ignore pure axis-order choices."""
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^-2", "eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0, 1.0),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-2.0, 1.0),
+            parameter_weight_powers=(0.0, 0.0),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+    )
+    topology._regular_taylor_signature_version = 2
+    sector_a = SectorDefinition(
+        name="toy-a",
+        integration_dim=2,
+        variable_names=["u", "v"],
+        map_exprs=[E("u"), E("v")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1, 2],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1, 2],
+    )
+    sector_b = SectorDefinition(
+        name="toy-b",
+        integration_dim=2,
+        variable_names=["v", "u"],
+        map_exprs=[E("v"), E("u")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[2, 1],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[2, 1],
+    )
+
+    assert topology.regular_taylor_signature(sector_a, (), (1, 3)) == (
+        topology.regular_taylor_signature(sector_b, (), (3, 1))
+    )
+
+
+def test_regular_taylor_volume_guard_skips_hard_formula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The all-sector guard can skip hard regular formulas individually."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = [sector for sector in generate_sectors(request) if sector.singular_axes][:2]
+    configure_laurent_range(request, topology, sectors)
+    topology.regular_taylor_formula_signature_limit = 256
+    topology.regular_taylor_formula_volume_limit = 1
+    signature = (
+        "regular-taylor",
+        2,
+        1,
+        (1,),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        tuple(topology.laurent_orders),
+    )
+
+    def fake_requests(sector: SectorDefinition) -> list[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]]:
+        return [(signature, (0,), (1,))]
+
+    def forbidden_build(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("guard should skip before regular formula generation")
+
+    monkeypatch.setattr(topology, "regular_taylor_requests_for_sector", fake_requests)
+    monkeypatch.setattr("integrand.build_regular_taylor_formula", forbidden_build)
+
+    topology.prepare_regular_taylor_formulas(sectors)
+
+    assert topology.regular_taylor_formulas_skipped == 1
+    assert topology._regular_taylor_formulas == {}
+
+
+def test_regular_taylor_axis_guard_skips_high_axis_formula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Six-axis regular formulas are skipped by the default cold-build guard."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = [sector for sector in generate_sectors(request) if sector.singular_axes][:1]
+    configure_laurent_range(request, topology, sectors)
+    topology.regular_taylor_formula_signature_limit = 256
+    topology.regular_taylor_formula_volume_limit = 64
+    topology.regular_taylor_formula_axis_limit = 5
+    signature = (
+        "regular-taylor",
+        2,
+        6,
+        (0, 0, 0, 0, 0, 0),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        tuple(topology.laurent_orders),
+    )
+
+    def fake_requests(sector: SectorDefinition) -> list[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]]:
+        return [(signature, (), (0, 0, 0, 0, 0, 0))]
+
+    def forbidden_build(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("axis guard should skip before regular formula generation")
+
+    monkeypatch.setattr(topology, "regular_taylor_requests_for_sector", fake_requests)
+    monkeypatch.setattr("integrand.build_regular_taylor_formula", forbidden_build)
+
+    topology.prepare_regular_taylor_formulas(sectors)
+
+    assert topology.regular_taylor_formulas_skipped == 1
+    assert topology._regular_taylor_formulas == {}
+
+
+def test_regular_taylor_signature_volume_supports_v1_and_v2_layouts() -> None:
+    """The volume guard reads Taylor orders from the correct signature slot."""
+    v1_signature = (
+        "regular-taylor",
+        1,
+        3,
+        (4, 5, 6),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (0,),
+        (2, 1, 0),
+        (),
+        ("eps^0",),
+    )
+    v2_signature = (
+        "regular-taylor",
+        2,
+        3,
+        (2, 1, 0),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        ("eps^0",),
+    )
+    v3_signature = (
+        "regular-taylor",
+        3,
+        6,
+        (
+            ((0, 0, 0, 0, 0, 0), 0),
+            ((0, 1, 0, 0, 0, 0), 0),
+            ((0, 0, 0, 2, 0, 0), 1),
+        ),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        ("eps^-6", "eps^-5"),
+    )
+
+    assert _regular_taylor_signature_volume(v1_signature) == 6
+    assert _regular_taylor_signature_volume(v2_signature) == 6
+    assert _regular_taylor_signature_volume(v3_signature) == 3
+    assert _regular_taylor_signature_axis_count(v1_signature) == 3
+    assert _regular_taylor_signature_axis_count(v2_signature) == 3
+    assert _regular_taylor_signature_axis_count(v3_signature) == 6
+
+
+def test_sparse_multi_set_cache_key_is_order_independent() -> None:
+    """Sparse Taylor source-shape cache keys ignore set insertion order."""
+    left = {(1, 0, 2), (0, 0, 0), (0, 2, 1)}
+    right = {(0, 2, 1), (1, 0, 2), (0, 0, 0)}
+
+    key_left = _multi_set_cache_key(left)
+    key_right = _multi_set_cache_key(right)
+
+    assert key_left == key_right
+    assert key_left[0] == (0, 0, 0)
+    assert key_left == tuple(sorted(left, key=lambda item: (sum(item), item)))
+
+
+def test_summary_uses_compact_dual_shape_statistics() -> None:
+    """Result summaries should not serialize every sector Taylor shape."""
+    request = make_request(integral="triangle", mode="massless", s=-1.0, m=0.0)
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    data = summary_data(request, topology, sectors, benchmark_available=False)
+    symanzik = data["symanzik"]
+
+    assert "dual_shape_summary" in symanzik
+    assert "dual_shapes" not in symanzik
+    assert symanzik["dual_shape_summary"]["unique_shape_count"] >= 1
+    assert "regular_taylor_formula_count" in symanzik
+    assert "regular_taylor_formulas_from_curated_cache" in symanzik
+    assert "regular_taylor_formulas_skipped" in symanzik
+    assert "regular_taylor_formula_policy" in symanzik
+    assert symanzik["regular_taylor_formula_policy"] == "not used by this subtraction backend"
+
+    projector_request = replace(request, subtraction_backend="projector-formula")
+    projector_data = summary_data(projector_request, topology, sectors, benchmark_available=False)
+    assert (
+        "curated endpoint projectors and regular Taylor formulas default-on"
+        in projector_data["symanzik"]["regular_taylor_formula_policy"]
+    )
+
+
+def test_watchdog_wrapper_stops_on_stop_file(tmp_path: Path) -> None:
+    """The local run wrapper can stop its own child without an external kill."""
+    stop_file = tmp_path / "stop.order"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "run_with_memory_watch.py"),
+            "--limit-gb",
+            "35",
+            "--timeout-seconds",
+            "30",
+            "--poll-seconds",
+            "0.1",
+            "--kill-grace-seconds",
+            "0.1",
+            "--stop-file",
+            str(stop_file),
+            "--",
+            "/bin/sleep",
+            "30",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(0.3)
+    stop_file.write_text("", encoding="utf-8")
+    output, _ = proc.communicate(timeout=10.0)
+
+    assert proc.returncode == 130
+    assert "stop file observed" in output
+    assert not stop_file.exists()
+
+
+def test_regular_taylor_v2_uses_dualized_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The lowered regular formula can extract eps/tau coefficients by duals."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^0", "eps^1"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0,),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(0.0, 0.0),
+            parameter_weight_powers=(0.0,),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=1,
+        variable_names=["y"],
+        map_exprs=[E("y")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[0],
+        jacobian_monomial_powers=[0],
+        singular_axes=[0],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1],
+    )
+    signature = (
+        "regular-taylor",
+        2,
+        1,
+        (1,),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        tuple(topology.laurent_orders),
+    )
+
+    formula = build_regular_taylor_formula(topology, sector, signature)
+    row_by_name = {
+        "rg_monomial_pref": 5.0,
+        "rg_monomial_log": 2.0,
+        "rg_j_m0": 1.0,
+        "rg_j_m1": 3.0,
+        "rg_u_m0": 1.0,
+        "rg_u_m1": 0.0,
+        "rg_f_m0": 1.0,
+        "rg_f_m1": 0.0,
+    }
+    row = np.asarray([[row_by_name[name] for name in formula.input_names]], dtype=np.complex128)
+    values = formula.evaluate_complex_batch(row)
+
+    assert formula.evaluator_dual_shape
+    assert formula.output_layout == [((0,), 0), ((1,), 0), ((0,), 1), ((1,), 1)]
+    np.testing.assert_allclose(values[0], np.asarray([5.0, 15.0, 10.0, 30.0]))
+
+    cached = build_regular_taylor_formula(topology, sector, signature)
+    assert cached.evaluator_dual_shape == formula.evaluator_dual_shape
+
+
+def test_regular_taylor_v3_uses_sparse_ancestor_closed_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sparse v3 regular formulas close requested outputs before dualizing."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("x0*x1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^0", "eps^1"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0, 1.0),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(0.0, 0.0),
+            parameter_weight_powers=(0.0, 0.0),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[0, 0],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1, 1],
+    )
+    signature = (
+        "regular-taylor",
+        3,
+        2,
+        (((1, 0), 1),),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        tuple(topology.laurent_orders),
+    )
+
+    formula = build_regular_taylor_formula(topology, sector, signature)
+    row_by_name = {
+        "rg_monomial_pref": 2.0,
+        "rg_monomial_log": 3.0,
+        "rg_j_m0_0": 1.0,
+        "rg_j_m1_0": 4.0,
+        "rg_u_m0_0": 1.0,
+        "rg_u_m1_0": 0.0,
+        "rg_f_m0_0": 1.0,
+        "rg_f_m1_0": 0.0,
+    }
+    row = np.asarray([[row_by_name[name] for name in formula.input_names]], dtype=np.complex128)
+    values = formula.evaluate_complex_batch(row)
+
+    assert formula.evaluator_dual_shape
+    assert formula.output_layout == [
+        ((0, 0), 0),
+        ((1, 0), 0),
+        ((0, 0), 1),
+        ((1, 0), 1),
+    ]
+    zero_dual = tuple(0 for _ in formula.evaluator_input_symbols)
+    assert zero_dual in formula.evaluator_dual_shape
+    assert (0, 1, 0, *tuple(0 for _ in formula.input_symbols)) in formula.evaluator_dual_shape
+    np.testing.assert_allclose(values[0], np.asarray([2.0, 8.0, 6.0, 24.0]))
+
+
+def test_sparse_regular_taylor_fallback_matches_dense_path() -> None:
+    """Skipped regular formulas still use sparse source shapes correctly."""
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1 + x0 + 2*x1 + x0*x1"),
+        f_expr=E("2 + x0 + x1 + x0*x1"),
+        u_power_base=1.0,
+        f_power_base=1.0,
+        eps_log_u_coeff=1.0,
+        eps_log_f_coeff=-1.0,
+        expected_laurent_orders=["eps^0", "eps^1"],
+        convention_note="toy",
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1 + y0*y1"),
+        f_monomial_powers=[0, 0],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1, 1],
+    )
+    sector.prepare_evaluators(include_dual=False)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+    rows = np.asarray([[0.25, 0.375], [0.5, 0.125]], dtype=float)
+    taylor_orders = [1, 1]
+    output_pairs = (
+        ((0, 0), 0),
+        ((1, 0), 0),
+        ((0, 1), 1),
+        ((1, 1), 1),
+    )
+
+    dense = processor._g_taylor_eps_series_batch(
+        sector,
+        rows,
+        {0, 1},
+        taylor_orders,
+        HotPathTiming(),
+        max_orders_are_explicit=True,
+    )
+    sparse = processor._g_taylor_eps_series_batch(
+        sector,
+        rows,
+        {0, 1},
+        taylor_orders,
+        HotPathTiming(),
+        max_orders_are_explicit=True,
+        output_pairs=output_pairs,
+    )
+
+    for multi_index, regular_order in output_pairs:
+        np.testing.assert_allclose(
+            sparse[regular_order][multi_index],
+            dense[regular_order][multi_index],
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+
+
+def test_ibp_shared_batch_g_cache_matches_direct_boundary_calls() -> None:
+    """IBP boundary clustering must reproduce per-boundary regular Taylor calls."""
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1 + x0 + 2*x1 + x0*x1"),
+        f_expr=E("2 + x0 + x1 + x0*x1"),
+        u_power_base=1.0,
+        f_power_base=1.0,
+        eps_log_u_coeff=1.0,
+        eps_log_f_coeff=-1.0,
+        expected_laurent_orders=["eps^0", "eps^1"],
+        convention_note="toy",
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1 + y0*y1"),
+        f_monomial_powers=[0, 0],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1, 1],
+    )
+    sector.prepare_evaluators(include_dual=False)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+    rows = np.asarray([[0.25, 0.375], [0.5, 0.125]], dtype=float)
+    shared_max_orders = {
+        ((), (0,)): (1, 0),
+        ((1,), (0,)): (1, 0),
+    }
+    output_pairs = (
+        ((0, 0), 0),
+        ((1, 0), 0),
+        ((0, 0), 1),
+    )
+    shared_output_pairs = {
+        key: output_pairs
+        for key in shared_max_orders
+    }
+
+    clustered = processor._precompute_ibp_shared_batch_g_cache(
+        sector,
+        rows,
+        shared_max_orders,
+        shared_output_pairs,
+        HotPathTiming(),
+    )
+
+    for (boundary, zero), max_orders in shared_max_orders.items():
+        direct = processor._g_taylor_eps_series_batch(
+            sector,
+            rows,
+            set(zero),
+            list(max_orders),
+            HotPathTiming(),
+            boundary_positions=set(boundary),
+            max_orders_are_explicit=True,
+            output_pairs=output_pairs,
+        )
+        cached = clustered[(boundary, zero, max_orders)]
+        for multi_index, regular_order in output_pairs:
+            np.testing.assert_allclose(
+                cached[regular_order].get(multi_index, np.zeros(rows.shape[0], dtype=np.complex128)),
+                direct[regular_order].get(multi_index, np.zeros(rows.shape[0], dtype=np.complex128)),
+                rtol=1.0e-12,
+                atol=1.0e-12,
+            )
+
+
+def test_direct_endpoint_g_cache_matches_direct_boundary_calls() -> None:
+    """Direct endpoint projector boundary clustering preserves regular Taylor inputs."""
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1 + x0 + 2*x1 + x0*x1"),
+        f_expr=E("2 + x0 + x1 + x0*x1"),
+        u_power_base=1.0,
+        f_power_base=1.0,
+        eps_log_u_coeff=1.0,
+        eps_log_f_coeff=-1.0,
+        expected_laurent_orders=["eps^0", "eps^1"],
+        convention_note="toy",
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1 + y0*y1"),
+        f_monomial_powers=[0, 0],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1, 1],
+    )
+    sector.prepare_evaluators(include_dual=False)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+    rows = np.asarray([[0.25, 0.375], [0.5, 0.125]], dtype=float)
+    coefficient_layout = [
+        ((), (0,), (0, 0), 0),
+        ((), (0,), (1, 0), 0),
+        ((), (0,), (0, 0), 1),
+        ((1,), (0,), (0, 0), 0),
+        ((1,), (0,), (1, 0), 0),
+        ((1,), (0,), (0, 0), 1),
+    ]
+    formula = EndpointProjectorFormulaDefinition(
+        signature=("toy-direct",),
+        input_names=[],
+        input_symbols=[],
+        output_expressions=[],
+        evaluators=[],
+        laurent_orders=[0, 1],
+        zero_subsets=[],
+        taylor_orders=[1, 0],
+        coefficient_layout=coefficient_layout,
+    )
+
+    clustered = processor._precompute_endpoint_projector_g_cache(
+        sector,
+        rows,
+        formula,
+        HotPathTiming(),
+    )
+    assert len(processor._endpoint_projector_plan_cache) == 1
+    first_plan = processor._endpoint_projector_plan(sector, formula)
+    assert processor._endpoint_projector_plan(sector, formula) is first_plan
+
+    for boundary in ((), (1,)):
+        output_pairs = (
+            ((0, 0), 0),
+            ((1, 0), 0),
+            ((0, 0), 1),
+        )
+        direct = processor._g_taylor_eps_series_batch(
+            sector,
+            rows,
+            {0},
+            [1, 0],
+            HotPathTiming(),
+            boundary_positions=set(boundary),
+            max_orders_are_explicit=True,
+            output_pairs=output_pairs,
+        )
+        cached = clustered[(boundary, (0,))]
+        for multi_index, regular_order in output_pairs:
+            np.testing.assert_allclose(
+                cached[regular_order].get(multi_index, np.zeros(rows.shape[0], dtype=np.complex128)),
+                direct[regular_order].get(multi_index, np.zeros(rows.shape[0], dtype=np.complex128)),
+                rtol=1.0e-12,
+                atol=1.0e-12,
+            )
+
+
+def test_ibp_endpoint_projector_formula_builds_for_higher_endpoint_power(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A y^(-2+eps) endpoint produces an IBP-lowered projector formula."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=0.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=0.0,
+        expected_laurent_orders=["eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0,),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-2.0, 1.0),
+            parameter_weight_powers=(0.0,),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+        ibp_reduce_to_log_endpoint=True,
+    )
+    sector = SectorDefinition(
+        name="toy-sector",
+        integration_dim=1,
+        variable_names=["y"],
+        map_exprs=[E("y")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1],
+        jacobian_monomial_powers=[0],
+        singular_axes=[0],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[1],
+    )
+    signature = topology.endpoint_projector_signature(sector)
+    formula = build_endpoint_projector_formula_symbolica(
+        topology,
+        sector,
+        signature,
+        EndpointProjectorFormulaDefinition,
+        ibp_reduce_to_log_endpoint=True,
+    )
+
+    assert formula.ibp_reduce_to_log_endpoint is True
+    assert any(key[0] == (0,) for key in formula.coefficient_layout)
+    assert any(key[2] == (1,) for key in formula.coefficient_layout)
+    assert list(tmp_path.glob("endpoint_projector_*.json"))
+
+
+def test_ibp_shared_taylor_envelopes_cover_child_projectors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """IBP child projectors reuse one Taylor envelope per boundary/zero set."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=-3.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=1.0,
+        expected_laurent_orders=["eps^-2", "eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0, 1.0),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-3.0, 1.0),
+            parameter_weight_powers=(0.0, 0.0),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+        ibp_reduce_to_log_endpoint=True,
+    )
+    sector = SectorDefinition(
+        name="toy-sector-2d",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1, 1],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[2, 2],
+    )
+    topology.prepare_endpoint_projector_formulas([sector])
+    formula = topology.endpoint_projector_formula_for(sector)
+    envelopes = SectorProcessor(topology)._ibp_shared_max_orders(sector, formula)
+
+    exact_requests = []
+    for term in formula.ibp_terms:
+        child = formula.child_formulas[term.child_signature]
+        active_positions = tuple(int(position) for position in term.active_positions)
+        groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[tuple[int, ...]]] = {}
+        for _child_boundary, child_zero, child_multi, _regular_order in child.coefficient_layout:
+            original_zero = tuple(active_positions[position] for position in child_zero)
+            original_multi = list(term.derivative_multi)
+            for child_position, value in enumerate(child_multi):
+                original_multi[active_positions[child_position]] += int(value)
+            groups.setdefault(
+                (tuple(term.boundary_positions), tuple(sorted(original_zero))),
+                [],
+            ).append(tuple(original_multi))
+        for key, requests in groups.items():
+            exact_requests.append((key, tuple(max(values) for values in zip(*requests))))
+
+    assert len(envelopes) < len(exact_requests)
+    for key, requested in exact_requests:
+        envelope = envelopes[key]
+        assert all(available >= needed for available, needed in zip(envelope, requested))
+
+
+def test_ibp_child_projectors_are_batched_by_signature(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Batched IBP child evaluation matches term-by-term evaluation."""
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
+    topology = TopologyDefinition(
+        family="toy",
+        x_names=["x0", "x1"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("1"),
+        u_power_base=0.0,
+        f_power_base=-3.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=1.0,
+        expected_laurent_orders=["eps^-2", "eps^-1", "eps^0"],
+        convention_note="toy",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0, 1.0),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-3.0, 1.0),
+            parameter_weight_powers=(0.0, 0.0),
+            prefactor_description="toy",
+            convention_description="toy",
+        ),
+        ibp_reduce_to_log_endpoint=True,
+    )
+    sector = SectorDefinition(
+        name="toy-sector-2d",
+        integration_dim=2,
+        variable_names=["y0", "y1"],
+        map_exprs=[E("y0"), E("y1")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1, 1],
+        jacobian_monomial_powers=[0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="toy",
+        description="toy",
+        endpoint_taylor_orders=[2, 2],
+    )
+    topology.prepare_endpoint_projector_formulas([sector])
+    formula = topology.endpoint_projector_formula_for(sector)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+    rows = np.asarray([[0.25, 0.375], [0.5, 0.125]], dtype=float)
+
+    shared_max_orders = processor._ibp_shared_max_orders(sector, formula)
+    shared_output_pairs = processor._ibp_shared_output_pairs(sector, formula)
+    shared_g_cache: dict[
+        tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+        list[dict[tuple[int, ...], np.ndarray]],
+    ] = {}
+    reference = np.zeros((rows.shape[0], topology.coefficient_count), dtype=np.complex128)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for term in formula.ibp_terms:
+            child = formula.child_formulas[term.child_signature]
+            child_inputs = processor._ibp_child_input_matrix(
+                sector,
+                rows,
+                child,
+                term,
+                HotPathTiming(),
+                shared_g_cache=shared_g_cache,
+                shared_max_orders=shared_max_orders,
+                shared_output_pairs=shared_output_pairs,
+            )
+            child_values = child.evaluate_complex_batch(child_inputs, HotPathTiming())
+            reference += processor._convolve_regular_prefactor_array(
+                child_values,
+                term.prefactor_coeffs,
+            )
+
+    calls: list[tuple[tuple[Any, ...], int]] = []
+    for signature, child in formula.child_formulas.items():
+        original = child.evaluate_complex_batch
+
+        def wrapped(
+            input_rows: np.ndarray,
+            timing: HotPathTiming | None = None,
+            *,
+            original: Any = original,
+            signature: tuple[Any, ...] = signature,
+        ) -> np.ndarray:
+            calls.append((signature, int(input_rows.shape[0])))
+            return original(input_rows, timing)
+
+        child.evaluate_complex_batch = wrapped  # type: ignore[method-assign]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        batched, _training = processor._ibp_endpoint_projector_subtraction_batch(
+            sector,
+            rows,
+            formula,
+            HotPathTiming(),
+        )
+
+    np.testing.assert_allclose(batched, reference, rtol=1.0e-12, atol=1.0e-12)
+    assert len(calls) == len(formula.child_formulas)
+    assert sum(row_count for _signature, row_count in calls) == len(formula.ibp_terms) * rows.shape[0]
+
+
+def test_symbolic_derivative_pair_reuses_map_context() -> None:
+    """Paired symbolic derivative Taylor evaluation matches separate U/F calls."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/double_box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        sector_method="iterative",
+        dual_evaluator_mode="symbolic-derivatives",
+        prefactor_convention="pysecdec",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    sector = next(sector for sector in sectors if len(sector.singular_axes) >= 3)
+    topology.prepare_dual_evaluators([sector], request.dual_evaluator_mode)
+    rows = np.full((2, sector.integration_dim), 0.31, dtype=float)
+    rows[1, :] = np.linspace(0.23, 0.77, sector.integration_dim)
+
+    paired_u, paired_f = topology._symbolic_derivative_taylor_pair_batch(sector, rows)
+    separate_u = topology.u_taylor_batch(sector, rows)
+    separate_f = topology.f_taylor_batch(sector, rows)
+
+    assert np.allclose(paired_u, separate_u, rtol=1.0e-12, atol=1.0e-12)
+    assert np.allclose(paired_f, separate_f, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_symbolic_derivative_context_uses_structural_map_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime map Taylor context should not rescan every jet with np.any."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/double_box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        sector_method="iterative",
+        dual_evaluator_mode="symbolic-derivatives",
+        prefactor_convention="pysecdec",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    sector = next(sector for sector in sectors if len(sector.singular_axes) >= 3)
+    output_shape = sector.dual_shape[: min(len(sector.dual_shape), 16)]
+    topology._chain_rule_h_layout(sector, output_shape)
+
+    def forbidden_any(*_args: Any, **_kwargs: Any) -> bool:
+        raise AssertionError("runtime context should use the cached structural layout")
+
+    monkeypatch.setattr("integrand.np.any", forbidden_any)
+    rows = np.asarray([np.linspace(0.19, 0.71, sector.integration_dim)], dtype=float)
+    context = topology._symbolic_derivative_taylor_context_batch(
+        sector,
+        rows,
+        output_shape=output_shape,
+    )
+
+    assert context["h_series"]
+
+
+def test_symbolic_derivative_values_use_multi_evaluator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ordinary derivative batches should not loop over single-output evaluators."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode)
+    derivative_indices = topology._symbolic_derivative_indices("f", 2)
+    x_values = np.asarray([[0.5, 0.2, 0.3], [0.5, 0.4, 0.1]], dtype=float)
+
+    def forbidden_single_evaluate(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("single-output derivative evaluator was used")
+
+    monkeypatch.setattr(topology, "_timed_evaluate", forbidden_single_evaluate)
+    values = topology._derivative_values_batch("f", x_values, derivative_indices, None)
+
+    assert set(values) == set(derivative_indices)
+    assert topology._f_derivative_multi_evaluators
+    assert all(value.shape == (2,) for value in values.values())
+
+
+def test_chain_rule_formula_matches_python_symbolic_composition() -> None:
+    """Prepared chain-rule formulas reproduce the retained Python composer."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/double_box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        sector_method="iterative",
+        dual_evaluator_mode="symbolic-derivatives",
+        prefactor_convention="pysecdec",
+    )
+    try:
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+    configure_laurent_range(request, topology, sectors)
+    sector = next(sector for sector in sectors if len(sector.singular_axes) >= 3)
+    rows = np.asarray(
+        [
+            np.linspace(0.19, 0.71, sector.integration_dim),
+            np.linspace(0.31, 0.83, sector.integration_dim),
+        ],
+        dtype=float,
+    )
+    output_shape = sector.dual_shape[: min(len(sector.dual_shape), 16)]
+    context = topology._symbolic_derivative_taylor_context_batch(
+        sector,
+        rows,
+        output_shape=output_shape,
+    )
+
+    formula_values = topology._compose_symbolic_derivative_taylor_batch(
+        sector,
+        context,
+        "f",
+        output_shape=output_shape,
+        use_chain_formula=True,
+    )
+    python_values = topology._compose_symbolic_derivative_taylor_batch(
+        sector,
+        context,
+        "f",
+        output_shape=output_shape,
+        use_chain_formula=False,
+    )
+
+    assert topology._chain_rule_formulas
+    np.testing.assert_allclose(formula_values, python_values, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_chain_rule_signature_ignores_sector_name() -> None:
+    """Equivalent map-jet layouts share one chain-rule formula signature."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    sector = sectors[0]
+    clone = replace(sector, name=f"{sector.name}_renamed")
+    clone.prepare_evaluators(include_dual=False)
+    topology.prepare_dual_evaluators([sector, clone], request.dual_evaluator_mode)
+    output_shape = sector.dual_shape[: min(len(sector.dual_shape), 8)]
+
+    original_signature = topology._chain_rule_formula_signature(sector, "f", output_shape)
+    renamed_signature = topology._chain_rule_formula_signature(clone, "f", output_shape)
+
+    assert original_signature == renamed_signature
+
+
+def test_chain_rule_formula_guard_skips_large_pregeneration_request() -> None:
+    """The chain-rule guard avoids cold-building too many composition formulas."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        dual_evaluator_mode="symbolic-derivatives",
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode)
+    topology.prepare_endpoint_projector_formulas(sectors)
+    topology.prepare_regular_taylor_formulas(sectors)
+
+    topology.chain_rule_formula_signature_limit = 0
+    topology.prepare_chain_rule_formulas(sectors)
+
+    assert topology.chain_rule_formulas_skipped > 0
+    assert topology._chain_rule_formulas == {}
 
 
 def test_single_overall_dual_evaluator_matches_per_sector_shape() -> None:
@@ -281,8 +2082,8 @@ def test_dot_generation_timing_has_requested_headline_buckets() -> None:
     """DOT generation timings expose the three requested headline buckets."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/triangle.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/triangle_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/triangle.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml"),
         mode="massless",
         m=0.0,
         prefactor_convention="sector",
@@ -309,8 +2110,8 @@ def test_dot_fsd_integration_does_not_reenter_pysecdec_after_generation(
     """Prepared DOT topology/sectors are sufficient for FSD integration."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/triangle.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/triangle_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/triangle.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml"),
         mode="massless",
         m=0.0,
         prefactor_convention="sector",
@@ -332,7 +2133,10 @@ def test_dot_fsd_integration_does_not_reenter_pysecdec_after_generation(
     monkeypatch.setattr("pysecdec_bridge.require_pysecdec", forbidden)
     monkeypatch.setattr("dot_topology.build_dot_bundle", forbidden)
 
-    result = integrate(request, topology, sectors, None)
+    try:
+        result = integrate(request, topology, sectors, None)
+    except PermissionError as exc:
+        pytest.skip(f"multiprocessing semaphores unavailable in this sandbox: {exc}")
 
     assert result.samples == request.samples_per_iter
 
@@ -563,7 +2367,7 @@ def test_dot_file_request_validates_file_path(tmp_path: Path) -> None:
 
 def test_example_dot_parser_preserves_external_direction_and_masses() -> None:
     """The example DOT parser finds invisible half-edges and mass attributes."""
-    parsed = parse_dot_file(PROJECT_ROOT / "examples/dot/triangle.dot")
+    parsed = parse_dot_file(PROJECT_ROOT / "examples/graphs/triangle.dot")
 
     assert parsed.graph_name == "triangle"
     assert parsed.loop_count == 1
@@ -574,7 +2378,7 @@ def test_example_dot_parser_preserves_external_direction_and_masses() -> None:
 
 def test_kinematics_yaml_uses_symbolica_expression_evaluation() -> None:
     """YAML values and replacements are evaluated without SymPy/SciPy."""
-    kin = load_kinematics(PROJECT_ROOT / "examples/dot/box_kinematics.yaml")
+    kin = load_kinematics(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml")
 
     assert kin.values["s12"] == pytest.approx(-1.0)
     assert kin.values["mt"] == pytest.approx(0.0)
@@ -587,8 +2391,8 @@ def test_dot_triangle_pysecdec_generation_matches_expected_endpoint_metadata() -
     """When pySecDec is installed, DOT triangle generation recovers endpoint sectors."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/triangle.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/triangle_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/triangle.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml"),
         mode="massless",
         m=0.0,
         prefactor_convention="pysecdec",
@@ -614,8 +2418,8 @@ def test_dot_box_pysecdec_generation_matches_expected_polynomial() -> None:
     """DOT box generation reproduces the massless box polynomial and sectors."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/box.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/box_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
         mode="massless",
         m=0.0,
         prefactor_convention="pysecdec",
@@ -654,8 +2458,8 @@ def test_dot_multiloop_two_and_three_point_examples_generate_finite_sector_sets(
     """The smaller multi-loop DOT examples generate finite FSD sectors."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / f"examples/dot/{name}.dot"),
-        kinematics_file=str(PROJECT_ROOT / f"examples/dot/{name}_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / f"examples/graphs/{name}.dot"),
+        kinematics_file=str(PROJECT_ROOT / f"examples/graphs/{name}_kinematics.yaml"),
         mode="massive",
         m=1.0,
         prefactor_convention="pysecdec",
@@ -675,7 +2479,7 @@ def test_dot_multiloop_two_and_three_point_examples_generate_finite_sector_sets(
         f"eps^{order}" for order in range(-2 * expected_loop_count, 1)
     ]
 
-    parsed = parse_dot_file(PROJECT_ROOT / f"examples/dot/{name}.dot")
+    parsed = parse_dot_file(PROJECT_ROOT / f"examples/graphs/{name}.dot")
     expected_external_count = 3 if name.startswith("three_point") else 2
     assert len(parsed.external_lines) == expected_external_count
 
@@ -698,8 +2502,8 @@ def test_optional_multiloop_fsd_low_stat_compare_to_pysecdec(name: str) -> None:
 
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / f"examples/dot/{name}.dot"),
-        kinematics_file=str(PROJECT_ROOT / f"examples/dot/{name}_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / f"examples/graphs/{name}.dot"),
+        kinematics_file=str(PROJECT_ROOT / f"examples/graphs/{name}_kinematics.yaml"),
         mode="massive",
         m=1.0,
         prefactor_convention="pysecdec",
@@ -1060,6 +2864,69 @@ def test_generated_formula_precision_stabilizes_yminus2_cancellation() -> None:
     assert coeffs[0, 1] == pytest.approx(2.0 + 0.0j, abs=1.0e-8)
 
 
+def test_endpoint_projector_precision_path_avoids_double_input_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Projector rescue rows assemble U/F/J Taylor data in multiprecision."""
+    topology = TopologyDefinition(
+        family="toy-yminus2-projector-stability",
+        x_names=["x0"],
+        parameter_names=[],
+        parameter_values=[],
+        u_expr=E("1"),
+        f_expr=E("x0^2"),
+        u_power_base=0.0,
+        f_power_base=1.0,
+        eps_log_u_coeff=0.0,
+        eps_log_f_coeff=-1.0,
+        expected_laurent_orders=["eps^0"],
+        convention_note="toy endpoint-projector precision test",
+        parametric_representation=ParametricRepresentation(
+            loop_count=1,
+            propagator_powers=(1.0,),
+            dimension=EpsilonExpansion(4.0, -2.0),
+            gamma_argument=EpsilonExpansion(0.0, 0.0),
+            u_exponent=EpsilonExpansion(0.0, 0.0),
+            f_exponent=EpsilonExpansion(-1.0, -1.0),
+            parameter_weight_powers=(0.0,),
+            prefactor_description="none",
+            convention_description="toy",
+        ),
+    )
+    topology.set_laurent_range(-1, 0)
+    sector = SectorDefinition(
+        name="toy-yminus2-projector-stability",
+        integration_dim=1,
+        variable_names=["y0"],
+        map_exprs=[E("y0")],
+        regular_jacobian_expr=E("1+2*y0+3*y0^2"),
+        f_monomial_powers=[2],
+        jacobian_monomial_powers=[0],
+        singular_axes=[0],
+        subtraction_type="endpoint projector subtraction",
+        description="toy sector with a known quadratic Taylor tail",
+        endpoint_taylor_orders=[1],
+    )
+    prepare_generated_evaluators(topology, [sector], subtraction_backend="projector-formula")
+
+    def forbidden_matrix(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("projector precision path used the double input matrix")
+
+    monkeypatch.setattr(SectorProcessor, "_endpoint_projector_input_matrix", forbidden_matrix)
+    processor = SectorProcessor(
+        topology,
+        stability_threshold=1.0e-8,
+        high_precision_stability_threshold=1.0e-8,
+        high_precision_stability_precision=100,
+        subtraction_backend="projector-formula",
+    )
+    coeffs, _training, timing = processor.evaluate_batch(sector, np.asarray([[1.0e-10]], dtype=float))
+
+    assert timing.precision_counts["high_precision"] == 1
+    assert coeffs[0, 0] == pytest.approx(-1.0 + 0.0j)
+    assert coeffs[0, 1] == pytest.approx(2.0 + 0.0j, abs=1.0e-8)
+
+
 def test_generated_formula_uses_integer_coordinate_powers() -> None:
     """Endpoint powers in generated formulas must never be encoded as floats."""
     topology = TopologyDefinition(
@@ -1170,8 +3037,8 @@ def test_symbolica_formula_generator_matches_legacy_builder_on_dot_box_sector() 
     """The new formula generator matches the legacy builder on pySecDec sector data."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/box.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/box_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
         mode="massless",
         m=0.0,
         sector_method="iterative",
@@ -1238,8 +3105,8 @@ def test_endpoint_projector_backend_matches_recursive_for_dot_double_box_sector(
     """A multi-axis DOT sector works with the endpoint-only projector cache."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/double_box.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/double_box_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/double_box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml"),
         mode="massless",
         m=0.0,
         sector_method="iterative",
@@ -1270,6 +3137,8 @@ def test_endpoint_projector_backend_matches_recursive_for_dot_double_box_sector(
     ).evaluate_batch(sector, rows)[0]
 
     assert len(topology._endpoint_projector_formulas) == 1
+    assert topology._regular_taylor_formulas
+    assert topology._regular_taylor_dual_signatures
     assert np.allclose(projector_values, recursive_values, rtol=1.0e-10, atol=1.0e-10)
 
 
@@ -1277,8 +3146,8 @@ def test_endpoint_projector_signature_is_lower_than_full_dot_box_signature() -> 
     """Endpoint projector signatures intentionally ignore sector-specific U/F/J data."""
     request = make_request(
         integral="dot",
-        dot_file=str(PROJECT_ROOT / "examples/dot/box.dot"),
-        kinematics_file=str(PROJECT_ROOT / "examples/dot/box_kinematics.yaml"),
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
         mode="massless",
         m=0.0,
         sector_method="iterative",
@@ -1357,6 +3226,7 @@ def test_projector_formula_backend_does_not_generate_formulas_at_runtime(
         raise AssertionError("endpoint projector generation happened during integration")
 
     monkeypatch.setattr("integrand.build_endpoint_projector_formula", forbidden)
+    monkeypatch.setattr("integrand.build_regular_taylor_formula", forbidden)
     result = integrate(request, topology, sectors, None)
 
     assert result.samples == request.samples_per_iter
@@ -1533,7 +3403,13 @@ def test_result_json_roundtrip_target_and_viewer(
             "expected_laurent_orders": ["eps^-1", "eps^0"],
             "benchmark_available": True,
         },
-        "symanzik": {"dual_evaluator_build_seconds": 0.0},
+        "symanzik": {
+            "dual_evaluator_build_seconds": 0.0,
+            "endpoint_projector_formula_count": 2,
+            "regular_taylor_formula_count": 3,
+            "regular_taylor_formulas_from_curated_cache": 1,
+            "regular_taylor_formulas_skipped": 4,
+        },
     }
     output = make_output(
         request=request,
@@ -1585,6 +3461,8 @@ def test_result_json_roundtrip_target_and_viewer(
     plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
     assert "FSD result file" in rendered
     assert "coefficients" in rendered
+    assert "curated regular Taylor assets" in rendered
+    assert "regular Taylor formulas skipped" in rendered
     assert plain.index(" B    |") < plain.index(" A    |")
     assert "-1:" in plain
     assert "eps^-1:" not in plain

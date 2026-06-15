@@ -275,6 +275,7 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
         "python_seconds",
         "havana_seconds",
         "dual_evaluator_build_seconds",
+        "chain_rule_formula_build_seconds",
         "avg_eval_us_per_sample_per_worker",
     ):
         if key in data:
@@ -282,6 +283,30 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
             timing_rows += 1
     if timing_rows:
         print(timing)
+
+    summary = data.get("summary", {})
+    symanzik = summary.get("symanzik", {}) if isinstance(summary, dict) else {}
+    if isinstance(symanzik, dict):
+        cache_rows = [
+            ("endpoint projector formulas", symanzik.get("endpoint_projector_formula_count")),
+            ("regular Taylor formulas", symanzik.get("regular_taylor_formula_count")),
+            ("curated regular Taylor assets", symanzik.get("regular_taylor_formulas_from_curated_cache")),
+            ("regular Taylor formulas skipped", symanzik.get("regular_taylor_formulas_skipped")),
+            ("regular Taylor policy", symanzik.get("regular_taylor_formula_policy")),
+            ("chain-rule formulas", symanzik.get("chain_rule_formula_count")),
+            ("chain-rule formulas skipped", symanzik.get("chain_rule_formulas_skipped")),
+        ]
+        cache_rows = [(label, value) for label, value in cache_rows if value not in (None, 0, "0")]
+        if cache_rows:
+            cache_table = PrettyTable()
+            cache_table.field_names = [
+                maybe_color("formula asset", Fore.CYAN),
+                maybe_color("count", Fore.CYAN),
+            ]
+            for label, value in cache_rows:
+                color = Fore.GREEN if "curated" in label else Fore.MAGENTA
+                cache_table.add_row([maybe_color(label, color), value])
+            print(cache_table)
 
     precision = data.get("precision_stats", {})
     if precision:

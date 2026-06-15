@@ -1,0 +1,15 @@
+dot-file: ../graphs/triangle.dot
+kinematics: ../graphs/triangle_kinematics.yaml
+dot-engine: fsd
+sector-method: iterative
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+symbolic-derivatives: true
+max-eps-order: 0
+target: ../outputs/dot_triangle_pysecdec_target.json
+samples-per-iter: 50000
+batch-size: 5000
+max-iter: 3
+min-iter: 1
+workers: 1
+result-path: ../outputs/dot_triangle_result.json

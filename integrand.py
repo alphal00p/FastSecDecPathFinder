@@ -10,21 +10,25 @@ from __future__ import annotations
 
 import copy
 import cmath
+from functools import lru_cache
 from itertools import product
 import math
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import time
 from typing import Any
 
 import numpy as np
-from symbolica import E, S
+from symbolica import E, Expression, S
 
 from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
 from sectors_generator import SectorDefinition
 from subtraction_formula import (
     build_endpoint_projector_formula_symbolica,
+    build_regular_taylor_formula_symbolica,
     build_subtraction_formula_symbolica,
+    endpoint_projector_formula_has_curated_cache,
+    regular_taylor_formula_has_curated_cache,
 )
 from utils import decimal_complex_with_precision, decimal_with_precision
 
@@ -62,6 +66,7 @@ class TopologyDefinition:
     global_prefactor_coeffs: list[complex] | None = None
     jit_compile_evaluators: bool = False
     dual_evaluator_mode: str = "pregenerate"
+    ibp_reduce_to_log_endpoint: bool = False
     parametric_representation: ParametricRepresentation | None = None
     _u_evaluator: Any = field(init=False, repr=False)
     _f_evaluator: Any = field(init=False, repr=False)
@@ -75,6 +80,18 @@ class TopologyDefinition:
         default_factory=dict, init=False, repr=False
     )
     _f_derivative_evaluators: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _u_derivative_exprs: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _f_derivative_exprs: dict[tuple[int, ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _u_derivative_multi_evaluators: dict[tuple[tuple[int, ...], ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _f_derivative_multi_evaluators: dict[tuple[tuple[int, ...], ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
     _u_derivative_indices_by_order: dict[int, list[tuple[int, ...]]] = field(
@@ -95,8 +112,44 @@ class TopologyDefinition:
     _endpoint_projector_formulas: dict[
         tuple[Any, ...], "EndpointProjectorFormulaDefinition"
     ] = field(default_factory=dict, init=False, repr=False)
+    _regular_taylor_formulas: dict[
+        tuple[Any, ...], "RegularTaylorFormulaDefinition"
+    ] = field(default_factory=dict, init=False, repr=False)
+    _chain_rule_formulas: dict[
+        tuple[Any, ...], "ChainRuleFormulaDefinition"
+    ] = field(default_factory=dict, init=False, repr=False)
+    _chain_rule_formula_lookup_cache: dict[
+        tuple[str, str, tuple[tuple[int, ...], ...]], "ChainRuleFormulaDefinition"
+    ] = field(default_factory=dict, init=False, repr=False)
+    _chain_rule_h_layout_cache: dict[
+        tuple[str, tuple[tuple[int, ...], ...]],
+        tuple[tuple[int, tuple[int, ...]], ...],
+    ] = field(default_factory=dict, init=False, repr=False)
+    _regular_taylor_dual_signatures: set[tuple[Any, ...]] = field(
+        default_factory=set, init=False, repr=False
+    )
+    _regular_taylor_source_shape_cache: dict[
+        tuple[str, tuple[int, ...], tuple[int, ...]], list[tuple[int, ...]]
+    ] = field(default_factory=dict, init=False, repr=False)
+    _sparse_regular_source_shape_cache: dict[
+        tuple[Any, ...], list[tuple[int, ...]]
+    ] = field(default_factory=dict, init=False, repr=False)
     dual_evaluator_build_seconds: float = field(default=0.0, init=False)
     subtraction_formula_build_seconds: float = field(default=0.0, init=False)
+    regular_taylor_formula_signature_limit: int = 256
+    regular_taylor_formula_volume_limit: int = 64
+    regular_taylor_formula_axis_limit: int = 5
+    regular_taylor_dual_shape_limit: int = 256
+    regular_taylor_low_signature_sector_threshold: int = 0
+    direct_projector_cache_term_threshold: int = 54
+    _regular_taylor_signature_version: int = field(default=1, init=False, repr=False)
+    regular_taylor_formulas_skipped: int = field(default=0, init=False)
+    regular_taylor_formulas_from_curated_cache: int = field(default=0, init=False)
+    endpoint_projector_direct_cache_override_sectors: int = field(default=0, init=False)
+    endpoint_projector_direct_cache_override_signatures: int = field(default=0, init=False)
+    chain_rule_formula_build_seconds: float = field(default=0.0, init=False)
+    chain_rule_formula_signature_limit: int = 256
+    chain_rule_formulas_skipped: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Build the scalar U and F evaluators in the declared row order."""
@@ -205,7 +258,7 @@ class TopologyDefinition:
         precision_digits = None if timing is None or not allow_precision else timing.precision_digits
         start = time.perf_counter()
         if precision_digits is None:
-            values = evaluator.evaluate(rows)
+            values = evaluator.evaluate(np.ascontiguousarray(rows))
         else:
             # Symbolica's multiprecision API is single-row oriented.  Keep the
             # ordinary hot path vectorized, and only route near-endpoint rows
@@ -230,7 +283,7 @@ class TopologyDefinition:
     ) -> Any:
         """Evaluate a Symbolica callback with native complex inputs."""
         start = time.perf_counter()
-        values = evaluator.evaluate_complex(rows)
+        values = evaluator.evaluate_complex(np.ascontiguousarray(rows))
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return values
@@ -558,14 +611,21 @@ class TopologyDefinition:
         """
         pending: list[tuple[SectorDefinition, tuple[Any, ...]]] = []
         seen: set[tuple[Any, ...]] = set()
+        override_signatures: set[tuple[Any, ...]] = set()
+        override_sector_count = 0
         for sector in sectors:
             if not sector.singular_axes:
                 continue
             signature = self.endpoint_projector_signature(sector)
+            if self.ibp_reduce_to_log_endpoint and not bool(signature[2]):
+                override_sector_count += 1
+                override_signatures.add(signature)
             if signature in self._endpoint_projector_formulas or signature in seen:
                 continue
             seen.add(signature)
             pending.append((sector, signature))
+        self.endpoint_projector_direct_cache_override_sectors = override_sector_count
+        self.endpoint_projector_direct_cache_override_signatures = len(override_signatures)
 
         if progress is not None:
             progress.start_stage(
@@ -602,8 +662,11 @@ class TopologyDefinition:
                     detail=f"{len(pending)} endpoint signature(s)",
                 )
 
-    def endpoint_projector_signature(self, sector: SectorDefinition) -> tuple[Any, ...]:
-        """Return the cache key for the endpoint-only projector formula."""
+    def _endpoint_projector_signature_components(
+        self,
+        sector: SectorDefinition,
+    ) -> tuple[list[tuple[int, float]], list[int]]:
+        """Return validated endpoint powers and Taylor orders for one sector."""
         endpoint_powers: list[tuple[int, float]] = []
         taylor_orders: list[int] = []
         for axis in sector.singular_axes:
@@ -633,11 +696,63 @@ class TopologyDefinition:
                 )
             endpoint_powers.append((int(rounded_base), float(endpoint_power.eps_coeff)))
             taylor_orders.append(required_order)
+        return endpoint_powers, taylor_orders
+
+    def _endpoint_projector_signature_from_components(
+        self,
+        sector: SectorDefinition,
+        endpoint_powers: list[tuple[int, float]],
+        taylor_orders: list[int],
+        *,
+        use_ibp: bool,
+    ) -> tuple[Any, ...]:
+        """Build the topology-independent endpoint-projector signature."""
         return (
+            "endpoint-projector",
+            2,
+            bool(use_ibp),
             len(sector.singular_axes),
             tuple(endpoint_powers),
             tuple(taylor_orders),
             tuple(self.laurent_orders),
+        )
+
+    def _effective_endpoint_projector_uses_ibp(
+        self,
+        sector: SectorDefinition,
+        endpoint_powers: list[tuple[int, float]],
+        taylor_orders: list[int],
+    ) -> bool:
+        """Choose IBP or a shipped direct projector for this endpoint signature."""
+        if not self.ibp_reduce_to_log_endpoint:
+            return False
+        threshold = int(self.direct_projector_cache_term_threshold)
+        if threshold <= 0:
+            return True
+        ibp_term_count = len(_ibp_endpoint_projector_terms(endpoint_powers, self.laurent_orders))
+        if ibp_term_count < threshold:
+            return True
+        direct_signature = self._endpoint_projector_signature_from_components(
+            sector,
+            endpoint_powers,
+            taylor_orders,
+            use_ibp=False,
+        )
+        return not endpoint_projector_formula_has_curated_cache(direct_signature)
+
+    def endpoint_projector_signature(self, sector: SectorDefinition) -> tuple[Any, ...]:
+        """Return the cache key for the endpoint-only projector formula."""
+        endpoint_powers, taylor_orders = self._endpoint_projector_signature_components(sector)
+        use_ibp = self._effective_endpoint_projector_uses_ibp(
+            sector,
+            endpoint_powers,
+            taylor_orders,
+        )
+        return self._endpoint_projector_signature_from_components(
+            sector,
+            endpoint_powers,
+            taylor_orders,
+            use_ibp=use_ibp,
         )
 
     def endpoint_projector_formula_for(
@@ -653,6 +768,750 @@ class TopologyDefinition:
                 "call TopologyDefinition.prepare_endpoint_projector_formulas(...) before integration"
             )
         return formula
+
+    def prepare_regular_taylor_formulas(
+        self,
+        sectors: list[SectorDefinition],
+        progress: Any | None = None,
+    ) -> None:
+        """Pregenerate Symbolica evaluators for regular ``g_s`` coefficients.
+
+        Endpoint projectors are topology-independent, but their inputs are
+        Taylor coefficients of the regular function multiplying the endpoint
+        monomial.  This step prepares that coefficient algebra too, so the hot
+        integration path only assembles black-box U/F/J Taylor values and calls
+        pregenerated evaluators.
+        """
+        self._regular_taylor_signature_version = (
+            3
+            if len(sectors) > self.regular_taylor_low_signature_sector_threshold
+            else 1
+        )
+        pending_by_signature: dict[tuple[Any, ...], SectorDefinition] = {}
+        source_request_specs: list[
+            tuple[SectorDefinition, tuple[Any, ...], tuple[int, ...], tuple[int, ...]]
+        ] = []
+        seen: set[tuple[Any, ...]] = set()
+        seen_source_spec: set[tuple[str, tuple[int, ...], tuple[int, ...]]] = set()
+        for sector in sectors:
+            if not sector.singular_axes:
+                continue
+            for signature, zero_positions, max_orders in self.regular_taylor_requests_for_sector(sector):
+                if signature not in self._regular_taylor_formulas and signature not in seen:
+                    seen.add(signature)
+                    pending_by_signature[signature] = sector
+                source_key = (sector.name, tuple(zero_positions), tuple(max_orders))
+                if source_key not in seen_source_spec:
+                    seen_source_spec.add(source_key)
+                    source_request_specs.append(
+                        (sector, signature, tuple(zero_positions), tuple(max_orders))
+                    )
+        pending_all = [
+            (sector, signature)
+            for signature, sector in pending_by_signature.items()
+        ]
+        pending_all.sort(
+            key=lambda item: (
+                _regular_taylor_signature_volume(item[1]),
+                int(item[1][2]) if len(item[1]) > 2 else 0,
+                repr(item[1]),
+            )
+        )
+        curated_signatures = {
+            signature
+            for _sector, signature in pending_all
+            if regular_taylor_formula_has_curated_cache(signature)
+        }
+        cold_pending = [
+            (sector, signature)
+            for sector, signature in pending_all
+            if signature not in curated_signatures
+            and (
+                _regular_taylor_signature_volume(signature)
+                <= self.regular_taylor_formula_volume_limit
+                and _regular_taylor_signature_axis_count(signature)
+                <= self.regular_taylor_formula_axis_limit
+            )
+        ]
+        curated_pending = [
+            (sector, signature)
+            for sector, signature in pending_all
+            if signature in curated_signatures
+        ]
+        if len(cold_pending) > self.regular_taylor_formula_signature_limit:
+            cold_pending = cold_pending[: self.regular_taylor_formula_signature_limit]
+        pending = curated_pending + cold_pending
+        prepared_signatures = {signature for _sector, signature in pending}
+        skipped_pending = [
+            (sector, signature)
+            for sector, signature in pending_all
+            if signature not in prepared_signatures
+        ]
+        prepared_source_request_specs = [
+            spec for spec in source_request_specs if spec[1] in prepared_signatures
+        ]
+        self.regular_taylor_formulas_skipped = len(skipped_pending)
+        self.regular_taylor_formulas_from_curated_cache = len(
+            prepared_signatures & curated_signatures
+        )
+
+        if not pending:
+            if progress is not None:
+                progress.start_stage(
+                    "Symbolica regular Taylor build",
+                    detail=(
+                        f"skipped {len(skipped_pending)} regular signature(s) "
+                        f"from {len(source_request_specs)} source request(s); "
+                        f"axis limit={self.regular_taylor_formula_axis_limit}, "
+                        f"volume limit={self.regular_taylor_formula_volume_limit}"
+                    ),
+                    total=1,
+                )
+                progress.update(
+                    1,
+                    total=1,
+                    detail="falling back to Python regular Taylor assembly",
+                )
+                progress.finish_stage(
+                    "Symbolica regular Taylor build",
+                    0.0,
+                    detail=(
+                        f"skipped {len(skipped_pending)} regular signature(s) "
+                        f"from {len(source_request_specs)} source request(s)"
+                    ),
+                )
+            return
+
+        dual_fast_path = (
+            self.dual_evaluator_mode == "symbolic-derivatives"
+            and len(pending) <= self.regular_taylor_dual_shape_limit
+            and len(prepared_source_request_specs) <= self.regular_taylor_dual_shape_limit
+        )
+        prepare_source_duals = self.dual_evaluator_mode != "symbolic-derivatives" or dual_fast_path
+        if progress is not None:
+            progress.start_stage(
+                "Symbolica regular Taylor build",
+                detail=(
+                    f"{len(pending)} regular signature(s)"
+                    + (
+                        f", {self.regular_taylor_formulas_from_curated_cache} curated"
+                        if self.regular_taylor_formulas_from_curated_cache
+                        else ""
+                    )
+                    + (
+                        f", skipped {len(skipped_pending)} hard signature(s)"
+                        if skipped_pending
+                        else ""
+                    )
+                ),
+                total=len(pending),
+            )
+        start_all = time.perf_counter()
+        try:
+            for index, (sector, signature) in enumerate(pending, start=1):
+                if progress is not None:
+                    progress.update(
+                        index - 1,
+                        total=len(pending),
+                        detail=f"{sector.name} regular signature {index}/{len(pending)}",
+                    )
+                start = time.perf_counter()
+                formula = build_regular_taylor_formula(self, sector, signature)
+                formula.dual_shape = _regular_formula_dual_shape(formula)
+                elapsed = time.perf_counter() - start
+                formula.build_seconds = elapsed
+                self._regular_taylor_formulas[signature] = formula
+                self.subtraction_formula_build_seconds += elapsed
+                if progress is not None:
+                    progress.update(
+                        index,
+                        total=len(pending),
+                        detail=f"{sector.name} regular Taylor done in {elapsed:.3g}s",
+                    )
+            if prepare_source_duals:
+                for sector, signature, zero_positions, max_orders in prepared_source_request_specs:
+                    formula = self._regular_taylor_formulas.get(signature)
+                    if formula is None:
+                        continue
+                    formula_version = int(signature[1]) if len(signature) > 1 else 1
+                    if formula_version <= 1:
+                        source_shape = list(formula.dual_shape)
+                    elif formula_version >= 3:
+                        canonical_positions = _regular_taylor_canonical_positions(max_orders)
+                        residual_multis = {
+                            _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                            for kind, multi in formula.input_layout
+                            if kind in {"u", "f"}
+                        }
+                        jacobian_multis = {
+                            _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                            for kind, multi in formula.input_layout
+                            if kind == "j"
+                        }
+                        source_shape = self.sparse_regular_source_shape_from_multis(
+                            sector,
+                            zero_positions,
+                            residual_multis,
+                            jacobian_multis,
+                        )
+                    else:
+                        source_shape = self.regular_taylor_source_shape(
+                            sector,
+                            zero_positions,
+                            max_orders,
+                        )
+                    analytic_sector_taylor = _sector_has_analytic_taylor_for_shape(sector)
+                    if self.dual_evaluator_mode != "symbolic-derivatives":
+                        sector.prepare_dual_evaluators_for_shape(source_shape)
+                    elif dual_fast_path and not analytic_sector_taylor:
+                        sector.prepare_dual_evaluators_for_shape(source_shape)
+                    if self.dual_evaluator_mode not in {"lazy", "symbolic-derivatives"}:
+                        self.u_dual_evaluator(source_shape)
+                        self.f_dual_evaluator(source_shape)
+                    elif dual_fast_path:
+                        self.u_dual_evaluator(source_shape)
+                        self.f_dual_evaluator(source_shape)
+                        self._regular_taylor_dual_signatures.add(signature)
+        finally:
+            if progress is not None:
+                progress.finish_stage(
+                    "Symbolica regular Taylor build",
+                    time.perf_counter() - start_all,
+                    detail=(
+                        f"{len(pending)} regular signature(s)"
+                        + (
+                            f", {self.regular_taylor_formulas_from_curated_cache} curated"
+                            if self.regular_taylor_formulas_from_curated_cache
+                            else ""
+                        )
+                        + (
+                            f", skipped {len(skipped_pending)} hard signature(s)"
+                            if skipped_pending
+                            else ""
+                        )
+                    ),
+                )
+
+    def prepare_chain_rule_formulas(
+        self,
+        sectors: list[SectorDefinition],
+        progress: Any | None = None,
+    ) -> None:
+        """Pregenerate mapped-derivative composition formulas.
+
+        This applies only to symbolic-derivative mode.  U/F derivative
+        evaluators are shared topology-level black boxes; these formulas own
+        only the sector-map chain rule that turns those derivative values into
+        Taylor coefficients in the sector variables.
+        """
+        if self.dual_evaluator_mode != "symbolic-derivatives":
+            return
+
+        requests: dict[
+            tuple[Any, ...],
+            tuple[str, str, tuple[tuple[int, ...], ...]],
+        ] = {}
+        request_limit = int(self.chain_rule_formula_signature_limit)
+        sector_by_name = {sector.name: sector for sector in sectors}
+
+        def add_chain_request(
+            sector_for_request: SectorDefinition,
+            polynomial: str,
+            shape: list[tuple[int, ...]],
+        ) -> None:
+            shape_tuple = tuple(tuple(int(value) for value in multi) for multi in shape)
+            signature = self._chain_rule_formula_signature(
+                sector_for_request,
+                polynomial,
+                list(shape_tuple),
+            )
+            requests.setdefault(
+                signature,
+                (sector_for_request.name, polynomial, shape_tuple),
+            )
+
+        for sector in sectors:
+            if not sector.singular_axes:
+                continue
+            try:
+                formula = self.endpoint_projector_formula_for(sector)
+            except RuntimeError:
+                continue
+            if formula.ibp_reduce_to_log_endpoint:
+                shared_max_orders = _ibp_shared_max_orders_for_formula(sector, formula)
+                shared_output_pairs = _ibp_shared_output_pairs_for_formula(sector, formula)
+                fallback_by_zero: dict[
+                    tuple[int, ...],
+                    list[
+                        tuple[
+                            tuple[tuple[int, ...], tuple[int, ...]],
+                            tuple[int, ...],
+                            tuple[tuple[tuple[int, ...], int], ...],
+                        ]
+                    ],
+                ] = {}
+                for key, max_orders in shared_max_orders.items():
+                    boundary, zero = key
+                    output_pairs = shared_output_pairs.get(key, ())
+                    signature = self.regular_taylor_signature(
+                        sector,
+                        zero_positions=zero,
+                        max_orders=max_orders,
+                        output_pairs=output_pairs,
+                    )
+                    if signature in self._regular_taylor_formulas:
+                        formula_regular = self._regular_taylor_formulas[signature]
+                        formula_version = int(signature[1]) if len(signature) > 1 else 1
+                        if formula_version >= 3:
+                            canonical_positions = _regular_taylor_canonical_positions(max_orders)
+                            residual_multis = {
+                                _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                                for kind, multi in formula_regular.input_layout
+                                if kind in {"u", "f"}
+                            }
+                            jacobian_multis = {
+                                _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                                for kind, multi in formula_regular.input_layout
+                                if kind == "j"
+                            }
+                            source_shape = self.sparse_regular_source_shape_from_multis(
+                                sector,
+                                zero,
+                                residual_multis,
+                                jacobian_multis,
+                            )
+                        else:
+                            source_shape = self.regular_taylor_source_shape(
+                                sector,
+                                zero,
+                                max_orders,
+                            )
+                        add_chain_request(sector, "u", source_shape)
+                        add_chain_request(sector, "f", source_shape)
+                    else:
+                        fallback_by_zero.setdefault(tuple(zero), []).append(
+                            (
+                                key,
+                                tuple(int(order) for order in max_orders),
+                                tuple(output_pairs),
+                            )
+                        )
+                iterable = []
+                for zero, entries in fallback_by_zero.items():
+                    entries.sort(key=lambda item: (len(item[0][0]), item[0][0], item[1]))
+                    if not entries:
+                        continue
+                    envelope_orders = tuple(
+                        max(int(max_orders[position]) for _key, max_orders, _pairs in entries)
+                        for position in range(len(sector.singular_axes))
+                    )
+                    output_pair_set: set[tuple[tuple[int, ...], int]] = set()
+                    for _key, _max_orders, output_pairs in entries:
+                        output_pair_set.update(output_pairs)
+                    union_output_pairs = tuple(
+                        sorted(
+                            output_pair_set,
+                            key=lambda item: (item[1], sum(item[0]), item[0]),
+                        )
+                    )
+                    iterable.append((zero, envelope_orders, union_output_pairs))
+            else:
+                groups: dict[
+                    tuple[tuple[int, ...], tuple[int, ...]],
+                    list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+                ] = {}
+                for entry in formula.coefficient_layout:
+                    boundary, zero, _multi_index, _regular_order = entry
+                    groups.setdefault((boundary, zero), []).append(entry)
+                iterable = []
+                for (_boundary, zero), entries in groups.items():
+                    max_orders = tuple(
+                        max(int(entry[2][position]) for entry in entries)
+                        for position in range(len(sector.singular_axes))
+                    )
+                    output_pairs = tuple(
+                        sorted(
+                            ((tuple(entry[2]), int(entry[3])) for entry in entries),
+                            key=lambda item: (item[1], sum(item[0]), item[0]),
+                        )
+                    )
+                    iterable.append((zero, max_orders, output_pairs))
+
+            for zero, max_orders, output_pairs in iterable:
+                signature = self.regular_taylor_signature(
+                    sector,
+                    zero_positions=zero,
+                    max_orders=max_orders,
+                    output_pairs=output_pairs,
+                )
+                if signature in self._regular_taylor_formulas:
+                    formula_regular = self._regular_taylor_formulas[signature]
+                    formula_version = int(signature[1]) if len(signature) > 1 else 1
+                    if formula_version >= 3:
+                        canonical_positions = _regular_taylor_canonical_positions(max_orders)
+                        residual_multis = {
+                            _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                            for kind, multi in formula_regular.input_layout
+                            if kind in {"u", "f"}
+                        }
+                        jacobian_multis = {
+                            _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                            for kind, multi in formula_regular.input_layout
+                            if kind == "j"
+                        }
+                        source_shape = self.sparse_regular_source_shape_from_multis(
+                            sector,
+                            zero,
+                            residual_multis,
+                            jacobian_multis,
+                        )
+                    else:
+                        source_shape = self.regular_taylor_source_shape(
+                            sector,
+                            zero,
+                            max_orders,
+                        )
+                    add_chain_request(sector, "u", source_shape)
+                    add_chain_request(sector, "f", source_shape)
+                    continue
+
+                if output_pairs:
+                    requested_multis = [
+                        tuple(int(value) for value in multi_index)
+                        for multi_index, _regular_order in output_pairs
+                    ]
+                    residual_multis = _ancestor_closed_multi_set(
+                        requested_multis,
+                        len(tuple(max_orders)),
+                    )
+                    u_shape = self.sparse_regular_source_shape_for_monomial_powers(
+                        sector,
+                        zero,
+                        residual_multis,
+                        sector.u_monomial_powers,
+                    )
+                    f_shape = self.sparse_regular_source_shape_for_monomial_powers(
+                        sector,
+                        zero,
+                        residual_multis,
+                        sector.f_monomial_powers,
+                    )
+                else:
+                    source_shape = self.regular_taylor_source_shape(
+                        sector,
+                        zero,
+                        max_orders,
+                    )
+                    u_shape = source_shape
+                    f_shape = source_shape
+                add_chain_request(sector, "u", u_shape)
+                add_chain_request(sector, "f", f_shape)
+            if len(requests) > request_limit:
+                # For huge all-sector triple-box runs, it is enough to know
+                # that the runtime-ready chain-rule layer would be too large.
+                # Stop collecting immediately rather than spending generation
+                # time enumerating thousands of formulas that will be skipped.
+                break
+
+        ordered_requests = sorted(
+            requests.values(),
+            key=lambda item: (len(item[2]), len(item[2][0]) if item[2] else 0, item[0], item[1]),
+        )
+        self.chain_rule_formulas_skipped = 0
+        if not ordered_requests:
+            return
+        if len(ordered_requests) > request_limit:
+            self.chain_rule_formulas_skipped = len(ordered_requests)
+            if progress is not None:
+                progress.start_stage(
+                    "Symbolica chain-rule build",
+                    detail=(
+                        f"skipped {len(ordered_requests)} mapped derivative formula(s); "
+                        f"limit={self.chain_rule_formula_signature_limit}"
+                    ),
+                    total=1,
+                )
+                progress.update(
+                    1,
+                    total=1,
+                    detail="falling back to lazy chain-rule formula construction",
+                )
+                progress.finish_stage(
+                    "Symbolica chain-rule build",
+                    0.0,
+                    detail=f"skipped {len(ordered_requests)} mapped derivative formula(s)",
+                )
+            return
+        if progress is not None:
+            progress.start_stage(
+                "Symbolica chain-rule build",
+                detail=f"{len(ordered_requests)} mapped derivative formula(s)",
+                total=len(ordered_requests),
+            )
+        start_all = time.perf_counter()
+        try:
+            for index, (sector_name, polynomial, shape_tuple) in enumerate(ordered_requests, start=1):
+                sector = sector_by_name[sector_name]
+                shape = [tuple(multi) for multi in shape_tuple]
+                if progress is not None:
+                    progress.update(
+                        index - 1,
+                        total=len(ordered_requests),
+                        detail=(
+                            f"{sector.name} {polynomial.upper()} chain "
+                            f"{index}/{len(ordered_requests)} len={len(shape)}"
+                        ),
+                    )
+                formula = self.chain_rule_formula_for(sector, polynomial, shape)
+                if progress is not None:
+                    progress.update(
+                        index,
+                        total=len(ordered_requests),
+                        detail=(
+                            f"{sector.name} {polynomial.upper()} chain done "
+                            f"in {formula.build_seconds:.3g}s"
+                        ),
+                    )
+        finally:
+            if progress is not None:
+                progress.finish_stage(
+                    "Symbolica chain-rule build",
+                    time.perf_counter() - start_all,
+                    detail=f"{len(ordered_requests)} mapped derivative formula(s)",
+                )
+
+    def regular_taylor_signatures_for_sector(
+        self,
+        sector: SectorDefinition,
+    ) -> list[tuple[Any, ...]]:
+        """Return every regular Taylor signature needed by one sector."""
+        return sorted(
+            {
+                signature
+                for signature, _zero_positions, _max_orders in self.regular_taylor_requests_for_sector(sector)
+            },
+            key=str,
+        )
+
+    def regular_taylor_requests_for_sector(
+        self,
+        sector: SectorDefinition,
+    ) -> list[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]]:
+        """Return regular formula requests as ``(signature, zero, max_orders)``."""
+        if not sector.singular_axes:
+            return []
+        formula = self.endpoint_projector_formula_for(sector)
+        requests: set[tuple[tuple[Any, ...], tuple[int, ...], tuple[int, ...]]] = set()
+        if formula.ibp_reduce_to_log_endpoint:
+            shared_max_orders = _ibp_shared_max_orders_for_formula(sector, formula)
+            output_pairs_by_key = _ibp_shared_output_pairs_for_formula(sector, formula)
+            for (_boundary, zero), max_orders in shared_max_orders.items():
+                output_pairs = output_pairs_by_key.get((_boundary, zero), ())
+                signature = self.regular_taylor_signature(
+                    sector,
+                    zero_positions=zero,
+                    max_orders=max_orders,
+                    output_pairs=output_pairs,
+                )
+                requests.add((signature, tuple(zero), tuple(int(order) for order in max_orders)))
+        else:
+            groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[tuple[Any, ...]]] = {}
+            for key in formula.coefficient_layout:
+                boundary, zero, _multi_index, _regular_order = key
+                groups.setdefault((boundary, zero), []).append(key)
+            for (_boundary, zero), entries in groups.items():
+                max_orders = tuple(
+                    max(int(entry[2][position]) for entry in entries)
+                    for position in range(len(sector.singular_axes))
+                )
+                output_pairs = tuple(
+                    sorted(
+                        ((tuple(entry[2]), int(entry[3])) for entry in entries),
+                        key=lambda item: (item[1], sum(item[0]), item[0]),
+                    )
+                )
+                signature = self.regular_taylor_signature(
+                    sector,
+                    zero_positions=zero,
+                    max_orders=max_orders,
+                    output_pairs=output_pairs,
+                )
+                requests.add((signature, tuple(zero), tuple(int(order) for order in max_orders)))
+        return sorted(requests, key=str)
+
+    def regular_taylor_signature(
+        self,
+        sector: SectorDefinition,
+        zero_positions: tuple[int, ...],
+        max_orders: tuple[int, ...] | list[int],
+        output_pairs: tuple[tuple[tuple[int, ...], int], ...] | None = None,
+    ) -> tuple[Any, ...]:
+        """Return a cache key for the regular ``g_s`` coefficient algebra."""
+        if self._regular_taylor_signature_version <= 1:
+            regular_endpoint_powers = tuple(
+                (self.endpoint_power(sector, axis).base, self.endpoint_power(sector, axis).eps_coeff)
+                for axis in range(sector.integration_dim)
+            )
+            return (
+                "regular-taylor",
+                1,
+                int(sector.integration_dim),
+                tuple(int(axis) for axis in sector.singular_axes),
+                tuple(int(power) for power in sector.u_monomial_powers),
+                tuple(int(power) for power in sector.f_monomial_powers),
+                tuple(int(power) for power in sector.jacobian_monomial_powers),
+                float(self.u_power_base),
+                float(self.f_power_base),
+                float(self.eps_log_u_coeff),
+                float(self.eps_log_f_coeff),
+                tuple(int(position) for position in zero_positions),
+                tuple(int(order) for order in max_orders),
+                regular_endpoint_powers,
+                tuple(self.laurent_orders),
+            )
+
+        if self._regular_taylor_signature_version >= 3:
+            canonical_positions = _regular_taylor_canonical_positions(max_orders)
+            if output_pairs is None:
+                output_pairs = tuple(
+                    (tuple(multi), int(regular_order))
+                    for regular_order in range(self.coefficient_count)
+                    for multi in _multi_indices([int(order) for order in max_orders])
+                )
+            canonical_pairs = tuple(
+                sorted(
+                    {
+                        (
+                            _regular_taylor_original_to_canonical(tuple(multi), canonical_positions),
+                            int(regular_order),
+                        )
+                        for multi, regular_order in output_pairs
+                    },
+                    key=lambda item: (item[1], sum(item[0]), item[0]),
+                )
+            )
+            return (
+                "regular-taylor",
+                3,
+                int(len(sector.singular_axes)),
+                canonical_pairs,
+                float(self.u_power_base),
+                float(self.f_power_base),
+                float(self.eps_log_u_coeff),
+                float(self.eps_log_f_coeff),
+                tuple(self.laurent_orders),
+            )
+
+        # Version 2 of this signature is deliberately much lower than the
+        # original sector-specific key.  The formula receives residual Taylor
+        # coefficients of J, U/M_U, F/M_F plus the already evaluated
+        # nonsingular monomial prefactor/log.  Therefore it no longer depends on
+        # sector variable names, singular-axis positions, zero projectors, or
+        # U/F/J monomial powers; those are handled while assembling the formula
+        # inputs from black-box evaluator output.
+        return (
+            "regular-taylor",
+            2,
+            int(len(sector.singular_axes)),
+            tuple(sorted((int(order) for order in max_orders), reverse=True)),
+            float(self.u_power_base),
+            float(self.f_power_base),
+            float(self.eps_log_u_coeff),
+            float(self.eps_log_f_coeff),
+            tuple(self.laurent_orders),
+        )
+
+    def regular_taylor_formula_for(
+        self,
+        sector: SectorDefinition,
+        zero_positions: tuple[int, ...],
+        max_orders: tuple[int, ...] | list[int],
+        output_pairs: tuple[tuple[tuple[int, ...], int], ...] | None = None,
+    ) -> "RegularTaylorFormulaDefinition":
+        """Return a pregenerated regular Taylor formula."""
+        signature = self.regular_taylor_signature(
+            sector,
+            zero_positions,
+            max_orders,
+            output_pairs=output_pairs,
+        )
+        formula = self._regular_taylor_formulas.get(signature)
+        if formula is None:
+            raise RuntimeError(
+                f"{sector.name}: missing pregenerated regular Taylor formula; "
+                "call TopologyDefinition.prepare_regular_taylor_formulas(...) before integration"
+            )
+        return formula
+
+    def regular_taylor_source_shape(
+        self,
+        sector: SectorDefinition,
+        zero_positions: tuple[int, ...] | set[int],
+        max_orders: tuple[int, ...] | list[int],
+    ) -> list[tuple[int, ...]]:
+        """Return and cache the raw Taylor shape needed by a residual formula."""
+        zero_tuple = tuple(sorted(int(position) for position in zero_positions))
+        max_tuple = tuple(int(order) for order in max_orders)
+        key = (sector.name, zero_tuple, max_tuple)
+        cached = self._regular_taylor_source_shape_cache.get(key)
+        if cached is None:
+            cached = _regular_taylor_source_shape(sector, zero_tuple, max_tuple)
+            self._regular_taylor_source_shape_cache[key] = cached
+        return cached
+
+    def sparse_regular_source_shape_from_multis(
+        self,
+        sector: SectorDefinition,
+        zero_positions: tuple[int, ...] | set[int],
+        residual_multis: set[tuple[int, ...]],
+        jacobian_multis: set[tuple[int, ...]],
+    ) -> list[tuple[int, ...]]:
+        """Return cached sparse source shape for a regular formula input."""
+        key = (
+            "all",
+            sector.name,
+            tuple(sorted(int(position) for position in zero_positions)),
+            _multi_set_cache_key(residual_multis),
+            _multi_set_cache_key(jacobian_multis),
+            tuple(int(power) for power in sector.u_monomial_powers),
+            tuple(int(power) for power in sector.f_monomial_powers),
+        )
+        cached = self._sparse_regular_source_shape_cache.get(key)
+        if cached is None:
+            cached = _regular_taylor_source_shape_from_multis(
+                sector,
+                zero_positions,
+                residual_multis,
+                jacobian_multis,
+            )
+            self._sparse_regular_source_shape_cache[key] = cached
+        return cached
+
+    def sparse_regular_source_shape_for_monomial_powers(
+        self,
+        sector: SectorDefinition,
+        zero_positions: tuple[int, ...] | set[int],
+        residual_multis: set[tuple[int, ...]],
+        monomial_powers: list[int],
+    ) -> list[tuple[int, ...]]:
+        """Return cached sparse source shape for one residual polynomial."""
+        key = (
+            "one",
+            sector.name,
+            tuple(sorted(int(position) for position in zero_positions)),
+            _multi_set_cache_key(residual_multis),
+            tuple(int(power) for power in monomial_powers),
+        )
+        cached = self._sparse_regular_source_shape_cache.get(key)
+        if cached is None:
+            cached = _regular_taylor_source_shape_for_monomial_powers(
+                sector,
+                zero_positions,
+                residual_multis,
+                monomial_powers,
+            )
+            self._sparse_regular_source_shape_cache[key] = cached
+        return cached
 
     def _dual_evaluator_shape_and_columns(
         self,
@@ -725,34 +1584,41 @@ class TopologyDefinition:
         """Build shared normal evaluators for U/F symbolic partial derivatives."""
         if polynomial == "u":
             expr = self.u_expr
-            cache = self._u_derivative_evaluators
+            expr_cache = self._u_derivative_exprs
+            multi_cache = self._u_derivative_multi_evaluators
             indices_by_order = self._u_derivative_indices_by_order
         elif polynomial == "f":
             expr = self.f_expr
-            cache = self._f_derivative_evaluators
+            expr_cache = self._f_derivative_exprs
+            multi_cache = self._f_derivative_multi_evaluators
             indices_by_order = self._f_derivative_indices_by_order
         else:
             raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
 
         existing = indices_by_order.get(max_total)
-        if existing is not None and all(multi_index in cache for multi_index in existing):
+        if existing is not None:
             return
 
         params = [S(name) for name in [*self.x_names, *self.parameter_names]]
         prepared: list[tuple[int, ...]] = []
+        expressions: list[Any] = []
         start = time.perf_counter()
         for multi_index in self._candidate_derivative_multi_indices(expr, max_total):
-            if multi_index not in cache:
+            derivative_expr = expr_cache.get(multi_index)
+            if derivative_expr is None:
                 derivative_expr = self._differentiate_expr(expr, multi_index)
                 if str(derivative_expr) == "0":
                     continue
-                cache[multi_index] = derivative_expr.evaluator(
-                    params,
-                    jit_compile=self.jit_compile_evaluators,
-                )
-            if multi_index in cache:
-                prepared.append(multi_index)
+                expr_cache[multi_index] = derivative_expr
+            prepared.append(multi_index)
+            expressions.append(derivative_expr)
         indices_by_order[max_total] = prepared
+        if prepared:
+            multi_cache[tuple(prepared)] = Expression.evaluator_multiple(
+                expressions,
+                params,
+                jit_compile=self.jit_compile_evaluators,
+            )
         self.dual_evaluator_build_seconds += time.perf_counter() - start
 
     def _symbolic_derivative_indices(self, polynomial: str, max_total: int) -> list[tuple[int, ...]]:
@@ -769,8 +1635,69 @@ class TopologyDefinition:
 
     def _symbolic_derivative_evaluator(self, polynomial: str, multi_index: tuple[int, ...]) -> Any:
         """Return a prepared evaluator for one x-space symbolic derivative."""
-        cache = self._u_derivative_evaluators if polynomial == "u" else self._f_derivative_evaluators
-        return cache[multi_index]
+        if polynomial == "u":
+            expr = self.u_expr
+            cache = self._u_derivative_evaluators
+            expr_cache = self._u_derivative_exprs
+        elif polynomial == "f":
+            expr = self.f_expr
+            cache = self._f_derivative_evaluators
+            expr_cache = self._f_derivative_exprs
+        else:
+            raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
+        evaluator = cache.get(multi_index)
+        if evaluator is None:
+            derivative_expr = expr_cache.get(multi_index)
+            if derivative_expr is None:
+                derivative_expr = self._differentiate_expr(expr, multi_index)
+                if str(derivative_expr) == "0":
+                    raise KeyError(f"{polynomial} derivative {multi_index} is zero")
+                expr_cache[multi_index] = derivative_expr
+            params = [S(name) for name in [*self.x_names, *self.parameter_names]]
+            evaluator = derivative_expr.evaluator(
+                params,
+                jit_compile=self.jit_compile_evaluators,
+            )
+            cache[multi_index] = evaluator
+        return evaluator
+
+    def _symbolic_derivative_multi_evaluator(
+        self,
+        polynomial: str,
+        derivative_indices: list[tuple[int, ...]],
+    ) -> Any:
+        """Return a shared evaluator for a whole derivative index list."""
+        key = tuple(tuple(int(value) for value in multi) for multi in derivative_indices)
+        if polynomial == "u":
+            expr = self.u_expr
+            expr_cache = self._u_derivative_exprs
+            multi_cache = self._u_derivative_multi_evaluators
+        elif polynomial == "f":
+            expr = self.f_expr
+            expr_cache = self._f_derivative_exprs
+            multi_cache = self._f_derivative_multi_evaluators
+        else:
+            raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
+        evaluator = multi_cache.get(key)
+        if evaluator is not None:
+            return evaluator
+        expressions: list[Any] = []
+        for multi_index in key:
+            derivative_expr = expr_cache.get(multi_index)
+            if derivative_expr is None:
+                derivative_expr = self._differentiate_expr(expr, multi_index)
+                if str(derivative_expr) == "0":
+                    raise KeyError(f"{polynomial} derivative {multi_index} is zero")
+                expr_cache[multi_index] = derivative_expr
+            expressions.append(derivative_expr)
+        params = [S(name) for name in [*self.x_names, *self.parameter_names]]
+        evaluator = Expression.evaluator_multiple(
+            expressions,
+            params,
+            jit_compile=self.jit_compile_evaluators,
+        )
+        multi_cache[key] = evaluator
+        return evaluator
 
     def _derivative_values_batch(
         self,
@@ -781,14 +1708,20 @@ class TopologyDefinition:
     ) -> dict[tuple[int, ...], np.ndarray]:
         """Evaluate shared symbolic derivative callbacks at mapped x-points."""
         rows = self._rows(x_values)
-        values: dict[tuple[int, ...], np.ndarray] = {}
-        for multi_index in derivative_indices:
-            evaluator = self._symbolic_derivative_evaluator(polynomial, multi_index)
-            values[multi_index] = np.asarray(
-                self._timed_evaluate(evaluator, rows, timing),
-                dtype=np.complex128,
-            )[:, 0]
-        return values
+        if not derivative_indices:
+            return {}
+        evaluator = self._symbolic_derivative_multi_evaluator(polynomial, derivative_indices)
+        start = time.perf_counter()
+        matrix = np.asarray(
+            evaluator.evaluate_complex(np.ascontiguousarray(rows)),
+            dtype=np.complex128,
+        )
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return {
+            tuple(multi_index): matrix[:, column]
+            for column, multi_index in enumerate(derivative_indices)
+        }
 
     def _symbolic_derivative_taylor_batch(
         self,
@@ -804,37 +1737,381 @@ class TopologyDefinition:
         original Feynman parameters and reused for every sector.  Sector
         dependence only enters through the numerical map Taylor coefficients.
         """
-        if not sector.dual_shape:
+        context = self._symbolic_derivative_taylor_context_batch(sector, y_values, timing)
+        return self._compose_symbolic_derivative_taylor_batch(sector, context, polynomial, timing)
+
+    def _symbolic_derivative_taylor_pair_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        timing: HotPathTiming | None = None,
+        output_shape: list[tuple[int, ...]] | None = None,
+        u_output_shape: list[tuple[int, ...]] | None = None,
+        f_output_shape: list[tuple[int, ...]] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return U and F Taylor coefficients while sharing sector-map jets.
+
+        The symbolic-derivative backend used by heavy DOT sectors needs the
+        same composed sector-map Taylor series for U and F.  Computing those
+        jets twice is pure Python overhead, so this pair path builds the map
+        context once and only runs the separate black-box derivative
+        evaluators for U and F.
+        """
+        context = self._symbolic_derivative_taylor_context_batch(
+            sector,
+            y_values,
+            timing,
+            output_shape=(
+                _merge_multi_shapes(u_output_shape or [], f_output_shape or [])
+                if u_output_shape is not None or f_output_shape is not None
+                else output_shape
+            ),
+        )
+        return (
+            self._compose_symbolic_derivative_taylor_batch(
+                sector,
+                context,
+                "u",
+                timing,
+                output_shape=u_output_shape,
+            ),
+            self._compose_symbolic_derivative_taylor_batch(
+                sector,
+                context,
+                "f",
+                timing,
+                output_shape=f_output_shape,
+            ),
+        )
+
+    def _symbolic_derivative_taylor_context_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        timing: HotPathTiming | None = None,
+        output_shape: list[tuple[int, ...]] | None = None,
+    ) -> dict[str, Any]:
+        """Build reusable sector-map Taylor data for symbolic derivatives."""
+        active_shape = list(output_shape or sector.dual_shape)
+        if not active_shape:
             raise ValueError(f"{sector.name}: no dual shape declared")
 
         rows_in = np.asarray(y_values, dtype=float)
         n_rows = rows_in.shape[0]
-        rank = len(sector.dual_shape[0])
+        rank = len(active_shape[0])
         max_orders = [
-            max(multi_index[position] for multi_index in sector.dual_shape)
+            max(multi_index[position] for multi_index in active_shape)
             for position in range(rank)
         ]
-        max_total = sum(max_orders)
-        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
+        max_total = max(sum(int(value) for value in multi_index) for multi_index in active_shape)
 
-        x_jets = sector.map_dual_eval_batch_for_shape(rows_in, sector.dual_shape, timing)
+        x_jets = sector.map_dual_eval_batch_for_shape(rows_in, active_shape, timing)
         zero = _zero_multi(rank)
-        zero_column = sector.dual_index(zero)
+        shape_index = {multi_index: index for index, multi_index in enumerate(active_shape)}
+        zero_column = shape_index[zero]
         x0 = x_jets[:, :, zero_column]
-        derivative_values = self._derivative_values_batch(polynomial, x0, derivative_indices, timing)
 
-        h_series: list[MultiSeries] = []
+        # The sector map has a fixed sparse Taylor structure.  Use the same
+        # structural layout that keys the pregenerated chain-rule evaluator
+        # instead of probing every map-jet column with ``np.any`` for every
+        # batch.  This keeps sample-dependent zeroes as explicit zero arrays,
+        # which is algebraically harmless and avoids millions of Python-side
+        # reductions in high-axis sectors such as the triple-box PSD649 class.
+        h_series: list[MultiSeries] = [{} for _ in range(len(self.x_names))]
+        for x_index, multi_index in self._chain_rule_h_layout(sector, active_shape):
+            column = shape_index[tuple(multi_index)]
+            h_series[int(x_index)][tuple(multi_index)] = x_jets[
+                :,
+                int(x_index),
+                column,
+            ].astype(np.complex128, copy=False)
+
+        return {
+            "n_rows": n_rows,
+            "rank": rank,
+            "max_orders": max_orders,
+            "max_total": max_total,
+            "x0": x0,
+            "h_series": h_series,
+            "output_shape": active_shape,
+        }
+
+    def _chain_rule_h_layout(
+        self,
+        sector: SectorDefinition,
+        output_shape: list[tuple[int, ...]],
+    ) -> tuple[tuple[int, tuple[int, ...]], ...]:
+        """Return structurally nonzero sector-map Taylor inputs.
+
+        Chain-rule composition formulas receive sector-map Taylor coefficients
+        as numerical inputs.  They do not need sector names, sector variable
+        names, or the map expressions themselves.  The structural nonzero
+        layout is therefore the lowest safe key for reusing these evaluators
+        without pretending that every map has the same sparse input contract.
+        """
+        if not output_shape:
+            return ()
+        rank = len(output_shape[0])
+        zero = _zero_multi(rank)
+        shape = [tuple(int(value) for value in multi) for multi in output_shape]
+        cache_key = (sector.name, tuple(shape))
+        cached = self._chain_rule_h_layout_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        shape_index = {multi: index for index, multi in enumerate(shape)}
+        structural_row = np.full((1, sector.integration_dim), 0.37, dtype=float)
+        x_jets = sector.map_dual_eval_batch_for_shape(structural_row, shape, None)
+        layout: list[tuple[int, tuple[int, ...]]] = []
         for x_index in range(len(self.x_names)):
-            series: MultiSeries = {}
-            for column, multi_index in enumerate(sector.dual_shape):
-                if multi_index == zero:
+            for multi in shape:
+                if multi == zero:
                     continue
-                values = x_jets[:, x_index, column].astype(np.complex128, copy=False)
-                if np.any(values):
-                    series[multi_index] = values
+                value = x_jets[:, x_index, shape_index[multi]]
+                if np.any(value):
+                    layout.append((int(x_index), tuple(int(v) for v in multi)))
+        out = tuple(layout)
+        self._chain_rule_h_layout_cache[cache_key] = out
+        return out
+
+    def _chain_rule_formula_signature(
+        self,
+        sector: SectorDefinition,
+        polynomial: str,
+        output_shape: list[tuple[int, ...]],
+    ) -> tuple[Any, ...]:
+        """Return a cache key for a mapped-derivative composition formula."""
+        active_shape = tuple(tuple(int(value) for value in multi) for multi in output_shape)
+        max_total = max((sum(multi) for multi in active_shape), default=0)
+        derivative_indices = tuple(self._symbolic_derivative_indices(polynomial, max_total))
+        h_layout = self._chain_rule_h_layout(sector, list(active_shape))
+        # Version 2 removes sector names and map-expression strings from the
+        # key.  The only sector-specific information retained is the structural
+        # map-jet input layout, which is part of the numerical contract.
+        return (
+            "chain-rule",
+            2,
+            polynomial,
+            len(self.x_names),
+            int(sector.integration_dim),
+            active_shape,
+            derivative_indices,
+            h_layout,
+            bool(self.jit_compile_evaluators),
+        )
+
+    def chain_rule_formula_for(
+        self,
+        sector: SectorDefinition,
+        polynomial: str,
+        output_shape: list[tuple[int, ...]],
+    ) -> "ChainRuleFormulaDefinition":
+        """Return or build a Symbolica chain-rule composition evaluator."""
+        active_shape = [tuple(int(value) for value in multi) for multi in output_shape]
+        if not active_shape:
+            raise ValueError(f"{sector.name}: empty chain-rule output shape")
+        lookup_key = (sector.name, polynomial, tuple(active_shape))
+        direct_cached = self._chain_rule_formula_lookup_cache.get(lookup_key)
+        if direct_cached is not None:
+            return direct_cached
+        signature = self._chain_rule_formula_signature(sector, polynomial, active_shape)
+        cached = self._chain_rule_formulas.get(signature)
+        if cached is not None:
+            self._chain_rule_formula_lookup_cache[lookup_key] = cached
+            return cached
+
+        start = time.perf_counter()
+        formula = self._build_chain_rule_formula(sector, polynomial, active_shape, signature)
+        formula.build_seconds = time.perf_counter() - start
+        self.chain_rule_formula_build_seconds += formula.build_seconds
+        self._chain_rule_formulas[signature] = formula
+        self._chain_rule_formula_lookup_cache[lookup_key] = formula
+        return formula
+
+    def _build_chain_rule_formula(
+        self,
+        sector: SectorDefinition,
+        polynomial: str,
+        output_shape: list[tuple[int, ...]],
+        signature: tuple[Any, ...],
+    ) -> "ChainRuleFormulaDefinition":
+        """Build Symbolica expressions for ``P(X_s(y))`` Taylor composition."""
+        rank = len(output_shape[0])
+        zero = _zero_multi(rank)
+        max_total = max(sum(multi) for multi in output_shape)
+        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
+        allowed_multis = {tuple(multi) for multi in output_shape}
+        allowed_multis.add(zero)
+        h_layout = self._chain_rule_h_layout(sector, output_shape)
+
+        input_names: list[str] = []
+        input_symbols: list[Any] = []
+        h_series: list[ExprSeries] = []
+        h_by_x: dict[int, list[tuple[int, tuple[int, ...]]]] = {}
+        for layout_index, (x_index, multi) in enumerate(h_layout):
+            h_by_x.setdefault(int(x_index), []).append((layout_index, tuple(multi)))
+        for x_index in range(len(self.x_names)):
+            series: ExprSeries = {}
+            for _layout_index, multi in h_by_x.get(x_index, []):
+                name = f"ch_h_{x_index}_{_multi_suffix(multi)}"
+                symbol = S(name)
+                input_names.append(name)
+                input_symbols.append(symbol)
+                series[multi] = symbol
             h_series.append(series)
 
-        power_cache: dict[tuple[int, int], MultiSeries] = {}
+        derivative_symbols: dict[tuple[int, ...], Any] = {}
+        for multi in derivative_indices:
+            name = f"ch_d_{_multi_suffix(multi)}"
+            symbol = S(name)
+            input_names.append(name)
+            input_symbols.append(symbol)
+            derivative_symbols[tuple(multi)] = symbol
+
+        power_cache: dict[tuple[int, int], ExprSeries] = {}
+
+        def h_power(x_index: int, power: int) -> ExprSeries:
+            key = (int(x_index), int(power))
+            cached = power_cache.get(key)
+            if cached is not None:
+                return cached
+            if power == 0:
+                cached = _expr_series_constant(E("1"), [0 for _ in range(rank)])
+            elif power == 1:
+                cached = {
+                    multi: value
+                    for multi, value in h_series[x_index].items()
+                    if multi in allowed_multis
+                }
+            else:
+                cached = _expr_series_mul_allowed(
+                    h_power(x_index, power - 1),
+                    h_series[x_index],
+                    allowed_multis,
+                )
+            power_cache[key] = cached
+            return cached
+
+        product_cache: dict[tuple[int, ...], ExprSeries] = {}
+
+        def chain_product(x_multi_index: tuple[int, ...]) -> ExprSeries:
+            cached = product_cache.get(x_multi_index)
+            if cached is not None:
+                return cached
+            term = _expr_series_constant(E("1"), [0 for _ in range(rank)])
+            factorial = 1
+            for x_index, power in enumerate(x_multi_index):
+                power_int = int(power)
+                if not power_int:
+                    continue
+                factorial *= math.factorial(power_int)
+                term = _expr_series_mul_allowed(
+                    term,
+                    h_power(x_index, power_int),
+                    allowed_multis,
+                )
+                if not term:
+                    break
+            if term and factorial != 1:
+                term = _expr_series_scale(term, E("1") / E(str(int(factorial))))
+            product_cache[x_multi_index] = term
+            return term
+
+        composed: ExprSeries = {}
+        for x_multi_index in derivative_indices:
+            product_series = chain_product(tuple(int(value) for value in x_multi_index))
+            if not product_series:
+                continue
+            composed = _expr_series_add(
+                composed,
+                _expr_series_scale(product_series, derivative_symbols[tuple(x_multi_index)]),
+            )
+
+        output_expressions = [
+            _expr_series_coefficient(composed, tuple(multi))
+            for multi in output_shape
+        ]
+        evaluators = [
+            expr.evaluator(input_symbols, jit_compile=self.jit_compile_evaluators)
+            for expr in output_expressions
+        ]
+        return ChainRuleFormulaDefinition(
+            signature=signature,
+            input_names=input_names,
+            input_symbols=input_symbols,
+            output_expressions=output_expressions,
+            evaluators=evaluators,
+            output_shape=list(output_shape),
+            derivative_indices=[tuple(multi) for multi in derivative_indices],
+            h_layout=list(h_layout),
+        )
+
+    def _compose_symbolic_derivative_taylor_batch(
+        self,
+        sector: SectorDefinition,
+        context: dict[str, Any],
+        polynomial: str,
+        timing: HotPathTiming | None = None,
+        output_shape: list[tuple[int, ...]] | None = None,
+        use_chain_formula: bool = True,
+    ) -> np.ndarray:
+        """Compose one polynomial's symbolic derivatives with cached map jets."""
+        n_rows = int(context["n_rows"])
+        rank = int(context["rank"])
+        max_orders = list(context["max_orders"])
+        max_total = int(context["max_total"])
+        x0 = np.asarray(context["x0"], dtype=float)
+        h_series = list(context["h_series"])
+        # ``output_shape`` can be much sparser than the rectangular
+        # ``max_orders`` box.  This is especially important after the v3
+        # regular-Taylor signature has closed only the actually requested
+        # coefficients under ancestors.  Compose the chain rule directly in
+        # that sparse space instead of materialising the full box.
+        active_output_shape = list(output_shape or context.get("output_shape", []))
+        allowed_multis = {
+            tuple(int(value) for value in multi_index)
+            for multi_index in active_output_shape
+        }
+        allowed_multis.add(_zero_multi(rank))
+        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
+
+        if use_chain_formula:
+            formula = self.chain_rule_formula_for(sector, polynomial, active_output_shape)
+            derivative_values = self._derivative_values_batch(
+                polynomial,
+                x0,
+                formula.derivative_indices,
+                timing,
+            )
+            input_matrix = np.zeros((n_rows, len(formula.input_names)), dtype=np.complex128)
+            offset = 0
+            for x_index, multi_index in formula.h_layout:
+                values = h_series[int(x_index)].get(tuple(multi_index))
+                if values is not None:
+                    input_matrix[:, offset] = values
+                offset += 1
+            for multi_index in formula.derivative_indices:
+                input_matrix[:, offset] = derivative_values[tuple(multi_index)]
+                offset += 1
+            if offset != len(formula.input_names):
+                raise RuntimeError(
+                    f"{sector.name}: chain-rule formula input mismatch: filled {offset}, "
+                    f"expected {len(formula.input_names)}"
+                )
+            return formula.evaluate_complex_batch(input_matrix, timing)
+
+        derivative_values = self._derivative_values_batch(polynomial, x0, derivative_indices, timing)
+
+        allowed_key = _allowed_multi_key(allowed_multis)
+        power_cache_by_shape: dict[
+            tuple[tuple[int, ...], ...],
+            dict[tuple[int, int], MultiSeries],
+        ] = context.setdefault("_chain_rule_power_cache_by_shape", {})
+        product_cache_by_shape: dict[
+            tuple[tuple[int, ...], ...],
+            dict[tuple[int, ...], MultiSeries],
+        ] = context.setdefault("_chain_rule_product_cache_by_shape", {})
+        power_cache = power_cache_by_shape.setdefault(allowed_key, {})
+        product_cache = product_cache_by_shape.setdefault(allowed_key, {})
 
         def h_power(x_index: int, power: int) -> MultiSeries:
             key = (x_index, power)
@@ -844,34 +2121,180 @@ class TopologyDefinition:
             if power == 0:
                 cached = _series_constant(1.0 + 0.0j, max_orders, n_rows)
             elif power == 1:
-                cached = h_series[x_index]
+                cached = {
+                    multi_index: values
+                    for multi_index, values in h_series[x_index].items()
+                    if multi_index in allowed_multis
+                }
             else:
-                cached = _series_mul(h_power(x_index, power - 1), h_series[x_index], max_orders)
+                cached = _series_mul_allowed(
+                    h_power(x_index, power - 1),
+                    h_series[x_index],
+                    allowed_multis,
+                )
             power_cache[key] = cached
             return cached
 
+        def chain_product(x_multi_index: tuple[int, ...]) -> MultiSeries:
+            """Return the map-chain product for one x-space derivative."""
+            cached = product_cache.get(x_multi_index)
+            if cached is not None:
+                return cached
+            term = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+            factorial = 1
+            for x_index, power in enumerate(x_multi_index):
+                power_int = int(power)
+                if not power_int:
+                    continue
+                factorial *= math.factorial(power_int)
+                term = _series_mul_allowed(
+                    term,
+                    h_power(x_index, power_int),
+                    allowed_multis,
+                )
+                if not term:
+                    break
+            if term and factorial != 1:
+                term = _series_scale(term, 1.0 / float(factorial))
+            product_cache[x_multi_index] = term
+            return term
+
         composed: MultiSeries = {}
+        for x_multi_index in derivative_indices:
+            derivative = derivative_values[x_multi_index]
+            if not np.any(derivative):
+                continue
+            product_series = chain_product(tuple(int(value) for value in x_multi_index))
+            if product_series:
+                composed = _series_add(
+                    composed,
+                    _series_scale(product_series, derivative),
+                )
+
+        return np.stack(
+            [
+                _series_coefficient(composed, multi_index, n_rows)
+                for multi_index in active_output_shape
+            ],
+            axis=1,
+        )
+
+    def _derivative_values_prec(
+        self,
+        polynomial: str,
+        x0: list[ComplexPrecise],
+        derivative_indices: list[tuple[int, ...]],
+        precision_digits: int,
+        timing: HotPathTiming | None,
+    ) -> dict[tuple[int, ...], ComplexPrecise]:
+        """Evaluate shared x-space derivative callbacks at one precise point."""
+        row: ComplexPreciseRow = list(x0)
+        row.extend(_decimal_complex(value, precision_digits) for value in self.parameter_values)
+        values: dict[tuple[int, ...], ComplexPrecise] = {}
+        for multi_index in derivative_indices:
+            evaluator = self._symbolic_derivative_evaluator(polynomial, multi_index)
+            start = time.perf_counter()
+            result = evaluator.evaluate_complex_with_prec(row, precision_digits)[0]
+            if timing is not None:
+                timing.add_eval(time.perf_counter() - start)
+            values[multi_index] = (
+                decimal_with_precision(result[0], precision_digits),
+                decimal_with_precision(result[1], precision_digits),
+            )
+        return values
+
+    def _symbolic_derivative_taylor_complex_prec(
+        self,
+        sector: SectorDefinition,
+        y: np.ndarray,
+        polynomial: str,
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[ComplexPrecise]:
+        """Compose symbolic x-space derivatives with precise sector-map jets.
+
+        This is the high-precision analogue of
+        ``_symbolic_derivative_taylor_batch``.  It is used only for endpoint
+        rescue rows, so clarity and exact Decimal propagation matter more than
+        vectorization.
+        """
+        if not sector.dual_shape:
+            raise ValueError(f"{sector.name}: no dual shape declared")
+
+        rank = len(sector.dual_shape[0])
+        max_orders = [
+            max(multi_index[position] for multi_index in sector.dual_shape)
+            for position in range(rank)
+        ]
+        max_total = sum(max_orders)
+        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
+
+        x_jets = sector.map_dual_complex_prec_for_shape(
+            y,
+            sector.dual_shape,
+            precision_digits,
+            timing,
+        )
+        zero = _zero_multi(rank)
+        zero_column = sector.dual_index(zero)
+        x0 = [jet[zero_column] for jet in x_jets]
+        derivative_values = self._derivative_values_prec(
+            polynomial,
+            x0,
+            derivative_indices,
+            precision_digits,
+            timing,
+        )
+
+        h_series: list[PrecSeries] = []
+        for jet in x_jets:
+            series: PrecSeries = {}
+            for column, multi_index in enumerate(sector.dual_shape):
+                if multi_index == zero:
+                    continue
+                value = jet[column]
+                if not _pc_is_zero(value):
+                    series[multi_index] = value
+            h_series.append(series)
+
+        power_cache: dict[tuple[int, int], PrecSeries] = {}
+
+        def h_power(x_index: int, power: int) -> PrecSeries:
+            key = (x_index, power)
+            cached = power_cache.get(key)
+            if cached is not None:
+                return cached
+            if power == 0:
+                cached = _prec_series_constant(_pc_one(), max_orders)
+            elif power == 1:
+                cached = h_series[x_index]
+            else:
+                cached = _prec_series_mul(h_power(x_index, power - 1), h_series[x_index], max_orders)
+            power_cache[key] = cached
+            return cached
+
+        composed: PrecSeries = {}
         for x_multi_index in derivative_indices:
             derivative = derivative_values[x_multi_index]
             factorial = 1
             for order in x_multi_index:
                 factorial *= math.factorial(int(order))
-            term = _series_constant(derivative / float(factorial), max_orders, n_rows)
+            term = _prec_series_constant(
+                _pc_scale(derivative, Decimal(1) / Decimal(factorial), precision_digits),
+                max_orders,
+            )
             for x_index, power in enumerate(x_multi_index):
                 if power:
-                    term = _series_mul(term, h_power(x_index, int(power)), max_orders)
+                    term = _prec_series_mul(term, h_power(x_index, int(power)), max_orders)
                     if not term:
                         break
             if term:
-                composed = _series_add(composed, term)
+                composed = _prec_series_add(composed, term)
 
-        return np.stack(
-            [
-                _series_coefficient(composed, multi_index, n_rows)
-                for multi_index in sector.dual_shape
-            ],
-            axis=1,
-        )
+        return [
+            _prec_series_coefficient(composed, multi_index)
+            for multi_index in sector.dual_shape
+        ]
 
     def _taylor_batch(
         self,
@@ -1040,13 +2463,13 @@ class TopologyDefinition:
     ) -> list[ComplexPrecise]:
         """Complex arbitrary-precision row version of F Taylor coefficients."""
         if self.dual_evaluator_mode == "symbolic-derivatives":
-            values = self._symbolic_derivative_taylor_batch(
+            return self._symbolic_derivative_taylor_complex_prec(
                 sector,
-                np.asarray([y], dtype=float),
+                y,
                 "f",
+                precision_digits,
                 timing,
-            )[0]
-            return [_decimal_complex(value, precision_digits) for value in values]
+            )
         evaluator_shape, output_columns = self._dual_evaluator_shape_and_columns(sector)
         evaluator = self.f_dual_evaluator(evaluator_shape)
         return self._taylor_complex_prec(
@@ -1100,13 +2523,13 @@ class TopologyDefinition:
     ) -> list[ComplexPrecise]:
         """Complex arbitrary-precision row version of U Taylor coefficients."""
         if self.dual_evaluator_mode == "symbolic-derivatives":
-            values = self._symbolic_derivative_taylor_batch(
+            return self._symbolic_derivative_taylor_complex_prec(
                 sector,
-                np.asarray([y], dtype=float),
+                y,
                 "u",
+                precision_digits,
                 timing,
-            )[0]
-            return [_decimal_complex(value, precision_digits) for value in values]
+            )
         evaluator_shape, output_columns = self._dual_evaluator_shape_and_columns(sector)
         evaluator = self.u_dual_evaluator(evaluator_shape)
         return self._taylor_complex_prec(
@@ -1180,6 +2603,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
+            ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
         )
     if request.integral == "box":
         if request.s12 is None or request.s23 is None:
@@ -1210,6 +2634,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
+            ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
         )
     raise ValueError(f"unsupported integral {request.integral!r}")
 
@@ -1245,6 +2670,12 @@ def complex_abs_for_training_array(values: np.ndarray) -> np.ndarray:
 
 MultiSeries = dict[tuple[int, ...], np.ndarray]
 ExprSeries = dict[tuple[int, ...], Any]
+PrecSeries = dict[tuple[int, ...], ComplexPrecise]
+
+
+_DECIMAL_PI = Decimal(
+    "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899"
+)
 
 
 def _multi_indices(max_orders: list[int]) -> list[tuple[int, ...]]:
@@ -1275,6 +2706,20 @@ def _series_add(a: MultiSeries, b: MultiSeries) -> MultiSeries:
     return out
 
 
+def _series_filter_allowed(
+    a: MultiSeries,
+    allowed_multis: set[tuple[int, ...]] | None,
+) -> MultiSeries:
+    """Return a copy containing only explicitly allowed Taylor coefficients."""
+    if allowed_multis is None:
+        return {key: value.copy() for key, value in a.items()}
+    return {
+        key: value.copy()
+        for key, value in a.items()
+        if key in allowed_multis
+    }
+
+
 def _series_scale(a: MultiSeries, factor: float | complex | np.ndarray) -> MultiSeries:
     """Scale every coefficient by a scalar or per-row array."""
     return {key: value * factor for key, value in a.items()}
@@ -1283,15 +2728,200 @@ def _series_scale(a: MultiSeries, factor: float | complex | np.ndarray) -> Multi
 def _series_mul(a: MultiSeries, b: MultiSeries, max_orders: list[int]) -> MultiSeries:
     """Multiply two truncated sparse Taylor series."""
     dim = len(max_orders)
+    limits = tuple(int(order) for order in max_orders)
     out: MultiSeries = {}
     for key_a, value_a in a.items():
         for key_b, value_b in b.items():
-            key = tuple(key_a[i] + key_b[i] for i in range(dim))
-            if any(key[i] > max_orders[i] for i in range(dim)):
+            merged: list[int] = []
+            valid = True
+            for index in range(dim):
+                value = int(key_a[index]) + int(key_b[index])
+                if value > limits[index]:
+                    valid = False
+                    break
+                merged.append(value)
+            if not valid:
                 continue
+            key = tuple(merged)
             term = value_a * value_b
             out[key] = out[key] + term if key in out else term.copy()
     return out
+
+
+def _allowed_multi_key(allowed_multis: set[tuple[int, ...]]) -> tuple[tuple[int, ...], ...]:
+    """Return a stable cache key for an ancestor-closed sparse Taylor shape."""
+    return tuple(sorted((tuple(int(value) for value in multi) for multi in allowed_multis)))
+
+
+@lru_cache(maxsize=128)
+def _allowed_convolution_splits(
+    allowed_key: tuple[tuple[int, ...], ...],
+) -> tuple[tuple[tuple[int, ...], tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]], ...]:
+    """Return valid sparse convolution splits for one allowed Taylor shape.
+
+    The hard multi-axis fallback multiplies many series with the same sparse
+    ancestor-closed support.  Precomputing ``left + right = result`` pairs moves
+    tuple allocation and membership tests out of the hot multiplication loop.
+    """
+    by_result: list[
+        tuple[tuple[int, ...], tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]]
+    ] = []
+    for result in allowed_key:
+        split_pairs: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+        ranges = [range(int(value) + 1) for value in result]
+        for left in product(*ranges):
+            left_tuple = tuple(int(value) for value in left)
+            right_tuple = tuple(
+                int(result[index]) - int(left_tuple[index])
+                for index in range(len(result))
+            )
+            split_pairs.append((left_tuple, right_tuple))
+        by_result.append((result, tuple(split_pairs)))
+    return tuple(by_result)
+
+
+@lru_cache(maxsize=128)
+def _allowed_convolution_dense_plan(
+    allowed_key: tuple[tuple[int, ...], ...],
+) -> tuple[
+    tuple[tuple[int, ...], ...],
+    dict[tuple[int, ...], int],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Return array indices for sparse-support convolution on ``allowed_key``."""
+    rank = len(allowed_key[0]) if allowed_key else 0
+    support_key = _allowed_multi_key(_ancestor_closed_multi_set(set(allowed_key), rank))
+    key_to_index = {multi: index for index, multi in enumerate(support_key)}
+    result_indices: list[int] = []
+    left_indices: list[int] = []
+    right_indices: list[int] = []
+    for result, split_pairs in _allowed_convolution_splits(allowed_key):
+        result_index = key_to_index[result]
+        for left, right in split_pairs:
+            result_indices.append(result_index)
+            left_indices.append(key_to_index[left])
+            right_indices.append(key_to_index[right])
+    result_array = np.asarray(result_indices, dtype=np.int64)
+    unique_results, starts = np.unique(result_array, return_index=True)
+    return (
+        support_key,
+        key_to_index,
+        result_array,
+        np.asarray(left_indices, dtype=np.int64),
+        np.asarray(right_indices, dtype=np.int64),
+        unique_results.astype(np.int64, copy=False),
+        starts.astype(np.int64, copy=False),
+    )
+
+
+def _series_mul_allowed(
+    a: MultiSeries,
+    b: MultiSeries,
+    allowed_multis: set[tuple[int, ...]],
+) -> MultiSeries:
+    """Multiply sparse Taylor series while keeping only explicit outputs.
+
+    The high-axis DOT sectors often need a sparse, ancestor-closed set of
+    Taylor coefficients rather than the full rectangular box implied by the
+    largest derivative in every axis.  Truncating by the explicit set avoids
+    filling a large intermediate box in the symbolic-derivative chain-rule
+    path while preserving every coefficient that can contribute to the
+    requested outputs.
+    """
+    if not allowed_multis:
+        return {}
+    if not a or not b:
+        return {}
+    rank = len(next(iter(allowed_multis)))
+    zero = _zero_multi(rank)
+    if set(a) <= {zero}:
+        factor = a.get(zero)
+        if factor is None:
+            return {}
+        return {
+            key: np.asarray(values, dtype=np.complex128) * factor
+            for key, values in b.items()
+            if key in allowed_multis
+        }
+    if set(b) <= {zero}:
+        factor = b.get(zero)
+        if factor is None:
+            return {}
+        return {
+            key: np.asarray(values, dtype=np.complex128) * factor
+            for key, values in a.items()
+            if key in allowed_multis
+        }
+    if len(a) == 1:
+        (key_a, value_a), = a.items()
+        out: MultiSeries = {}
+        for key_b, value_b in b.items():
+            merged = tuple(int(key_a[index]) + int(key_b[index]) for index in range(rank))
+            if merged in allowed_multis:
+                out[merged] = np.asarray(value_a, dtype=np.complex128) * np.asarray(
+                    value_b,
+                    dtype=np.complex128,
+                )
+        return out
+    if len(b) == 1:
+        (key_b, value_b), = b.items()
+        out = {}
+        for key_a, value_a in a.items():
+            merged = tuple(int(key_a[index]) + int(key_b[index]) for index in range(rank))
+            if merged in allowed_multis:
+                out[merged] = np.asarray(value_a, dtype=np.complex128) * np.asarray(
+                    value_b,
+                    dtype=np.complex128,
+                )
+        return out
+    allowed_key = _allowed_multi_key(allowed_multis)
+    n_rows = 0
+    for values in a.values():
+        n_rows = int(np.asarray(values).shape[0])
+        break
+    if n_rows <= 0:
+        for values in b.values():
+            n_rows = int(np.asarray(values).shape[0])
+            break
+    if n_rows <= 0:
+        return {}
+    (
+        support_key,
+        key_to_index,
+        result_indices,
+        left_indices,
+        right_indices,
+        unique_results,
+        starts,
+    ) = _allowed_convolution_dense_plan(allowed_key)
+    if not len(result_indices):
+        return {}
+
+    dense_a = np.zeros((len(support_key), n_rows), dtype=np.complex128)
+    dense_b = np.zeros_like(dense_a)
+    for key, values in a.items():
+        index = key_to_index.get(tuple(key))
+        if index is not None:
+            dense_a[index, :] = np.asarray(values, dtype=np.complex128)
+    for key, values in b.items():
+        index = key_to_index.get(tuple(key))
+        if index is not None:
+            dense_b[index, :] = np.asarray(values, dtype=np.complex128)
+
+    dense_out = np.zeros_like(dense_a)
+    products = dense_a[left_indices, :] * dense_b[right_indices, :]
+    dense_out[unique_results, :] = np.add.reduceat(products, starts, axis=0)
+    active = np.any(dense_out != 0.0, axis=1)
+    return {
+        multi: dense_out[index, :].copy()
+        for multi in allowed_key
+        for index in (key_to_index[multi],)
+        if active[index]
+    }
 
 
 def _series_without_constant(a: MultiSeries, n_rows: int) -> MultiSeries:
@@ -1322,6 +2952,33 @@ def _series_log(a: MultiSeries, max_orders: list[int], n_rows: int) -> MultiSeri
     return out
 
 
+def _series_log_allowed(
+    a: MultiSeries,
+    max_orders: list[int],
+    n_rows: int,
+    allowed_multis: set[tuple[int, ...]],
+) -> MultiSeries:
+    """Compute ``log(a)`` while retaining only an ancestor-closed sparse set."""
+    zero = _zero_multi(len(max_orders))
+    constant = a[zero]
+    out = _series_constant(feynman_log_array(constant), max_orders, n_rows)
+    h = {
+        key: value / constant
+        for key, value in a.items()
+        if key != zero and key in allowed_multis
+    }
+    if not h:
+        return _series_filter_allowed(out, allowed_multis)
+    h_power = h
+    for order in range(1, sum(max_orders) + 1):
+        sign = 1.0 if order % 2 == 1 else -1.0
+        out = _series_add(out, _series_scale(h_power, sign / float(order)))
+        h_power = _series_mul_allowed(h_power, h, allowed_multis)
+        if not h_power:
+            break
+    return _series_filter_allowed(out, allowed_multis)
+
+
 def _series_exp(a: MultiSeries, max_orders: list[int], n_rows: int) -> MultiSeries:
     """Compute ``exp(a)`` as a truncated Taylor series."""
     zero = _zero_multi(len(max_orders))
@@ -1344,11 +3001,264 @@ def _series_exp(a: MultiSeries, max_orders: list[int], n_rows: int) -> MultiSeri
     )
 
 
+def _series_exp_allowed(
+    a: MultiSeries,
+    max_orders: list[int],
+    n_rows: int,
+    allowed_multis: set[tuple[int, ...]],
+) -> MultiSeries:
+    """Compute ``exp(a)`` while retaining only explicit sparse outputs."""
+    zero = _zero_multi(len(max_orders))
+    constant = a.get(zero, np.zeros(n_rows, dtype=np.complex128))
+    h = {
+        key: value.copy()
+        for key, value in a.items()
+        if key != zero and key in allowed_multis
+    }
+    total = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+    if h:
+        h_power = h
+        factorial = 1.0
+        for order in range(1, sum(max_orders) + 1):
+            factorial *= float(order)
+            total = _series_add(total, _series_scale(h_power, 1.0 / factorial))
+            h_power = _series_mul_allowed(h_power, h, allowed_multis)
+            if not h_power:
+                break
+    return _series_mul_allowed(
+        _series_constant(np.exp(constant), max_orders, n_rows),
+        _series_filter_allowed(total, allowed_multis),
+        allowed_multis,
+    )
+
+
+def _binomial_integer(exponent: int, order: int) -> float:
+    """Return the generalized binomial coefficient for integer exponents."""
+    if order < 0:
+        return 0.0
+    if order == 0:
+        return 1.0
+    numerator = 1.0
+    for step in range(order):
+        numerator *= float(exponent - step)
+    denominator = 1.0
+    for step in range(1, order + 1):
+        denominator *= float(step)
+    return numerator / denominator
+
+
+def _series_integer_power(
+    a: MultiSeries,
+    exponent: int,
+    max_orders: list[int],
+    n_rows: int,
+) -> MultiSeries:
+    """Raise a Taylor series to an integer power without using log/exp."""
+    if exponent == 0:
+        return _series_constant(1.0 + 0.0j, max_orders, n_rows)
+    if exponent > 0:
+        result = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+        base = a
+        remaining = int(exponent)
+        while remaining:
+            if remaining & 1:
+                result = _series_mul(result, base, max_orders)
+            remaining >>= 1
+            if remaining:
+                base = _series_mul(base, base, max_orders)
+        return result
+
+    zero = _zero_multi(len(max_orders))
+    constant = a[zero]
+    h = {
+        key: value / constant
+        for key, value in a.items()
+        if key != zero
+    }
+    total = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            coeff = _binomial_integer(exponent, order)
+            total = _series_add(total, _series_scale(h_power, coeff))
+            h_power = _series_mul(h_power, h, max_orders)
+            if not h_power:
+                break
+    return _series_mul(
+        _series_constant(np.power(constant, exponent), max_orders, n_rows),
+        total,
+        max_orders,
+    )
+
+
+def _series_integer_power_allowed(
+    a: MultiSeries,
+    exponent: int,
+    max_orders: list[int],
+    n_rows: int,
+    allowed_multis: set[tuple[int, ...]],
+) -> MultiSeries:
+    """Raise a sparse Taylor series to an integer power with explicit outputs."""
+    if exponent == 0:
+        return _series_filter_allowed(
+            _series_constant(1.0 + 0.0j, max_orders, n_rows),
+            allowed_multis,
+        )
+    if exponent > 0:
+        result = _series_filter_allowed(
+            _series_constant(1.0 + 0.0j, max_orders, n_rows),
+            allowed_multis,
+        )
+        base = _series_filter_allowed(a, allowed_multis)
+        remaining = int(exponent)
+        while remaining:
+            if remaining & 1:
+                result = _series_mul_allowed(result, base, allowed_multis)
+            remaining >>= 1
+            if remaining:
+                base = _series_mul_allowed(base, base, allowed_multis)
+        return result
+
+    zero = _zero_multi(len(max_orders))
+    constant = a[zero]
+    h = {
+        key: value / constant
+        for key, value in a.items()
+        if key != zero and key in allowed_multis
+    }
+    total = _series_filter_allowed(
+        _series_constant(1.0 + 0.0j, max_orders, n_rows),
+        allowed_multis,
+    )
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            coeff = _binomial_integer(exponent, order)
+            total = _series_add(total, _series_scale(h_power, coeff))
+            h_power = _series_mul_allowed(h_power, h, allowed_multis)
+            if not h_power:
+                break
+    return _series_mul_allowed(
+        _series_constant(np.power(constant, exponent), max_orders, n_rows),
+        _series_filter_allowed(total, allowed_multis),
+        allowed_multis,
+    )
+
+
 def _series_pow_real(a: MultiSeries, power: float, max_orders: list[int], n_rows: int) -> MultiSeries:
     """Raise a regular Taylor series to a real power using log/exp."""
     if abs(power) <= 1.0e-15:
         return _series_constant(1.0 + 0.0j, max_orders, n_rows)
+    rounded = round(float(power))
+    if abs(float(power) - rounded) <= 1.0e-12:
+        return _series_integer_power(a, int(rounded), max_orders, n_rows)
     return _series_exp(_series_scale(_series_log(a, max_orders, n_rows), power), max_orders, n_rows)
+
+
+def _series_pow_real_allowed(
+    a: MultiSeries,
+    power: float,
+    max_orders: list[int],
+    n_rows: int,
+    allowed_multis: set[tuple[int, ...]],
+) -> MultiSeries:
+    """Raise a Taylor series to a real power with sparse truncation."""
+    if abs(power) <= 1.0e-15:
+        return _series_filter_allowed(
+            _series_constant(1.0 + 0.0j, max_orders, n_rows),
+            allowed_multis,
+        )
+    rounded = round(float(power))
+    if abs(float(power) - rounded) <= 1.0e-12:
+        return _series_integer_power_allowed(
+            a,
+            int(rounded),
+            max_orders,
+            n_rows,
+            allowed_multis,
+        )
+    return _series_exp_allowed(
+        _series_scale(_series_log_allowed(a, max_orders, n_rows, allowed_multis), power),
+        max_orders,
+        n_rows,
+        allowed_multis,
+    )
+
+
+def _series_pow_real_and_log_allowed(
+    a: MultiSeries,
+    power: float,
+    max_orders: list[int],
+    n_rows: int,
+    allowed_multis: set[tuple[int, ...]],
+) -> tuple[MultiSeries, MultiSeries]:
+    """Return ``a**power`` and ``log(a)`` sharing the same sparse ladder.
+
+    Hard endpoint sectors repeatedly need both the regular prefactor
+    ``U^p F^q`` and the epsilon logarithm ``p_eps log(U)+q_eps log(F)``.
+    For integer powers, both series are functions of powers of
+    ``h = a/a_0 - 1``.  Building that ladder once saves a sizeable amount of
+    Python-side sparse convolution without changing the black-box U/F boundary.
+    """
+    rounded = round(float(power))
+    if abs(float(power) - rounded) > 1.0e-12:
+        log_series = _series_log_allowed(a, max_orders, n_rows, allowed_multis)
+        return (
+            _series_exp_allowed(
+                _series_scale(log_series, power),
+                max_orders,
+                n_rows,
+                allowed_multis,
+            ),
+            log_series,
+        )
+
+    exponent = int(rounded)
+    zero = _zero_multi(len(max_orders))
+    constant = a[zero]
+    log_series = _series_constant(feynman_log_array(constant), max_orders, n_rows)
+    if exponent == 0:
+        power_series = _series_filter_allowed(
+            _series_constant(1.0 + 0.0j, max_orders, n_rows),
+            allowed_multis,
+        )
+    else:
+        power_series = _series_filter_allowed(
+            _series_constant(1.0 + 0.0j, max_orders, n_rows),
+            allowed_multis,
+        )
+
+    h = {
+        key: value / constant
+        for key, value in a.items()
+        if key != zero and key in allowed_multis
+    }
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            if exponent:
+                coeff = _binomial_integer(exponent, order)
+                if coeff:
+                    power_series = _series_add(
+                        power_series,
+                        _series_scale(h_power, coeff),
+                    )
+            sign = 1.0 if order % 2 == 1 else -1.0
+            log_series = _series_add(log_series, _series_scale(h_power, sign / float(order)))
+            h_power = _series_mul_allowed(h_power, h, allowed_multis)
+            if not h_power:
+                break
+
+    if exponent:
+        power_series = _series_mul_allowed(
+            _series_constant(np.power(constant, exponent), max_orders, n_rows),
+            _series_filter_allowed(power_series, allowed_multis),
+            allowed_multis,
+        )
+    return (
+        _series_filter_allowed(power_series, allowed_multis),
+        _series_filter_allowed(log_series, allowed_multis),
+    )
 
 
 def _series_coefficient(series: MultiSeries, multi_index: tuple[int, ...], n_rows: int) -> np.ndarray:
@@ -1357,6 +3267,301 @@ def _series_coefficient(series: MultiSeries, multi_index: tuple[int, ...], n_row
     if value is None:
         return np.zeros(n_rows, dtype=np.complex128)
     return value
+
+
+def _slice_multi_series_list(
+    series_by_order: list[MultiSeries],
+    start: int,
+    stop: int,
+) -> list[MultiSeries]:
+    """Slice every coefficient array in a list of sparse Taylor series."""
+    return [
+        {
+            multi: np.asarray(values[start:stop], dtype=np.complex128).copy()
+            for multi, values in series.items()
+        }
+        for series in series_by_order
+    ]
+
+
+def _pc_zero() -> ComplexPrecise:
+    """Return the arbitrary-precision complex zero."""
+    return (Decimal(0), Decimal(0))
+
+
+def _pc_one() -> ComplexPrecise:
+    """Return the arbitrary-precision complex one."""
+    return (Decimal(1), Decimal(0))
+
+
+def _pc_from_real(value: Any, precision_digits: int) -> ComplexPrecise:
+    """Promote a real scalar to Symbolica's complex Decimal shape."""
+    return (decimal_with_precision(value, precision_digits), Decimal(0))
+
+
+def _pc_is_zero(value: ComplexPrecise) -> bool:
+    """Return whether an arbitrary-precision complex value is exactly zero."""
+    return Decimal(value[0]).is_zero() and Decimal(value[1]).is_zero()
+
+
+def _pc_add(left: ComplexPrecise, right: ComplexPrecise) -> ComplexPrecise:
+    """Add two arbitrary-precision complex values."""
+    return (Decimal(left[0]) + Decimal(right[0]), Decimal(left[1]) + Decimal(right[1]))
+
+
+def _pc_sub(left: ComplexPrecise, right: ComplexPrecise) -> ComplexPrecise:
+    """Subtract two arbitrary-precision complex values."""
+    return (Decimal(left[0]) - Decimal(right[0]), Decimal(left[1]) - Decimal(right[1]))
+
+
+def _pc_mul(left: ComplexPrecise, right: ComplexPrecise) -> ComplexPrecise:
+    """Multiply two arbitrary-precision complex values."""
+    a, b = Decimal(left[0]), Decimal(left[1])
+    c, d = Decimal(right[0]), Decimal(right[1])
+    return (a * c - b * d, a * d + b * c)
+
+
+def _pc_div(left: ComplexPrecise, right: ComplexPrecise) -> ComplexPrecise:
+    """Divide two arbitrary-precision complex values."""
+    a, b = Decimal(left[0]), Decimal(left[1])
+    c, d = Decimal(right[0]), Decimal(right[1])
+    denominator = c * c + d * d
+    return ((a * c + b * d) / denominator, (b * c - a * d) / denominator)
+
+
+def _pc_scale(value: ComplexPrecise, factor: Any, precision_digits: int) -> ComplexPrecise:
+    """Scale an arbitrary-precision complex value by a real factor."""
+    scalar = decimal_with_precision(factor, precision_digits)
+    return (Decimal(value[0]) * scalar, Decimal(value[1]) * scalar)
+
+
+def _pc_int_power(value: ComplexPrecise, power: int) -> ComplexPrecise:
+    """Raise an arbitrary-precision complex value to an integer power."""
+    exponent = int(power)
+    if exponent == 0:
+        return _pc_one()
+    if exponent < 0:
+        return _pc_div(_pc_one(), _pc_int_power(value, -exponent))
+    result = _pc_one()
+    base = value
+    while exponent:
+        if exponent & 1:
+            result = _pc_mul(result, base)
+        exponent >>= 1
+        if exponent:
+            base = _pc_mul(base, base)
+    return result
+
+
+def _pc_log(value: ComplexPrecise, precision_digits: int) -> ComplexPrecise:
+    """Feynman-branch logarithm for arbitrary-precision complex values.
+
+    The no-threshold FSD path samples Euclidean sectors where U/F residuals
+    are positive reals.  That case stays fully Decimal.  A complex fallback is
+    retained for diagnostics and non-default experiments, but it necessarily
+    loses arbitrary precision because Python's standard library has no complex
+    Decimal elementary functions.
+    """
+    real = Decimal(value[0])
+    imag = Decimal(value[1])
+    if imag.is_zero():
+        if real > 0:
+            return (real.ln(), Decimal(0))
+        if real < 0:
+            return ((-real).ln(), -decimal_with_precision(_DECIMAL_PI, precision_digits))
+    approx = feynman_log(complex(float(real), float(imag)))
+    return _decimal_complex(approx, precision_digits)
+
+
+def _pc_exp(value: ComplexPrecise, precision_digits: int) -> ComplexPrecise:
+    """Exponential for arbitrary-precision complex values."""
+    real = Decimal(value[0])
+    imag = Decimal(value[1])
+    if imag.is_zero():
+        return (real.exp(), Decimal(0))
+    approx = cmath.exp(complex(float(real), float(imag)))
+    return _decimal_complex(approx, precision_digits)
+
+
+def _prec_series_constant(
+    value: ComplexPrecise,
+    max_orders: list[int],
+) -> PrecSeries:
+    """Build a single-row Decimal Taylor series with only a constant term."""
+    return {_zero_multi(len(max_orders)): value}
+
+
+def _prec_series_add(left: PrecSeries, right: PrecSeries) -> PrecSeries:
+    """Add two single-row Decimal Taylor series."""
+    out = dict(left)
+    for key, value in right.items():
+        out[key] = _pc_add(out[key], value) if key in out else value
+    return out
+
+
+def _prec_series_scale(series: PrecSeries, factor: Any, precision_digits: int) -> PrecSeries:
+    """Scale every coefficient of a Decimal Taylor series."""
+    return {
+        key: _pc_scale(value, factor, precision_digits)
+        for key, value in series.items()
+    }
+
+
+def _prec_series_mul(left: PrecSeries, right: PrecSeries, max_orders: list[int]) -> PrecSeries:
+    """Multiply two single-row Decimal Taylor series."""
+    dim = len(max_orders)
+    out: PrecSeries = {}
+    for key_left, value_left in left.items():
+        for key_right, value_right in right.items():
+            key = tuple(key_left[i] + key_right[i] for i in range(dim))
+            if any(key[i] > max_orders[i] for i in range(dim)):
+                continue
+            term = _pc_mul(value_left, value_right)
+            out[key] = _pc_add(out[key], term) if key in out else term
+    return out
+
+
+def _prec_series_coefficient(series: PrecSeries, multi_index: tuple[int, ...]) -> ComplexPrecise:
+    """Return a Decimal Taylor coefficient or zero if absent."""
+    return series.get(multi_index, _pc_zero())
+
+
+def _prec_series_log(
+    series: PrecSeries,
+    max_orders: list[int],
+    precision_digits: int,
+) -> PrecSeries:
+    """Compute the logarithm of a single-row Decimal Taylor series."""
+    zero = _zero_multi(len(max_orders))
+    constant = series[zero]
+    out = _prec_series_constant(_pc_log(constant, precision_digits), max_orders)
+    h = {
+        key: _pc_div(value, constant)
+        for key, value in series.items()
+        if key != zero and not _pc_is_zero(value)
+    }
+    if not h:
+        return out
+    h_power = h
+    for order in range(1, sum(max_orders) + 1):
+        sign = 1 if order % 2 == 1 else -1
+        out = _prec_series_add(
+            out,
+            _prec_series_scale(h_power, Decimal(sign) / Decimal(order), precision_digits),
+        )
+        h_power = _prec_series_mul(h_power, h, max_orders)
+        if not h_power:
+            break
+    return out
+
+
+def _prec_series_exp(
+    series: PrecSeries,
+    max_orders: list[int],
+    precision_digits: int,
+) -> PrecSeries:
+    """Compute the exponential of a single-row Decimal Taylor series."""
+    zero = _zero_multi(len(max_orders))
+    constant = series.get(zero, _pc_zero())
+    h = {key: value for key, value in series.items() if key != zero and not _pc_is_zero(value)}
+    total = _prec_series_constant(_pc_one(), max_orders)
+    if h:
+        h_power = h
+        factorial = Decimal(1)
+        for order in range(1, sum(max_orders) + 1):
+            factorial *= Decimal(order)
+            total = _prec_series_add(
+                total,
+                _prec_series_scale(h_power, Decimal(1) / factorial, precision_digits),
+            )
+            h_power = _prec_series_mul(h_power, h, max_orders)
+            if not h_power:
+                break
+    return _prec_series_mul(
+        _prec_series_constant(_pc_exp(constant, precision_digits), max_orders),
+        total,
+        max_orders,
+    )
+
+
+def _prec_series_integer_power(
+    series: PrecSeries,
+    exponent: int,
+    max_orders: list[int],
+    precision_digits: int,
+) -> PrecSeries:
+    """Raise a Decimal Taylor series to an integer power without log/exp."""
+    if exponent == 0:
+        return _prec_series_constant(_pc_one(), max_orders)
+    if exponent > 0:
+        out = _prec_series_constant(_pc_one(), max_orders)
+        base = series
+        remaining = int(exponent)
+        while remaining:
+            if remaining & 1:
+                out = _prec_series_mul(out, base, max_orders)
+            remaining >>= 1
+            if remaining:
+                base = _prec_series_mul(base, base, max_orders)
+        return out
+
+    zero = _zero_multi(len(max_orders))
+    constant = series[zero]
+    h = {
+        key: _pc_div(value, constant)
+        for key, value in series.items()
+        if key != zero and not _pc_is_zero(value)
+    }
+    total = _prec_series_constant(_pc_one(), max_orders)
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            coeff = Decimal(exponent)
+            for step in range(1, order):
+                coeff *= Decimal(exponent - step)
+            factorial = Decimal(1)
+            for step in range(1, order + 1):
+                factorial *= Decimal(step)
+            total = _prec_series_add(
+                total,
+                _prec_series_scale(h_power, coeff / factorial, precision_digits),
+            )
+            h_power = _prec_series_mul(h_power, h, max_orders)
+            if not h_power:
+                break
+    return _prec_series_mul(
+        _prec_series_constant(_pc_int_power(constant, exponent), max_orders),
+        total,
+        max_orders,
+    )
+
+
+def _prec_series_pow_real(
+    series: PrecSeries,
+    power: float,
+    max_orders: list[int],
+    precision_digits: int,
+) -> PrecSeries:
+    """Raise a Decimal Taylor series to a real power."""
+    if abs(power) <= 1.0e-15:
+        return _prec_series_constant(_pc_one(), max_orders)
+    rounded = round(float(power))
+    if abs(float(power) - rounded) <= 1.0e-12:
+        return _prec_series_integer_power(
+            series,
+            int(rounded),
+            max_orders,
+            precision_digits,
+        )
+    return _prec_series_exp(
+        _prec_series_scale(
+            _prec_series_log(series, max_orders, precision_digits),
+            power,
+            precision_digits,
+        ),
+        max_orders,
+        precision_digits,
+    )
 
 
 def _expr_number(value: float | int | complex) -> Any:
@@ -1424,6 +3629,31 @@ def _expr_series_mul(a: ExprSeries, b: ExprSeries, max_orders: list[int]) -> Exp
         for key_b, value_b in b.items():
             key = tuple(key_a[i] + key_b[i] for i in range(dim))
             if any(key[i] > max_orders[i] for i in range(dim)):
+                continue
+            term = value_a * value_b
+            out[key] = out[key] + term if key in out else term
+    return out
+
+
+def _expr_series_mul_allowed(
+    a: ExprSeries,
+    b: ExprSeries,
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Multiply Symbolica series while keeping only explicit coefficients.
+
+    This is the expression-level analogue of ``_series_mul_allowed``.  It is
+    used to build chain-rule composition evaluators without expanding to the
+    full rectangular Taylor box of hard multi-axis sectors.
+    """
+    if not a or not b or not allowed_multis:
+        return {}
+    rank = len(next(iter(allowed_multis)))
+    out: ExprSeries = {}
+    for key_a, value_a in a.items():
+        for key_b, value_b in b.items():
+            key = tuple(int(key_a[index]) + int(key_b[index]) for index in range(rank))
+            if key not in allowed_multis:
                 continue
             term = value_a * value_b
             out[key] = out[key] + term if key in out else term
@@ -1540,6 +3770,17 @@ class SubtractionFormulaDefinition:
 
 
 @dataclass
+class IBPEndpointProjectorTerm:
+    """One IBP-lowered contribution feeding a logarithmic endpoint projector."""
+
+    prefactor_coeffs: list[complex]
+    boundary_positions: tuple[int, ...]
+    derivative_multi: tuple[int, ...]
+    active_positions: tuple[int, ...]
+    child_signature: tuple[Any, ...]
+
+
+@dataclass
 class EndpointProjectorFormulaDefinition:
     """Endpoint-only Symbolica projector shared by many sectors."""
 
@@ -1551,7 +3792,12 @@ class EndpointProjectorFormulaDefinition:
     laurent_orders: list[int]
     zero_subsets: list[tuple[int, ...]]
     taylor_orders: list[int]
-    coefficient_layout: list[tuple[tuple[int, ...], tuple[int, ...], int]]
+    coefficient_layout: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]]
+    ibp_reduce_to_log_endpoint: bool = False
+    ibp_terms: list[IBPEndpointProjectorTerm] = field(default_factory=list)
+    child_formulas: dict[tuple[Any, ...], "EndpointProjectorFormulaDefinition"] = field(
+        default_factory=dict
+    )
     build_seconds: float = 0.0
 
     @property
@@ -1582,6 +3828,109 @@ class EndpointProjectorFormulaDefinition:
         for evaluator in self.evaluators:
             result = evaluator.evaluate_complex_with_prec(row, precision_digits)[0]
             values.append(complex(float(result[0]), float(result[1])))
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return values
+
+
+@dataclass
+class RegularTaylorFormulaDefinition:
+    """Pregenerated Symbolica evaluator for regular ``g_s`` coefficients."""
+
+    signature: tuple[Any, ...]
+    input_names: list[str]
+    input_symbols: list[Any]
+    output_expressions: list[Any]
+    evaluators: list[Any]
+    output_layout: list[tuple[tuple[int, ...], int]]
+    input_layout: list[tuple[str, tuple[int, ...]]]
+    max_orders: list[int]
+    zero_positions: tuple[int, ...]
+    dual_shape: list[tuple[int, ...]] = field(default_factory=list)
+    evaluator_input_symbols: list[Any] = field(default_factory=list)
+    evaluator_dual_shape: list[tuple[int, ...]] = field(default_factory=list)
+    dual_variable_count: int = 0
+    build_seconds: float = 0.0
+
+    def evaluate_complex_batch(self, rows: np.ndarray, timing: HotPathTiming | None = None) -> np.ndarray:
+        """Evaluate all requested regular Taylor coefficients."""
+        start = time.perf_counter()
+        if self.evaluator_dual_shape:
+            values = np.asarray(
+                self.evaluators[0].evaluate_complex(self._dualized_input_matrix(rows)),
+                dtype=np.complex128,
+            )
+            if timing is not None:
+                timing.add_eval(time.perf_counter() - start)
+            return values
+
+        columns = [
+            np.asarray(evaluator.evaluate_complex(rows), dtype=np.complex128)[:, 0]
+            for evaluator in self.evaluators
+        ]
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        if not columns:
+            return np.zeros((rows.shape[0], 0), dtype=np.complex128)
+        return np.stack(columns, axis=1)
+
+    def _dualized_input_matrix(self, rows: np.ndarray) -> np.ndarray:
+        """Expand ordinary runtime inputs into Symbolica dual input storage."""
+        sample_rows = np.asarray(rows, dtype=np.complex128)
+        dual_shape = [tuple(int(value) for value in mi) for mi in self.evaluator_dual_shape]
+        dual_len = len(dual_shape)
+        param_count = len(self.evaluator_input_symbols)
+        zero = tuple(0 for _ in range(param_count))
+        zero_index = dual_shape.index(zero)
+        unit_index: dict[int, int] = {}
+        for param_index in range(int(self.dual_variable_count)):
+            unit = tuple(1 if axis == param_index else 0 for axis in range(param_count))
+            if unit in dual_shape:
+                unit_index[param_index] = dual_shape.index(unit)
+
+        expanded = np.zeros((sample_rows.shape[0], param_count * dual_len), dtype=np.complex128)
+        for param_index in range(int(self.dual_variable_count)):
+            index = unit_index.get(param_index)
+            if index is not None:
+                expanded[:, param_index * dual_len + index] = 1.0
+        for column in range(sample_rows.shape[1]):
+            param_index = int(self.dual_variable_count) + column
+            expanded[:, param_index * dual_len + zero_index] = sample_rows[:, column]
+        return expanded
+
+
+@dataclass
+class ChainRuleFormulaDefinition:
+    """Symbolica evaluator for composing x-derivatives with sector-map jets.
+
+    The formula is deliberately independent of U/F expressions.  It receives
+    numerical values of original-parameter derivatives and numerical Taylor
+    coefficients of the sector map, then returns Taylor coefficients of
+    ``P(X_s(y))`` for one polynomial ``P``.
+    """
+
+    signature: tuple[Any, ...]
+    input_names: list[str]
+    input_symbols: list[Any]
+    output_expressions: list[Any]
+    evaluators: list[Any]
+    output_shape: list[tuple[int, ...]]
+    derivative_indices: list[tuple[int, ...]]
+    h_layout: list[tuple[int, tuple[int, ...]]]
+    build_seconds: float = 0.0
+
+    def evaluate_complex_batch(self, rows: np.ndarray, timing: HotPathTiming | None = None) -> np.ndarray:
+        """Evaluate all mapped Taylor coefficients for a complex batch."""
+        start = time.perf_counter()
+        if not self.evaluators:
+            values = np.zeros((rows.shape[0], 0), dtype=np.complex128)
+        else:
+            values = np.column_stack(
+                [
+                    np.asarray(evaluator.evaluate_complex(rows), dtype=np.complex128)[:, 0]
+                    for evaluator in self.evaluators
+                ]
+            )
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return values
@@ -1620,12 +3969,516 @@ def build_endpoint_projector_formula(
     signature: tuple[Any, ...],
 ) -> EndpointProjectorFormulaDefinition:
     """Build a lower-signature endpoint projector through Symbolica."""
+    if bool(signature[2]):
+        return build_ibp_endpoint_projector_formula(topology, sector, signature)
     return build_endpoint_projector_formula_symbolica(
         topology,
         sector,
         signature,
         EndpointProjectorFormulaDefinition,
+        ibp_reduce_to_log_endpoint=False,
     )
+
+
+def build_regular_taylor_formula(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    signature: tuple[Any, ...],
+) -> RegularTaylorFormulaDefinition:
+    """Build the regular ``g_s`` Taylor-combination formula."""
+    return build_regular_taylor_formula_symbolica(
+        topology,
+        sector,
+        signature,
+        RegularTaylorFormulaDefinition,
+    )
+
+
+def build_ibp_endpoint_projector_formula(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    signature: tuple[Any, ...],
+) -> EndpointProjectorFormulaDefinition:
+    """Build a compound IBP projector from cached logarithmic projectors."""
+    endpoint_powers = [(int(base), float(coeff)) for base, coeff in signature[4]]
+    terms = _ibp_endpoint_projector_terms(endpoint_powers, topology.laurent_orders)
+    child_formulas: dict[tuple[Any, ...], EndpointProjectorFormulaDefinition] = {}
+    for term in terms:
+        if term.child_signature not in child_formulas:
+            child = topology._endpoint_projector_formulas.get(term.child_signature)
+            if child is None:
+                child = build_endpoint_projector_formula_symbolica(
+                    topology,
+                    None,
+                    term.child_signature,
+                    EndpointProjectorFormulaDefinition,
+                    ibp_reduce_to_log_endpoint=False,
+                )
+                topology._endpoint_projector_formulas[term.child_signature] = child
+            child_formulas[term.child_signature] = child
+    return EndpointProjectorFormulaDefinition(
+        signature=signature,
+        input_names=[],
+        input_symbols=[],
+        output_expressions=[],
+        evaluators=[],
+        laurent_orders=topology.laurent_orders,
+        zero_subsets=[],
+        taylor_orders=list(signature[5]),
+        coefficient_layout=[],
+        ibp_reduce_to_log_endpoint=True,
+        ibp_terms=terms,
+        child_formulas=child_formulas,
+    )
+
+
+def _ibp_shared_max_orders_for_formula(
+    sector: SectorDefinition,
+    formula: EndpointProjectorFormulaDefinition,
+) -> dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...]]:
+    """Return one Taylor envelope per IBP boundary/zero projector."""
+    envelopes: dict[tuple[tuple[int, ...], tuple[int, ...]], list[int]] = {}
+    n_axes = len(sector.singular_axes)
+    for term in formula.ibp_terms:
+        child = formula.child_formulas[term.child_signature]
+        active_positions = tuple(int(position) for position in term.active_positions)
+        for _child_boundary, child_zero, child_multi, _regular_order in child.coefficient_layout:
+            original_zero = tuple(active_positions[position] for position in child_zero)
+            original_multi = list(term.derivative_multi)
+            for child_position, value in enumerate(child_multi):
+                original_multi[active_positions[child_position]] += int(value)
+            key = (tuple(term.boundary_positions), tuple(sorted(original_zero)))
+            current = envelopes.setdefault(key, [0 for _ in range(n_axes)])
+            for position, value in enumerate(original_multi):
+                current[position] = max(current[position], int(value))
+    return {key: tuple(values) for key, values in envelopes.items()}
+
+
+def _ibp_shared_output_pairs_for_formula(
+    sector: SectorDefinition,
+    formula: EndpointProjectorFormulaDefinition,
+) -> dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[tuple[tuple[int, ...], int], ...]]:
+    """Return sparse regular coefficients consumed by each IBP envelope."""
+    pairs: dict[
+        tuple[tuple[int, ...], tuple[int, ...]],
+        set[tuple[tuple[int, ...], int]],
+    ] = {}
+    for term in formula.ibp_terms:
+        child = formula.child_formulas[term.child_signature]
+        active_positions = tuple(int(position) for position in term.active_positions)
+        for _child_boundary, child_zero, child_multi, regular_order in child.coefficient_layout:
+            original_zero = tuple(active_positions[position] for position in child_zero)
+            original_multi = list(term.derivative_multi)
+            for child_position, value in enumerate(child_multi):
+                original_multi[active_positions[child_position]] += int(value)
+            key = (tuple(term.boundary_positions), tuple(sorted(original_zero)))
+            pairs.setdefault(key, set()).add((tuple(original_multi), int(regular_order)))
+    return {
+        key: tuple(
+            sorted(values, key=lambda item: (item[1], sum(item[0]), item[0]))
+        )
+        for key, values in pairs.items()
+    }
+
+
+def _regular_formula_dual_shape(
+    formula: RegularTaylorFormulaDefinition,
+) -> list[tuple[int, ...]]:
+    """Return the minimal dual shape needed by a regular Taylor formula."""
+    if formula.dual_shape:
+        return list(formula.dual_shape)
+    rank = len(formula.max_orders)
+    shape: set[tuple[int, ...]] = set()
+    for _kind, multi_index in formula.input_layout:
+        multi = tuple(int(value) for value in multi_index)
+        if len(multi) != rank:
+            raise ValueError(f"regular Taylor multi-index rank mismatch: {multi!r}")
+        # Symbolica dual evaluators require ancestor-closed shapes.  If a
+        # coefficient y^(2,1) is requested, every component-wise lower
+        # coefficient must also be present in the shape passed to dualize.
+        for ancestor in product(*[range(value + 1) for value in multi]):
+            shape.add(tuple(int(value) for value in ancestor))
+    zero = tuple(0 for _ in range(rank))
+    shape.add(zero)
+    ordered = sorted(shape, key=lambda item: (sum(item), item))
+    if zero in ordered:
+        ordered.remove(zero)
+        ordered.insert(0, zero)
+    return ordered
+
+
+def _regular_taylor_signature_volume(signature: tuple[Any, ...]) -> int:
+    """Return the Taylor-box volume implied by a regular formula signature."""
+    if len(signature) < 4 or signature[0] != "regular-taylor":
+        return 1
+    version = int(signature[1])
+    if version <= 1:
+        if len(signature) < 13:
+            return 1
+        orders = signature[12]
+    elif version >= 3:
+        return max(len(signature[3]), 1)
+    else:
+        orders = signature[3]
+    volume = 1
+    for order in orders:
+        volume *= int(order) + 1
+    return int(volume)
+
+
+def _regular_taylor_signature_axis_count(signature: tuple[Any, ...]) -> int:
+    """Return the number of singular Taylor axes in a regular signature."""
+    if len(signature) < 3 or signature[0] != "regular-taylor":
+        return 0
+    version = int(signature[1])
+    if version <= 1 and len(signature) > 3:
+        return len(signature[3])
+    return int(signature[2])
+
+
+def _regular_taylor_source_shape(
+    sector: SectorDefinition,
+    zero_positions: tuple[int, ...] | set[int],
+    max_orders: tuple[int, ...] | list[int],
+) -> list[tuple[int, ...]]:
+    """Return the raw J/U/F Taylor shape needed to feed a residual formula.
+
+    The reusable regular formula works with residual coefficients of
+    ``U/M_U`` and ``F/M_F``.  Obtaining those coefficients from black-box U/F
+    evaluators still requires shifted raw polynomial Taylor coefficients when
+    a zeroed singular coordinate carries an extracted monomial.  This source
+    shape is therefore sector-specific even though the downstream formula is
+    not.
+    """
+    orders = [int(order) for order in max_orders]
+    zero_set = {int(position) for position in zero_positions}
+    axes = list(sector.singular_axes)
+    axis_position = {axis: position for position, axis in enumerate(axes)}
+    shape: set[tuple[int, ...]] = set()
+    for residual_multi in _multi_indices(orders):
+        shape.add(tuple(residual_multi))
+        for monomial_powers in (sector.u_monomial_powers, sector.f_monomial_powers):
+            polynomial_multi = list(residual_multi)
+            for axis, power in enumerate(monomial_powers):
+                position = axis_position.get(axis)
+                if position is not None and position in zero_set:
+                    polynomial_multi[position] += int(power)
+            shape.add(tuple(polynomial_multi))
+    closed: set[tuple[int, ...]] = set()
+    for multi in shape:
+        for ancestor in product(*[range(int(value) + 1) for value in multi]):
+            closed.add(tuple(int(value) for value in ancestor))
+    zero = tuple(0 for _ in orders)
+    closed.add(zero)
+    ordered = sorted(closed, key=lambda item: (sum(item), item))
+    if zero in ordered:
+        ordered.remove(zero)
+        ordered.insert(0, zero)
+    return ordered
+
+
+def _ancestor_closed_multi_set(
+    multi_indices: list[tuple[int, ...]] | set[tuple[int, ...]],
+    rank: int,
+) -> set[tuple[int, ...]]:
+    """Return the component-wise ancestor closure of sparse Taylor outputs."""
+    closed: set[tuple[int, ...]] = {tuple(0 for _ in range(rank))}
+    for multi in multi_indices:
+        multi_tuple = tuple(int(value) for value in multi)
+        if len(multi_tuple) != rank:
+            raise ValueError(f"regular Taylor output rank mismatch: {multi_tuple!r}")
+        closed.update(_multi_index_ancestors(multi_tuple))
+    return closed
+
+
+def _multi_set_cache_key(
+    multi_indices: set[tuple[int, ...]],
+) -> tuple[tuple[int, ...], ...]:
+    """Return a canonical key for a sparse Taylor support set.
+
+    High-axis endpoint sectors repeatedly ask for U, F, and Jacobian source
+    shapes with the same ancestor-closed residual support.  Sorting hundreds of
+    multi-indices every time was visible in the PSD649 profile.  A frozenset is
+    still O(N) to build, but the expensive stable sort is then shared across
+    equivalent requests.
+    """
+    return _cached_multi_set_cache_key(
+        frozenset(tuple(int(value) for value in multi) for multi in multi_indices)
+    )
+
+
+@lru_cache(maxsize=8192)
+def _cached_multi_set_cache_key(
+    frozen_multi_indices: frozenset[tuple[int, ...]],
+) -> tuple[tuple[int, ...], ...]:
+    """Sort one immutable sparse support set once."""
+    return tuple(sorted(frozen_multi_indices, key=lambda item: (sum(item), item)))
+
+
+@lru_cache(maxsize=131072)
+def _multi_index_ancestors(multi_index: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    """Return all component-wise ancestors of one Taylor multi-index.
+
+    Hard high-axis sectors ask for many sparse Taylor source shapes that share
+    the same few multi-indices.  Caching the one-index ancestor closure avoids
+    rebuilding the Cartesian product in every source-shape request while
+    keeping the cache key independent of topology and sector names.
+    """
+    return tuple(
+        tuple(int(value) for value in ancestor)
+        for ancestor in product(*[range(int(value) + 1) for value in multi_index])
+    )
+
+
+def _regular_taylor_source_shape_from_multis(
+    sector: SectorDefinition,
+    zero_positions: tuple[int, ...] | set[int],
+    residual_multis: set[tuple[int, ...]],
+    jacobian_multis: set[tuple[int, ...]],
+) -> list[tuple[int, ...]]:
+    """Return source Taylor shape for a sparse regular-formula input layout."""
+    zero_set = {int(position) for position in zero_positions}
+    axes = list(sector.singular_axes)
+    axis_position = {axis: position for position, axis in enumerate(axes)}
+    rank = len(axes)
+    shape: set[tuple[int, ...]] = {tuple(0 for _ in range(rank))}
+    for multi in jacobian_multis:
+        shape.add(tuple(int(value) for value in multi))
+    for residual_multi in residual_multis:
+        residual_tuple = tuple(int(value) for value in residual_multi)
+        shape.add(residual_tuple)
+        for monomial_powers in (sector.u_monomial_powers, sector.f_monomial_powers):
+            polynomial_multi = list(residual_tuple)
+            for axis, power in enumerate(monomial_powers):
+                position = axis_position.get(axis)
+                if position is not None and position in zero_set:
+                    polynomial_multi[position] += int(power)
+            shape.add(tuple(polynomial_multi))
+    closed: set[tuple[int, ...]] = set()
+    for multi in shape:
+        closed.update(_multi_index_ancestors(tuple(int(value) for value in multi)))
+    zero = tuple(0 for _ in range(rank))
+    closed.add(zero)
+    ordered = sorted(closed, key=lambda item: (sum(item), item))
+    if zero in ordered:
+        ordered.remove(zero)
+        ordered.insert(0, zero)
+    return ordered
+
+
+def _regular_taylor_source_shape_for_monomial_powers(
+    sector: SectorDefinition,
+    zero_positions: tuple[int, ...] | set[int],
+    residual_multis: set[tuple[int, ...]],
+    monomial_powers: list[int],
+) -> list[tuple[int, ...]]:
+    """Return source Taylor shape needed by one polynomial residual only."""
+    zero_set = {int(position) for position in zero_positions}
+    axes = list(sector.singular_axes)
+    axis_position = {axis: position for position, axis in enumerate(axes)}
+    rank = len(axes)
+    shape: set[tuple[int, ...]] = {tuple(0 for _ in range(rank))}
+    for residual_multi in residual_multis:
+        residual_tuple = tuple(int(value) for value in residual_multi)
+        shape.add(residual_tuple)
+        polynomial_multi = list(residual_tuple)
+        for axis, power in enumerate(monomial_powers):
+            position = axis_position.get(axis)
+            if position is not None and position in zero_set:
+                polynomial_multi[position] += int(power)
+        shape.add(tuple(polynomial_multi))
+    closed: set[tuple[int, ...]] = set()
+    for multi in shape:
+        closed.update(_multi_index_ancestors(tuple(int(value) for value in multi)))
+    return _ordered_multi_shape(closed, rank)
+
+
+def _ordered_multi_shape(
+    multi_indices: set[tuple[int, ...]],
+    rank: int,
+) -> list[tuple[int, ...]]:
+    """Return a stable Taylor-shape ordering with the zero coefficient first."""
+    zero = tuple(0 for _ in range(rank))
+    ordered = sorted(
+        {tuple(int(value) for value in multi) for multi in multi_indices},
+        key=lambda item: (sum(item), item),
+    )
+    if zero in ordered:
+        ordered.remove(zero)
+    ordered.insert(0, zero)
+    return ordered
+
+
+def _merge_multi_shapes(
+    *shapes: list[tuple[int, ...]],
+) -> list[tuple[int, ...]]:
+    """Merge Taylor coefficient shape lists while preserving stable ordering."""
+    merged: set[tuple[int, ...]] = set()
+    rank = 0
+    for shape in shapes:
+        for multi in shape:
+            multi_tuple = tuple(int(value) for value in multi)
+            rank = len(multi_tuple)
+            merged.add(multi_tuple)
+    if not merged:
+        return []
+    return _ordered_multi_shape(merged, rank)
+
+
+def _regular_taylor_canonical_positions(max_orders: tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    """Return original positions ordered by descending Taylor depth."""
+    return tuple(
+        sorted(
+            range(len(max_orders)),
+            key=lambda position: (-int(max_orders[position]), int(position)),
+        )
+    )
+
+
+def _regular_taylor_canonical_to_original(
+    multi_index: tuple[int, ...],
+    canonical_positions: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Map a canonical regular-formula multi-index to sector-axis order."""
+    out = [0 for _ in canonical_positions]
+    for canonical_position, original_position in enumerate(canonical_positions):
+        out[int(original_position)] = int(multi_index[canonical_position])
+    return tuple(out)
+
+
+def _regular_taylor_original_to_canonical(
+    multi_index: tuple[int, ...],
+    canonical_positions: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Map a sector-axis multi-index to canonical regular-formula order."""
+    return tuple(int(multi_index[position]) for position in canonical_positions)
+
+
+def _sector_has_analytic_taylor_for_shape(sector: SectorDefinition) -> bool:
+    """Return whether sector map/Jacobian Taylor jets avoid runtime evaluators."""
+    map_monomials = getattr(sector, "_map_monomials", None)
+    jacobian_monomial = getattr(sector, "_jacobian_monomial", None)
+    return bool(map_monomials) and all(item is not None for item in map_monomials) and jacobian_monomial is not None
+
+
+def _regular_series_product(
+    left: list[complex],
+    right: list[complex],
+    count: int,
+) -> list[complex]:
+    """Multiply two regular epsilon series and truncate to ``count`` terms."""
+    out = [0.0 + 0.0j for _ in range(count)]
+    for i, a in enumerate(left):
+        for j, b in enumerate(right):
+            if i + j >= count:
+                break
+            out[i + j] += a * b
+    return out
+
+
+def _inverse_affine_regular_series(offset: int, eps_coeff: float, count: int) -> list[complex]:
+    """Expand ``1/(offset+eps_coeff*eps)`` for nonzero integer offset."""
+    if offset == 0:
+        raise ValueError("IBP lowering expected only nonzero affine denominators")
+    return [
+        ((-float(eps_coeff) / float(offset)) ** order) / float(offset)
+        for order in range(count)
+    ]
+
+
+def _ibp_endpoint_projector_terms(
+    endpoint_powers: list[tuple[int, float]],
+    laurent_orders: list[int],
+) -> list[IBPEndpointProjectorTerm]:
+    """Enumerate the IBP-lowered terms for one endpoint signature."""
+    n_axes = len(endpoint_powers)
+    count = len(laurent_orders)
+    zero_multi = tuple(0 for _ in range(n_axes))
+    raw_terms: list[
+        tuple[
+            list[complex],
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ]
+    ] = [([1.0 + 0.0j] + [0.0 + 0.0j for _ in range(count - 1)], (), zero_multi, tuple(range(n_axes)))]
+    for position, (base, eps_coeff) in enumerate(endpoint_powers):
+        required_order = int(-int(base) - 1)
+        if required_order <= 0:
+            continue
+        next_terms: list[
+            tuple[
+                list[complex],
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+            ]
+        ] = []
+        for prefactor, boundary_subset, derivative_multi, active_positions in raw_terms:
+            if position not in active_positions:
+                next_terms.append((prefactor, boundary_subset, derivative_multi, active_positions))
+                continue
+            denominator_product = [1.0 + 0.0j] + [0.0 + 0.0j for _ in range(count - 1)]
+            for shift in range(required_order):
+                offset = int(base) + shift + 1
+                denominator_product = _regular_series_product(
+                    denominator_product,
+                    _inverse_affine_regular_series(offset, eps_coeff, count),
+                    count,
+                )
+                boundary_derivative = list(derivative_multi)
+                boundary_derivative[position] += shift
+                boundary_prefactor = _regular_series_product(prefactor, denominator_product, count)
+                if shift % 2:
+                    boundary_prefactor = [-value for value in boundary_prefactor]
+                next_terms.append(
+                    (
+                        boundary_prefactor,
+                        tuple(sorted((*boundary_subset, position))),
+                        tuple(boundary_derivative),
+                        tuple(active for active in active_positions if active != position),
+                    )
+                )
+            continuing_derivative = list(derivative_multi)
+            continuing_derivative[position] += required_order
+            continuing_prefactor = _regular_series_product(prefactor, denominator_product, count)
+            if required_order % 2:
+                continuing_prefactor = [-value for value in continuing_prefactor]
+            next_terms.append(
+                (
+                    continuing_prefactor,
+                    boundary_subset,
+                    tuple(continuing_derivative),
+                    active_positions,
+                )
+            )
+        raw_terms = next_terms
+
+    out: list[IBPEndpointProjectorTerm] = []
+    for prefactor, boundary_subset, derivative_multi, active_positions in raw_terms:
+        derivative_factor = 1
+        for value in derivative_multi:
+            derivative_factor *= math.factorial(int(value))
+        prefactor = [derivative_factor * value for value in prefactor]
+        child_signature = (
+            "endpoint-projector",
+            2,
+            False,
+            len(active_positions),
+            tuple((-1, endpoint_powers[position][1]) for position in active_positions),
+            tuple(0 for _ in active_positions),
+            tuple(laurent_orders),
+        )
+        out.append(
+            IBPEndpointProjectorTerm(
+                prefactor_coeffs=prefactor,
+                boundary_positions=tuple(sorted(boundary_subset)),
+                derivative_multi=tuple(int(value) for value in derivative_multi),
+                active_positions=tuple(active_positions),
+                child_signature=child_signature,
+            )
+        )
+    return out
 
 
 def build_subtraction_formula_legacy(
@@ -1901,6 +4754,28 @@ class SectorProcessor:
         if subtraction_backend not in {"formula", "recursive", "projector-formula"}:
             raise ValueError(f"unsupported subtraction backend {subtraction_backend!r}")
         self.subtraction_backend = subtraction_backend
+        self._endpoint_projector_plan_cache: dict[
+            tuple[str, tuple[Any, ...]],
+            tuple[
+                list[
+                    tuple[
+                        tuple[tuple[int, ...], tuple[int, ...]],
+                        tuple[int, ...],
+                        tuple[tuple[tuple[int, ...], int], ...],
+                    ]
+                ],
+                dict[
+                    tuple[int, ...],
+                    list[
+                        tuple[
+                            tuple[tuple[int, ...], tuple[int, ...]],
+                            tuple[int, ...],
+                            tuple[tuple[tuple[int, ...], int], ...],
+                        ]
+                    ],
+                ],
+            ],
+        ] = {}
 
     def evaluate(self, sector: SectorDefinition, y: list[float] | tuple[float, ...]) -> tuple[list[complex], float]:
         """Evaluate one sector point through the batched implementation."""
@@ -1917,6 +4792,22 @@ class SectorProcessor:
         rows = np.asarray(y_values, dtype=float)
         if rows.ndim != 2 or rows.shape[1] != sector.integration_dim:
             raise ValueError(f"{sector.name}: expected coordinate array with shape (n,{sector.integration_dim})")
+
+        # A sector with P endpoint axes can only start at eps^-P in the raw
+        # sector convention.  When the user asks only for deeper poles, avoid
+        # building regular Taylor data that is guaranteed to cancel to zero.
+        # This matters for multi-loop DOT runs where leading-pole probes sample
+        # many shallow sectors through the discrete Havana dimension.
+        endpoint_pole_depth = sum(
+            1
+            for axis in sector.singular_axes
+            if self.topology.endpoint_power(sector, axis).base < -1.0e-12
+        )
+        if self.topology.laurent_max_order < -endpoint_pole_depth:
+            timing = HotPathTiming()
+            timing.add_precision_samples(ordinary=rows.shape[0])
+            zeros = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+            return zeros, np.zeros(rows.shape[0], dtype=float), timing
 
         if (
             not sector.singular_axes
@@ -2186,6 +5077,37 @@ class SectorProcessor:
                 base_value *= np.power(coord, endpoint_power.base)
             if abs(endpoint_power.eps_coeff) > 1.0e-15:
                 eps_log += endpoint_power.eps_coeff * np.log(coord)
+        return base_value, eps_log
+
+    def _regular_monomial_base_log_prec(
+        self,
+        sector: SectorDefinition,
+        y: np.ndarray,
+        precision_digits: int,
+    ) -> tuple[ComplexPrecise, ComplexPrecise]:
+        """Return regular monomial pieces as Decimal complex values."""
+        singular = set(sector.singular_axes)
+        base_value = _pc_one()
+        eps_log = _pc_zero()
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(y, dtype=float)]
+        for axis in range(sector.integration_dim):
+            if axis in singular:
+                continue
+            endpoint_power = self.topology.endpoint_power(sector, axis)
+            coord = coords[axis]
+            if abs(endpoint_power.base) > 1.0e-15:
+                rounded = round(endpoint_power.base)
+                if abs(endpoint_power.base - rounded) > 1.0e-12:
+                    raise ValueError(
+                        f"{sector.name}: high-precision regular monomial requires integer "
+                        f"base power, got {endpoint_power.base!r}"
+                    )
+                base_value = _pc_mul(base_value, _pc_int_power(coord, int(rounded)))
+            if abs(endpoint_power.eps_coeff) > 1.0e-15:
+                eps_log = _pc_add(
+                    eps_log,
+                    _pc_scale(_pc_log(coord, precision_digits), endpoint_power.eps_coeff, precision_digits),
+                )
         return base_value, eps_log
 
     def _g_coeffs_batch(
@@ -2464,18 +5386,16 @@ class SectorProcessor:
             input_matrix[:, offset : offset + n_axes] = sample_rows[:, sector.singular_axes]
         offset += n_axes
 
-        g_cache: dict[tuple[int, ...], list[MultiSeries]] = {}
-        for subset, multi_index, regular_order in formula.coefficient_layout:
-            cached = g_cache.get(subset)
+        g_cache = self._precompute_endpoint_projector_g_cache(
+            sector,
+            sample_rows,
+            formula,
+            timing,
+        )
+        for boundary, zero, multi_index, regular_order in formula.coefficient_layout:
+            cached = g_cache.get((boundary, zero))
             if cached is None:
-                cached = self._g_taylor_eps_series_batch(
-                    sector,
-                    sample_rows,
-                    set(subset),
-                    formula.taylor_orders,
-                    timing,
-                )
-                g_cache[subset] = cached
+                raise RuntimeError(f"{sector.name}: missing endpoint-projector coefficient cache")
             input_matrix[:, offset] = _series_coefficient(
                 cached[regular_order],
                 multi_index,
@@ -2490,6 +5410,191 @@ class SectorProcessor:
             )
         return input_matrix
 
+    def _precompute_endpoint_projector_g_cache(
+        self,
+        sector: SectorDefinition,
+        rows: np.ndarray,
+        formula: EndpointProjectorFormulaDefinition,
+        timing: HotPathTiming,
+    ) -> dict[tuple[tuple[int, ...], tuple[int, ...]], list[MultiSeries]]:
+        """Return all regular coefficients needed by a direct endpoint projector.
+
+        A direct endpoint projector has one coefficient group for every
+        boundary/zero projector in its inclusion-exclusion formula.  Building
+        every group independently repeats the same sparse U/F/J source assembly
+        for many boundary choices.  For groups that do not already have a
+        pregenerated regular-Taylor evaluator, stack all boundary rows sharing a
+        zero set and evaluate one union request.  This mirrors the IBP child
+        cache while keeping curated regular formula groups on their specialized
+        evaluator path.
+        """
+        sample_rows = np.asarray(rows, dtype=float)
+        n_rows = int(sample_rows.shape[0])
+        formula_groups, fallback_by_zero_template = self._endpoint_projector_plan(
+            sector,
+            formula,
+        )
+
+        g_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[MultiSeries]] = {}
+        for group_key, max_orders, output_pairs in formula_groups:
+            boundary, zero = group_key
+            g_cache[group_key] = self._g_taylor_eps_series_batch(
+                sector,
+                sample_rows,
+                set(zero),
+                list(max_orders),
+                timing,
+                boundary_positions=set(boundary),
+                max_orders_are_explicit=True,
+                output_pairs=output_pairs,
+            )
+
+        max_stacked_rows = 4096
+        for zero, entries in fallback_by_zero_template.items():
+            keys_per_chunk = min(
+                max(1, len(entries)),
+                max(1, max_stacked_rows // max(1, n_rows)),
+            )
+            for start_index in range(0, len(entries), keys_per_chunk):
+                chunk = entries[start_index : start_index + keys_per_chunk]
+                envelope_orders = [
+                    max(int(max_orders[position]) for _key, max_orders, _pairs in chunk)
+                    for position in range(len(sector.singular_axes))
+                ]
+                output_pair_set: set[tuple[tuple[int, ...], int]] = set()
+                stacked_rows: list[np.ndarray] = []
+                slices: list[
+                    tuple[
+                        tuple[tuple[int, ...], tuple[int, ...]],
+                        int,
+                        int,
+                    ]
+                ] = []
+                row_offset = 0
+                for group_key, _max_orders, output_pairs in chunk:
+                    boundary, _zero = group_key
+                    output_pair_set.update(output_pairs)
+                    endpoint_rows = sample_rows.copy()
+                    for position in boundary:
+                        endpoint_rows[:, sector.singular_axes[int(position)]] = 1.0
+                    stacked_rows.append(endpoint_rows)
+                    slices.append((group_key, row_offset, row_offset + n_rows))
+                    row_offset += n_rows
+                union_output_pairs = tuple(
+                    sorted(
+                        output_pair_set,
+                        key=lambda item: (item[1], sum(item[0]), item[0]),
+                    )
+                )
+                shared_series = self._g_taylor_eps_series_batch(
+                    sector,
+                    np.vstack(stacked_rows),
+                    set(zero),
+                    envelope_orders,
+                    timing,
+                    boundary_positions=set(),
+                    max_orders_are_explicit=True,
+                    output_pairs=union_output_pairs,
+                )
+                for group_key, row_start, row_stop in slices:
+                    g_cache[group_key] = _slice_multi_series_list(
+                        shared_series,
+                        row_start,
+                        row_stop,
+                    )
+        return g_cache
+
+    def _endpoint_projector_plan(
+        self,
+        sector: SectorDefinition,
+        formula: EndpointProjectorFormulaDefinition,
+    ) -> tuple[
+        list[
+            tuple[
+                tuple[tuple[int, ...], tuple[int, ...]],
+                tuple[int, ...],
+                tuple[tuple[tuple[int, ...], int], ...],
+            ]
+        ],
+        dict[
+            tuple[int, ...],
+            list[
+                tuple[
+                    tuple[tuple[int, ...], tuple[int, ...]],
+                    tuple[int, ...],
+                    tuple[tuple[tuple[int, ...], int], ...],
+                ]
+            ],
+        ],
+    ]:
+        """Return cached endpoint-projector grouping metadata.
+
+        The grouping is independent of sample values.  Keeping it next to the
+        processor avoids rebuilding sorted output-pair tuples and regular
+        formula signatures for every batch of a hard sector.
+        """
+        cache_key = (sector.name, formula.signature)
+        cached = self._endpoint_projector_plan_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        n_axes = len(sector.singular_axes)
+        groups: dict[
+            tuple[tuple[int, ...], tuple[int, ...]],
+            list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+        ] = {}
+        for key in formula.coefficient_layout:
+            boundary, zero, _multi_index, _regular_order = key
+            groups.setdefault((boundary, zero), []).append(key)
+
+        formula_groups: list[
+            tuple[
+                tuple[tuple[int, ...], tuple[int, ...]],
+                tuple[int, ...],
+                tuple[tuple[tuple[int, ...], int], ...],
+            ]
+        ] = []
+        fallback_by_zero: dict[
+            tuple[int, ...],
+            list[
+                tuple[
+                    tuple[tuple[int, ...], tuple[int, ...]],
+                    tuple[int, ...],
+                    tuple[tuple[tuple[int, ...], int], ...],
+                ]
+            ],
+        ] = {}
+        for group_key, entries in groups.items():
+            boundary, zero = group_key
+            max_orders = tuple(
+                max(int(entry[2][position]) for entry in entries)
+                for position in range(n_axes)
+            )
+            output_pairs = tuple(
+                sorted(
+                    ((tuple(entry[2]), int(entry[3])) for entry in entries),
+                    key=lambda item: (item[1], sum(item[0]), item[0]),
+                )
+            )
+            regular_signature = self.topology.regular_taylor_signature(
+                sector,
+                zero_positions=zero,
+                max_orders=max_orders,
+                output_pairs=output_pairs,
+            )
+            if regular_signature in self.topology._regular_taylor_formulas:
+                formula_groups.append((group_key, max_orders, output_pairs))
+            else:
+                fallback_by_zero.setdefault(tuple(zero), []).append(
+                    (group_key, max_orders, output_pairs)
+                )
+
+        for entries in fallback_by_zero.values():
+            entries.sort(key=lambda item: (len(item[0][0]), item[0][0], item[1]))
+        cached = (formula_groups, fallback_by_zero)
+        self._endpoint_projector_plan_cache[cache_key] = cached
+        return cached
+
     def _endpoint_projector_input_prec_row(
         self,
         sector: SectorDefinition,
@@ -2498,20 +5603,61 @@ class SectorProcessor:
         precision_digits: int,
         timing: HotPathTiming,
     ) -> ComplexPreciseRow:
-        """Assemble one multiprecision endpoint-projector input row.
+        """Assemble one fully multiprecision endpoint-projector input row.
 
-        The current regular-coefficient layer is still shared with the
-        recursive backend and returns complex doubles.  The endpoint projector
-        itself receives padded Decimal inputs, so the unstable inclusion-
-        exclusion algebra is evaluated by Symbolica at the requested precision.
+        Near an endpoint the dangerous cancellation is not only in the final
+        plus-distribution projector.  The regular Taylor coefficients
+        ``g_{S,alpha,r}`` must also be obtained from high-precision sector-map,
+        U, F, and Jacobian Taylor data.  This row therefore bypasses the double
+        input matrix entirely and keeps Decimal arithmetic until the prepared
+        Symbolica projector returns the final Laurent weight.
         """
-        matrix = self._endpoint_projector_input_matrix(
-            sector,
-            np.asarray([y], dtype=float),
-            formula,
-            timing,
-        )
-        return [_decimal_complex(value, precision_digits) for value in matrix[0]]
+        coords = np.asarray(y, dtype=float)
+        input_row: ComplexPreciseRow = [
+            _decimal_complex(coords[axis], precision_digits)
+            for axis in sector.singular_axes
+        ]
+
+        with localcontext() as context:
+            context.prec = int(precision_digits)
+            groups: dict[
+                tuple[tuple[int, ...], tuple[int, ...]],
+                list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+            ] = {}
+            for key in formula.coefficient_layout:
+                boundary, zero, _multi_index, _regular_order = key
+                groups.setdefault((boundary, zero), []).append(key)
+
+            g_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[PrecSeries]] = {}
+            for group_key, entries in groups.items():
+                boundary, zero = group_key
+                max_orders = [
+                    max(int(entry[2][position]) for entry in entries)
+                    for position in range(len(sector.singular_axes))
+                ]
+                g_cache[group_key] = self._g_taylor_eps_series_prec_row(
+                    sector,
+                    coords,
+                    set(zero),
+                    max_orders,
+                    precision_digits,
+                    timing,
+                    boundary_positions=set(boundary),
+                    max_orders_are_explicit=True,
+                )
+
+            for boundary, zero, multi_index, regular_order in formula.coefficient_layout:
+                cached = g_cache.get((boundary, zero))
+                if cached is None:
+                    raise RuntimeError(f"{sector.name}: missing endpoint-projector coefficient cache")
+                input_row.append(_prec_series_coefficient(cached[regular_order], multi_index))
+
+        if len(input_row) != len(formula.input_names):
+            raise RuntimeError(
+                f"{sector.name}: endpoint projector input mismatch: filled {len(input_row)}, "
+                f"expected {len(formula.input_names)}"
+            )
+        return input_row
 
     def _endpoint_projector_subtraction_batch(
         self,
@@ -2521,6 +5667,13 @@ class SectorProcessor:
     ) -> tuple[np.ndarray, np.ndarray]:
         """Evaluate a singular sector through a reusable endpoint projector."""
         formula = self.topology.endpoint_projector_formula_for(sector)
+        if formula.ibp_reduce_to_log_endpoint:
+            return self._ibp_endpoint_projector_subtraction_batch(
+                sector,
+                y_values,
+                formula,
+                timing,
+            )
         rows = np.asarray(y_values, dtype=float)
         precision_digits = timing.precision_digits
         if precision_digits is None:
@@ -2548,6 +5701,466 @@ class SectorProcessor:
                 )
         return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
 
+    def _convolve_regular_prefactor_array(
+        self,
+        values: np.ndarray,
+        prefactor_coeffs: list[complex],
+    ) -> np.ndarray:
+        """Multiply a Laurent array by a regular epsilon prefactor series."""
+        out = np.zeros_like(values)
+        count = values.shape[1]
+        for value_index in range(count):
+            for pref_index, prefactor in enumerate(prefactor_coeffs):
+                out_index = value_index + pref_index
+                if out_index >= count:
+                    break
+                out[:, out_index] += values[:, value_index] * prefactor
+        return out
+
+    def _convolve_regular_prefactor_list(
+        self,
+        values: list[complex],
+        prefactor_coeffs: list[complex],
+    ) -> list[complex]:
+        """List analogue of ``_convolve_regular_prefactor_array``."""
+        out = [0.0 + 0.0j for _ in values]
+        count = len(values)
+        for value_index, value in enumerate(values):
+            for pref_index, prefactor in enumerate(prefactor_coeffs):
+                out_index = value_index + pref_index
+                if out_index >= count:
+                    break
+                out[out_index] += value * prefactor
+        return out
+
+    def _ibp_child_input_matrix(
+        self,
+        sector: SectorDefinition,
+        rows: np.ndarray,
+        child: EndpointProjectorFormulaDefinition,
+        term: IBPEndpointProjectorTerm,
+        timing: HotPathTiming,
+        shared_g_cache: dict[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]], list[MultiSeries]] | None = None,
+        shared_max_orders: dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...]] | None = None,
+        shared_output_pairs: dict[
+            tuple[tuple[int, ...], tuple[int, ...]],
+            tuple[tuple[tuple[int, ...], int], ...],
+        ] | None = None,
+    ) -> np.ndarray:
+        """Assemble inputs for one logarithmic child projector in IBP mode."""
+        sample_rows = np.asarray(rows, dtype=float)
+        n_rows = sample_rows.shape[0]
+        input_matrix = np.zeros((n_rows, len(child.input_names)), dtype=np.complex128)
+        active_positions = tuple(int(position) for position in term.active_positions)
+        offset = 0
+        if active_positions:
+            active_axes = [sector.singular_axes[position] for position in active_positions]
+            input_matrix[:, : len(active_positions)] = sample_rows[:, active_axes]
+            offset = len(active_positions)
+
+        groups: dict[
+            tuple[tuple[int, ...], tuple[int, ...]],
+            list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int, tuple[int, ...]]],
+        ] = {}
+        expanded_entries: list[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int, tuple[int, ...]]
+        ] = []
+        for _child_boundary, child_zero, child_multi, regular_order in child.coefficient_layout:
+            original_zero = tuple(active_positions[position] for position in child_zero)
+            original_multi = list(term.derivative_multi)
+            for child_position, value in enumerate(child_multi):
+                original_multi[active_positions[child_position]] += int(value)
+            original_multi_tuple = tuple(original_multi)
+            entry = (
+                tuple(term.boundary_positions),
+                tuple(sorted(original_zero)),
+                original_multi_tuple,
+                int(regular_order),
+                tuple(child_multi),
+            )
+            expanded_entries.append(entry)
+            groups.setdefault((entry[0], entry[1]), []).append(entry)
+
+        g_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[MultiSeries]] = {}
+        for group_key, entries in groups.items():
+            boundary, zero = group_key
+            max_orders = [
+                max(int(entry[2][position]) for entry in entries)
+                for position in range(len(sector.singular_axes))
+            ]
+            if shared_max_orders is not None:
+                # IBP decomposes one higher-power endpoint projector into many
+                # logarithmic child projectors.  Those children often ask for
+                # nested Taylor boxes for the same boundary/zero projector.  A
+                # single larger box contains all smaller boxes, so build the
+                # envelope once and reuse it across child terms.
+                max_orders = list(shared_max_orders.get((boundary, zero), tuple(max_orders)))
+            shared_key = (boundary, zero, tuple(max_orders))
+            cached = shared_g_cache.get(shared_key) if shared_g_cache is not None else None
+            if cached is None:
+                if shared_output_pairs is not None:
+                    output_pairs = shared_output_pairs.get((boundary, zero), ())
+                else:
+                    output_pairs = tuple(
+                        sorted(
+                            ((tuple(entry[2]), int(entry[3])) for entry in entries),
+                            key=lambda item: (item[1], sum(item[0]), item[0]),
+                        )
+                    )
+                cached = self._g_taylor_eps_series_batch(
+                    sector,
+                    sample_rows,
+                    set(zero),
+                    max_orders,
+                    timing,
+                    boundary_positions=set(boundary),
+                    max_orders_are_explicit=True,
+                    output_pairs=output_pairs,
+                )
+                if shared_g_cache is not None:
+                    shared_g_cache[shared_key] = cached
+            g_cache[group_key] = cached
+
+        for boundary, zero, multi_index, regular_order, _child_multi in expanded_entries:
+            cached = g_cache[(boundary, zero)]
+            input_matrix[:, offset] = _series_coefficient(
+                cached[regular_order],
+                multi_index,
+                n_rows,
+            )
+            offset += 1
+        if offset != len(child.input_names):
+            raise RuntimeError(
+                f"{sector.name}: IBP child input mismatch: filled {offset}, "
+                f"expected {len(child.input_names)}"
+            )
+        return input_matrix
+
+    def _ibp_child_input_prec_row(
+        self,
+        sector: SectorDefinition,
+        y: np.ndarray,
+        child: EndpointProjectorFormulaDefinition,
+        term: IBPEndpointProjectorTerm,
+        precision_digits: int,
+        timing: HotPathTiming,
+        shared_g_cache: dict[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]], list[PrecSeries]] | None = None,
+        shared_max_orders: dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...]] | None = None,
+    ) -> ComplexPreciseRow:
+        """Precision analogue of ``_ibp_child_input_matrix`` for one sample."""
+        coords = np.asarray(y, dtype=float)
+        active_positions = tuple(int(position) for position in term.active_positions)
+        input_row: ComplexPreciseRow = [
+            _decimal_complex(coords[sector.singular_axes[position]], precision_digits)
+            for position in active_positions
+        ]
+        groups: dict[
+            tuple[tuple[int, ...], tuple[int, ...]],
+            list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+        ] = {}
+        expanded_entries: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]] = []
+        for _child_boundary, child_zero, child_multi, regular_order in child.coefficient_layout:
+            original_zero = tuple(active_positions[position] for position in child_zero)
+            original_multi = list(term.derivative_multi)
+            for child_position, value in enumerate(child_multi):
+                original_multi[active_positions[child_position]] += int(value)
+            entry = (
+                tuple(term.boundary_positions),
+                tuple(sorted(original_zero)),
+                tuple(original_multi),
+                int(regular_order),
+            )
+            expanded_entries.append(entry)
+            groups.setdefault((entry[0], entry[1]), []).append(entry)
+
+        with localcontext() as context:
+            context.prec = int(precision_digits)
+            g_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[PrecSeries]] = {}
+            for group_key, entries in groups.items():
+                boundary, zero = group_key
+                max_orders = [
+                    max(int(entry[2][position]) for entry in entries)
+                    for position in range(len(sector.singular_axes))
+                ]
+                if shared_max_orders is not None:
+                    max_orders = list(shared_max_orders.get((boundary, zero), tuple(max_orders)))
+                shared_key = (boundary, zero, tuple(max_orders))
+                cached = shared_g_cache.get(shared_key) if shared_g_cache is not None else None
+                if cached is None:
+                    cached = self._g_taylor_eps_series_prec_row(
+                        sector,
+                        coords,
+                        set(zero),
+                        max_orders,
+                        precision_digits,
+                        timing,
+                        boundary_positions=set(boundary),
+                        max_orders_are_explicit=True,
+                    )
+                    if shared_g_cache is not None:
+                        shared_g_cache[shared_key] = cached
+                g_cache[group_key] = cached
+
+            for boundary, zero, multi_index, regular_order in expanded_entries:
+                cached = g_cache[(boundary, zero)]
+                input_row.append(_prec_series_coefficient(cached[regular_order], multi_index))
+        if len(input_row) != len(child.input_names):
+            raise RuntimeError(
+                f"{sector.name}: IBP child input mismatch: filled {len(input_row)}, "
+                f"expected {len(child.input_names)}"
+            )
+        return input_row
+
+    def _ibp_shared_max_orders(
+        self,
+        sector: SectorDefinition,
+        formula: EndpointProjectorFormulaDefinition,
+    ) -> dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...]]:
+        """Return one Taylor envelope per IBP boundary/zero projector.
+
+        The compound IBP projector is topology-independent, but applying it to a
+        sector requires many regular-function Taylor coefficients.  Computing a
+        coefficient box for every child term is correct but wasteful.  For a
+        fixed boundary set and projector-zero set, the largest requested
+        multi-index box contains every smaller box, so this envelope is the
+        natural cache key for the runtime coefficient assembly.
+        """
+        return _ibp_shared_max_orders_for_formula(sector, formula)
+
+    def _ibp_shared_output_pairs(
+        self,
+        sector: SectorDefinition,
+        formula: EndpointProjectorFormulaDefinition,
+    ) -> dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[tuple[tuple[int, ...], int], ...]]:
+        """Return sparse regular coefficients consumed by each IBP envelope."""
+        return _ibp_shared_output_pairs_for_formula(sector, formula)
+
+    def _precompute_ibp_shared_batch_g_cache(
+        self,
+        sector: SectorDefinition,
+        rows: np.ndarray,
+        shared_max_orders: dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...]],
+        shared_output_pairs: dict[
+            tuple[tuple[int, ...], tuple[int, ...]],
+            tuple[tuple[tuple[int, ...], int], ...],
+        ],
+        timing: HotPathTiming,
+    ) -> dict[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]], list[MultiSeries]]:
+        """Batch fallback regular-Taylor assemblies across IBP boundaries.
+
+        A hard six-axis IBP sector can request one regular Taylor object for
+        every combination of "sampled", "zeroed", and "boundary at 1" endpoint
+        state.  The regular algebra depends on the zero set and requested
+        Taylor coefficients; the boundary set only changes the endpoint row.
+        Grouping boundary rows by zero set therefore preserves the black-box
+        U/F boundary while avoiding hundreds of repeated sparse-series builds.
+        Pregenerated direct regular formulas are deliberately skipped here so
+        they keep using their own evaluator path.
+        """
+        sample_rows = np.asarray(rows, dtype=float)
+        n_rows = int(sample_rows.shape[0])
+        if n_rows == 0:
+            return {}
+
+        fallback_by_zero: dict[
+            tuple[int, ...],
+            list[
+                tuple[
+                    tuple[tuple[int, ...], tuple[int, ...]],
+                    tuple[int, ...],
+                    tuple[tuple[tuple[int, ...], int], ...],
+                ]
+            ],
+        ] = {}
+        for key, max_orders in shared_max_orders.items():
+            boundary, zero = key
+            output_pairs = shared_output_pairs.get(key, ())
+            signature = self.topology.regular_taylor_signature(
+                sector,
+                zero_positions=zero,
+                max_orders=max_orders,
+                output_pairs=output_pairs,
+            )
+            if signature in self.topology._regular_taylor_formulas:
+                continue
+            fallback_by_zero.setdefault(tuple(zero), []).append(
+                (key, tuple(int(order) for order in max_orders), tuple(output_pairs))
+            )
+
+        cache: dict[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+            list[MultiSeries],
+        ] = {}
+        # Keep stacked evaluator inputs bounded for selected-sector runs with
+        # large batches.  For the all-sector Havana path the per-sector batch is
+        # usually small, so this still collapses the pathological 729 one-row
+        # assemblies down to O(64) sparse builds.
+        max_stacked_rows = 4096
+        for zero, entries in fallback_by_zero.items():
+            entries.sort(key=lambda item: (len(item[0][0]), item[0][0], item[1]))
+            # After the symbolic chain-rule formula is pregenerated, the
+            # dominant cost is the regular epsilon-series algebra, not the
+            # mapped-derivative composition.  Therefore one stacked assembly
+            # per zero projector is now preferable; the row cap still prevents
+            # selected-sector runs with large batches from constructing
+            # oversized temporary arrays.
+            preferred_keys_per_chunk = len(entries)
+            keys_per_chunk = min(
+                max(1, int(preferred_keys_per_chunk)),
+                max(1, max_stacked_rows // max(1, n_rows)),
+            )
+            for start_index in range(0, len(entries), keys_per_chunk):
+                chunk = entries[start_index : start_index + keys_per_chunk]
+                envelope_orders = [
+                    max(int(max_orders[position]) for _key, max_orders, _pairs in chunk)
+                    for position in range(len(sector.singular_axes))
+                ]
+                output_pair_set: set[tuple[tuple[int, ...], int]] = set()
+                stacked_rows: list[np.ndarray] = []
+                slices: list[
+                    tuple[
+                        tuple[tuple[int, ...], tuple[int, ...]],
+                        tuple[int, ...],
+                        int,
+                        int,
+                    ]
+                ] = []
+                row_offset = 0
+                for key, max_orders, output_pairs in chunk:
+                    boundary, _zero = key
+                    output_pair_set.update(output_pairs)
+                    endpoint_rows = sample_rows.copy()
+                    for position in boundary:
+                        endpoint_rows[:, sector.singular_axes[int(position)]] = 1.0
+                    stacked_rows.append(endpoint_rows)
+                    slices.append((key, max_orders, row_offset, row_offset + n_rows))
+                    row_offset += n_rows
+                if not stacked_rows:
+                    continue
+                union_output_pairs = tuple(
+                    sorted(
+                        output_pair_set,
+                        key=lambda item: (item[1], sum(item[0]), item[0]),
+                    )
+                )
+                stacked = np.vstack(stacked_rows)
+                shared_series = self._g_taylor_eps_series_batch(
+                    sector,
+                    stacked,
+                    set(zero),
+                    envelope_orders,
+                    timing,
+                    boundary_positions=set(),
+                    max_orders_are_explicit=True,
+                    output_pairs=union_output_pairs,
+                )
+                for key, max_orders, row_start, row_stop in slices:
+                    boundary, key_zero = key
+                    cache[(boundary, key_zero, tuple(max_orders))] = _slice_multi_series_list(
+                        shared_series,
+                        row_start,
+                        row_stop,
+                    )
+        return cache
+
+    def _ibp_endpoint_projector_subtraction_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        formula: EndpointProjectorFormulaDefinition,
+        timing: HotPathTiming,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate a compound IBP-lowered endpoint projector."""
+        rows = np.asarray(y_values, dtype=float)
+        coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+        precision_digits = timing.precision_digits
+        shared_batch_g_cache: dict[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+            list[MultiSeries],
+        ] = {}
+        shared_prec_g_caches: list[
+            dict[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]], list[PrecSeries]]
+        ] = [
+            {}
+            for _ in range(rows.shape[0])
+        ] if precision_digits is not None else []
+        shared_max_orders = self._ibp_shared_max_orders(sector, formula)
+        shared_output_pairs = self._ibp_shared_output_pairs(sector, formula)
+        if precision_digits is None:
+            shared_batch_g_cache.update(
+                self._precompute_ibp_shared_batch_g_cache(
+                    sector,
+                    rows,
+                    shared_max_orders,
+                    shared_output_pairs,
+                    timing,
+                )
+            )
+            # Many IBP decompositions contain hundreds of child terms, but only
+            # a small number of distinct logarithmic endpoint-projector
+            # signatures.  Build the child input rows term-by-term because the
+            # derivative/boundary maps differ, then evaluate equal signatures in
+            # one Symbolica batch.  This preserves the algebra while avoiding
+            # hundreds of tiny evaluator calls in hard multi-axis sectors.
+            terms_by_child: dict[
+                tuple[Any, ...],
+                list[tuple[IBPEndpointProjectorTerm, np.ndarray]],
+            ] = {}
+            for term in formula.ibp_terms:
+                child = formula.child_formulas[term.child_signature]
+                child_inputs = self._ibp_child_input_matrix(
+                    sector,
+                    rows,
+                    child,
+                    term,
+                    timing,
+                    shared_g_cache=shared_batch_g_cache,
+                    shared_max_orders=shared_max_orders,
+                    shared_output_pairs=shared_output_pairs,
+                )
+                terms_by_child.setdefault(term.child_signature, []).append(
+                    (term, child_inputs)
+                )
+            for child_signature, entries in terms_by_child.items():
+                child = formula.child_formulas[child_signature]
+                stacked_inputs = np.vstack([inputs for _term, inputs in entries])
+                stacked_values = child.evaluate_complex_batch(stacked_inputs, timing)
+                offset = 0
+                for term, child_inputs in entries:
+                    width = child_inputs.shape[0]
+                    child_values = stacked_values[offset : offset + width, :]
+                    offset += width
+                    coeffs += self._convolve_regular_prefactor_array(
+                        child_values,
+                        term.prefactor_coeffs,
+                    )
+        else:
+            for term in formula.ibp_terms:
+                child = formula.child_formulas[term.child_signature]
+                child_coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+                for row_index, row in enumerate(rows):
+                    child_input = self._ibp_child_input_prec_row(
+                        sector,
+                        row,
+                        child,
+                        term,
+                        int(precision_digits),
+                        timing,
+                        shared_g_cache=shared_prec_g_caches[row_index],
+                        shared_max_orders=shared_max_orders,
+                    )
+                    values = child.evaluate_complex_prec(
+                        child_input,
+                        int(precision_digits),
+                        timing,
+                    )
+                    child_coeffs[row_index, :] = self._convolve_regular_prefactor_list(
+                        values,
+                        term.prefactor_coeffs,
+                    )
+                coeffs += child_coeffs
+        return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
+
     def _residual_taylor_series_batch(
         self,
         sector: SectorDefinition,
@@ -2567,14 +6180,40 @@ class SectorProcessor:
         ordinary numerical quotient is used.
         """
         rows = np.asarray(endpoint_rows, dtype=float)
+        taylor = taylor_batch(sector, rows, timing)
+        return self._residual_taylor_series_from_values(
+            sector,
+            rows,
+            monomial_powers,
+            taylor,
+            zero_positions,
+            max_orders,
+        )
+
+    def _residual_taylor_series_from_values(
+        self,
+        sector: SectorDefinition,
+        endpoint_rows: np.ndarray,
+        monomial_powers: list[int],
+        taylor: np.ndarray,
+        zero_positions: set[int],
+        max_orders: list[int],
+        taylor_index: dict[tuple[int, ...], int] | None = None,
+        residual_multis: set[tuple[int, ...]] | None = None,
+    ) -> MultiSeries:
+        """Taylor-expand a residual from already-composed polynomial jets."""
+        rows = np.asarray(endpoint_rows, dtype=float)
         n_rows = rows.shape[0]
         axes = list(sector.singular_axes)
         axis_position = {axis: position for position, axis in enumerate(axes)}
-        taylor = taylor_batch(sector, rows, timing)
-        series: MultiSeries = {}
-        for residual_multi in _multi_indices(max_orders):
-            polynomial_multi = [0 for _ in axes]
-            denominator = np.ones(n_rows, dtype=float)
+        polynomial_series: MultiSeries = {}
+        requested_multis = (
+            sorted(residual_multis, key=lambda item: (sum(item), item))
+            if residual_multis is not None
+            else _multi_indices(max_orders)
+        )
+        for residual_multi in requested_multis:
+            polynomial_multi = list(residual_multi)
             for axis, power in enumerate(monomial_powers):
                 position = axis_position.get(axis)
                 if position is not None and position in zero_positions:
@@ -2585,13 +6224,149 @@ class SectorProcessor:
                     # when m=0.  This is essential for multi-loop sectors where
                     # one polynomial creates the endpoint pole while the other
                     # remains regular but varies along the same coordinate.
-                    polynomial_multi[position] = int(power) + int(residual_multi[position])
-                else:
-                    if power:
-                        denominator *= rows[:, axis] ** int(power)
-            series[residual_multi] = (
-                taylor[:, sector.dual_index(tuple(polynomial_multi))] / denominator
-            )
+                    polynomial_multi[position] += int(power)
+            polynomial_multi_tuple = tuple(polynomial_multi)
+            if taylor_index is None:
+                column = sector.dual_index(polynomial_multi_tuple)
+            else:
+                column = taylor_index[polynomial_multi_tuple]
+            polynomial_series[residual_multi] = taylor[:, column]
+        denominator_series = self._monomial_taylor_series_batch(
+            sector,
+            rows,
+            monomial_powers,
+            zero_positions,
+            max_orders,
+        )
+        if not denominator_series:
+            return polynomial_series
+        zero_multi = _zero_multi(len(max_orders))
+        if set(denominator_series) <= {zero_multi}:
+            denominator = denominator_series.get(zero_multi)
+            if denominator is None:
+                return polynomial_series
+            return {
+                multi_index: values / denominator
+                for multi_index, values in polynomial_series.items()
+            }
+        return _series_mul(
+            polynomial_series,
+            _series_pow_real(denominator_series, -1.0, max_orders, n_rows),
+            max_orders,
+        )
+
+    def _monomial_taylor_series_batch(
+        self,
+        sector: SectorDefinition,
+        endpoint_rows: np.ndarray,
+        monomial_powers: list[int],
+        zero_positions: set[int],
+        max_orders: list[int],
+    ) -> MultiSeries:
+        """Taylor-expand the nonzero part of an extracted monomial."""
+        rows = np.asarray(endpoint_rows, dtype=float)
+        n_rows = rows.shape[0]
+        axes = list(sector.singular_axes)
+        axis_position = {axis: position for position, axis in enumerate(axes)}
+        series = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+        for axis, power_value in enumerate(monomial_powers):
+            power = int(power_value)
+            if power == 0:
+                continue
+            position = axis_position.get(axis)
+            if position is not None and position in zero_positions:
+                continue
+            if position is None:
+                factor = _series_constant(rows[:, axis] ** power, max_orders, n_rows)
+            else:
+                factor: MultiSeries = {}
+                max_order = min(power, int(max_orders[position]))
+                for order in range(max_order + 1):
+                    multi = [0 for _ in max_orders]
+                    multi[position] = order
+                    coefficient = math.comb(power, order) * rows[:, axis] ** (power - order)
+                    factor[tuple(multi)] = coefficient.astype(np.complex128)
+            series = _series_mul(series, factor, max_orders)
+        return series
+
+    def _residual_taylor_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        endpoint_row: np.ndarray,
+        monomial_powers: list[int],
+        taylor_values: list[ComplexPrecise],
+        zero_positions: set[int],
+        max_orders: list[int],
+        precision_digits: int,
+    ) -> PrecSeries:
+        """Decimal analogue of ``_residual_taylor_series_batch`` for one row."""
+        axes = list(sector.singular_axes)
+        axis_position = {axis: position for position, axis in enumerate(axes)}
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(endpoint_row, dtype=float)]
+        polynomial_series: PrecSeries = {}
+        for residual_multi in _multi_indices(max_orders):
+            polynomial_multi = list(residual_multi)
+            for axis, power_value in enumerate(monomial_powers):
+                power = int(power_value)
+                position = axis_position.get(axis)
+                if position is not None and position in zero_positions:
+                    polynomial_multi[position] += power
+            coefficient = taylor_values[sector.dual_index(tuple(polynomial_multi))]
+            polynomial_series[residual_multi] = coefficient
+        denominator_series = self._monomial_taylor_series_prec_row(
+            sector,
+            endpoint_row,
+            monomial_powers,
+            zero_positions,
+            max_orders,
+            precision_digits,
+        )
+        return _prec_series_mul(
+            polynomial_series,
+            _prec_series_pow_real(
+                denominator_series,
+                -1.0,
+                max_orders,
+                precision_digits,
+            ),
+            max_orders,
+        )
+
+    def _monomial_taylor_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        endpoint_row: np.ndarray,
+        monomial_powers: list[int],
+        zero_positions: set[int],
+        max_orders: list[int],
+        precision_digits: int,
+    ) -> PrecSeries:
+        """Decimal Taylor expansion of the nonzero monomial denominator."""
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(endpoint_row, dtype=float)]
+        axes = list(sector.singular_axes)
+        axis_position = {axis: position for position, axis in enumerate(axes)}
+        series = _prec_series_constant(_pc_one(), max_orders)
+        for axis, power_value in enumerate(monomial_powers):
+            power = int(power_value)
+            if power == 0:
+                continue
+            position = axis_position.get(axis)
+            if position is not None and position in zero_positions:
+                continue
+            factor: PrecSeries = {}
+            if position is None:
+                factor = _prec_series_constant(_pc_int_power(coords[axis], power), max_orders)
+            else:
+                for order in range(min(power, int(max_orders[position])) + 1):
+                    multi = [0 for _ in max_orders]
+                    multi[position] = order
+                    coeff = _pc_scale(
+                        _pc_int_power(coords[axis], power - order),
+                        math.comb(power, order),
+                        precision_digits,
+                    )
+                    factor[tuple(multi)] = coeff
+            series = _prec_series_mul(series, factor, max_orders)
         return series
 
     def _jacobian_taylor_series_batch(
@@ -2616,6 +6391,221 @@ class SectorProcessor:
             for multi in _multi_indices(max_orders)
         }
 
+    def _jacobian_taylor_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        endpoint_row: np.ndarray,
+        max_orders: list[int],
+        precision_digits: int,
+        timing: HotPathTiming,
+    ) -> PrecSeries:
+        """Taylor-expand the regular sector Jacobian at one precise point."""
+        taylor = sector.jacobian_taylor_complex_prec(endpoint_row, precision_digits, timing)
+        return {
+            multi: taylor[sector.dual_index(multi)]
+            for multi in _multi_indices(max_orders)
+        }
+
+    def _g_taylor_eps_series_formula_batch(
+        self,
+        sector: SectorDefinition,
+        endpoint_rows: np.ndarray,
+        zero_positions: set[int],
+        max_orders: list[int],
+        timing: HotPathTiming,
+        output_pairs: tuple[tuple[tuple[int, ...], int], ...] | None = None,
+    ) -> list[MultiSeries]:
+        """Evaluate regular ``g_s`` Taylor coefficients with Symbolica.
+
+        The inputs remain black-box Taylor coefficients of U, F, and the
+        regular Jacobian.  The prepared formula owns the downstream algebra:
+        monomial residuals, U/F powers, logs, and epsilon expansion.
+        """
+        rows = np.asarray(endpoint_rows, dtype=float)
+        n_rows = rows.shape[0]
+        zero_tuple = tuple(sorted(int(position) for position in zero_positions))
+        max_tuple = tuple(int(order) for order in max_orders)
+        formula = self.topology.regular_taylor_formula_for(
+            sector,
+            zero_positions=zero_tuple,
+            max_orders=max_tuple,
+            output_pairs=output_pairs,
+        )
+        formula_version = int(formula.signature[1]) if len(formula.signature) > 1 else 1
+        canonical_positions = _regular_taylor_canonical_positions(max_tuple)
+        formula_shape = _regular_formula_dual_shape(formula)
+        if len(formula.signature) > 1 and int(formula.signature[1]) <= 1:
+            source_shape = formula_shape
+        elif formula_version >= 3:
+            residual_multis = {
+                _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                for kind, multi in formula.input_layout
+                if kind in {"u", "f"}
+            }
+            jacobian_multis = {
+                _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                for kind, multi in formula.input_layout
+                if kind == "j"
+            }
+            source_shape = self.topology.sparse_regular_source_shape_from_multis(
+                sector,
+                zero_tuple,
+                residual_multis,
+                jacobian_multis,
+            )
+        else:
+            source_shape = self.topology.regular_taylor_source_shape(
+                sector,
+                zero_tuple,
+                max_tuple,
+            )
+        formula_index = {multi_index: index for index, multi_index in enumerate(formula_shape)}
+        source_index = {multi_index: index for index, multi_index in enumerate(source_shape)}
+
+        j_taylor = sector.jacobian_taylor_batch_for_shape(rows, source_shape, timing)
+        if formula.signature in self.topology._regular_taylor_dual_signatures:
+            u_taylor = self.topology._taylor_batch(
+                sector,
+                rows,
+                self.topology.u_dual_evaluator(source_shape),
+                evaluator_shape=source_shape,
+                timing=timing,
+            )
+            f_taylor = self.topology._taylor_batch(
+                sector,
+                rows,
+                self.topology.f_dual_evaluator(source_shape),
+                evaluator_shape=source_shape,
+                timing=timing,
+            )
+        elif self.topology.dual_evaluator_mode == "symbolic-derivatives":
+            u_taylor, f_taylor = self.topology._symbolic_derivative_taylor_pair_batch(
+                sector,
+                rows,
+                timing,
+                output_shape=source_shape,
+            )
+        else:
+            evaluator_shape, output_columns = self.topology._dual_evaluator_shape_and_columns(sector)
+            if tuple(evaluator_shape) == tuple(source_shape):
+                u_taylor = self.topology.u_taylor_batch(sector, rows, timing)
+                f_taylor = self.topology.f_taylor_batch(sector, rows, timing)
+            else:
+                u_taylor = self.topology._taylor_batch(
+                    sector,
+                    rows,
+                    self.topology.u_dual_evaluator(source_shape),
+                    evaluator_shape=source_shape,
+                    timing=timing,
+                )
+                f_taylor = self.topology._taylor_batch(
+                    sector,
+                    rows,
+                    self.topology.f_dual_evaluator(source_shape),
+                    evaluator_shape=source_shape,
+                    timing=timing,
+                )
+
+        input_matrix = np.zeros((n_rows, len(formula.input_names)), dtype=np.complex128)
+        offset = 0
+        if len(formula.signature) > 1 and int(formula.signature[1]) >= 2:
+            # The lower-signature regular formula is sector-agnostic.  It
+            # receives residual Taylor coefficients that have already had the
+            # declared U/F endpoint monomials divided out, plus the nonsingular
+            # monomial prefactor/log evaluated at the endpoint row.
+            monomial_pref, monomial_log = self._regular_monomial_base_log_batch(
+                sector,
+                endpoint_rows,
+            )
+            input_matrix[:, offset] = monomial_pref
+            offset += 1
+            input_matrix[:, offset] = monomial_log
+            offset += 1
+            u_series = self._residual_taylor_series_from_values(
+                sector=sector,
+                endpoint_rows=endpoint_rows,
+                monomial_powers=sector.u_monomial_powers,
+                taylor=u_taylor,
+                zero_positions=zero_positions,
+                max_orders=max_orders,
+                taylor_index=source_index,
+                residual_multis=(
+                    residual_multis
+                    if formula_version >= 3
+                    else None
+                ),
+            )
+            f_series = self._residual_taylor_series_from_values(
+                sector=sector,
+                endpoint_rows=endpoint_rows,
+                monomial_powers=sector.f_monomial_powers,
+                taylor=f_taylor,
+                zero_positions=zero_positions,
+                max_orders=max_orders,
+                taylor_index=source_index,
+                residual_multis=(
+                    residual_multis
+                    if formula_version >= 3
+                    else None
+                ),
+            )
+
+            for kind, multi_index in formula.input_layout:
+                canonical_multi = tuple(multi_index)
+                multi = (
+                    _regular_taylor_canonical_to_original(canonical_multi, canonical_positions)
+                    if formula_version >= 2
+                    else canonical_multi
+                )
+                if kind == "j":
+                    input_matrix[:, offset] = j_taylor[:, source_index[multi]]
+                elif kind == "u":
+                    input_matrix[:, offset] = _series_coefficient(
+                        u_series,
+                        multi,
+                        n_rows,
+                    )
+                elif kind == "f":
+                    input_matrix[:, offset] = _series_coefficient(
+                        f_series,
+                        multi,
+                        n_rows,
+                    )
+                else:
+                    raise RuntimeError(f"{sector.name}: unknown regular input kind {kind!r}")
+                offset += 1
+        else:
+            input_matrix[:, : sector.integration_dim] = rows.astype(np.complex128)
+            offset += sector.integration_dim
+            source_by_kind = {
+                "j": j_taylor,
+                "u": u_taylor,
+                "f": f_taylor,
+            }
+            for kind, multi_index in formula.input_layout:
+                values = source_by_kind[kind]
+                input_matrix[:, offset] = values[:, formula_index[tuple(multi_index)]]
+                offset += 1
+        if offset != len(formula.input_names):
+            raise RuntimeError(
+                f"{sector.name}: regular Taylor input mismatch: filled {offset}, "
+                f"expected {len(formula.input_names)}"
+            )
+
+        values = formula.evaluate_complex_batch(input_matrix, timing)
+        out: list[MultiSeries] = [
+            {} for _ in range(self.topology.coefficient_count)
+        ]
+        for column, (multi_index, regular_order) in enumerate(formula.output_layout):
+            canonical_multi = tuple(multi_index)
+            multi = (
+                _regular_taylor_canonical_to_original(canonical_multi, canonical_positions)
+                if formula_version >= 2
+                else canonical_multi
+            )
+            out[int(regular_order)][multi] = values[:, column]
+        return out
+
     def _g_taylor_eps_series_batch(
         self,
         sector: SectorDefinition,
@@ -2623,6 +6613,9 @@ class SectorProcessor:
         zero_positions: set[int],
         taylor_orders: list[int],
         timing: HotPathTiming,
+        boundary_positions: set[int] | None = None,
+        max_orders_are_explicit: bool = False,
+        output_pairs: tuple[tuple[tuple[int, ...], int], ...] | None = None,
     ) -> list[MultiSeries]:
         """Taylor-expand the regular function ``g_s(y,eps)`` at endpoints.
 
@@ -2632,64 +6625,280 @@ class SectorProcessor:
         rows = np.asarray(y_values, dtype=float)
         n_rows = rows.shape[0]
         axes = list(sector.singular_axes)
-        max_orders = [
-            int(taylor_orders[position]) if position in zero_positions else 0
-            for position in range(len(axes))
-        ]
+        if max_orders_are_explicit:
+            max_orders = [int(order) for order in taylor_orders]
+        else:
+            max_orders = [
+                int(taylor_orders[position]) if position in zero_positions else 0
+                for position in range(len(axes))
+            ]
         endpoint_rows = rows.copy()
         for position in zero_positions:
             endpoint_rows[:, axes[position]] = 0.0
+        for position in boundary_positions or set():
+            endpoint_rows[:, axes[position]] = 1.0
 
-        if not zero_positions and not any(max_orders):
+        sparse_residual_multis: set[tuple[int, ...]] | None = None
+        sparse_jacobian_multis: set[tuple[int, ...]] | None = None
+        sparse_source_shape: list[tuple[int, ...]] | None = None
+        sparse_jacobian_shape: list[tuple[int, ...]] | None = None
+        sparse_jacobian_index: dict[tuple[int, ...], int] | None = None
+        sparse_u_source_shape: list[tuple[int, ...]] | None = None
+        sparse_u_source_index: dict[tuple[int, ...], int] | None = None
+        sparse_f_source_shape: list[tuple[int, ...]] | None = None
+        sparse_f_source_index: dict[tuple[int, ...], int] | None = None
+        if output_pairs:
+            requested_multis = [
+                tuple(int(value) for value in multi_index)
+                for multi_index, _regular_order in output_pairs
+            ]
+            sparse_residual_multis = _ancestor_closed_multi_set(
+                requested_multis,
+                len(max_orders),
+            )
+            sparse_jacobian_multis = set(sparse_residual_multis)
+            if self.topology.dual_evaluator_mode != "symbolic-derivatives":
+                sparse_source_shape = self.topology.sparse_regular_source_shape_from_multis(
+                    sector,
+                    tuple(sorted(int(position) for position in zero_positions)),
+                    sparse_residual_multis,
+                    sparse_jacobian_multis,
+                )
+            sparse_jacobian_shape = _ordered_multi_shape(
+                set(sparse_jacobian_multis),
+                len(max_orders),
+            )
+            sparse_jacobian_index = {
+                tuple(multi_index): index
+                for index, multi_index in enumerate(sparse_jacobian_shape)
+            }
+            sparse_u_source_shape = self.topology.sparse_regular_source_shape_for_monomial_powers(
+                sector,
+                tuple(sorted(int(position) for position in zero_positions)),
+                sparse_residual_multis,
+                sector.u_monomial_powers,
+            )
+            sparse_u_source_index = {
+                tuple(multi_index): index
+                for index, multi_index in enumerate(sparse_u_source_shape)
+            }
+            sparse_f_source_shape = self.topology.sparse_regular_source_shape_for_monomial_powers(
+                sector,
+                tuple(sorted(int(position) for position in zero_positions)),
+                sparse_residual_multis,
+                sector.f_monomial_powers,
+            )
+            sparse_f_source_index = {
+                tuple(multi_index): index
+                for index, multi_index in enumerate(sparse_f_source_shape)
+            }
+
+        if self.subtraction_backend == "projector-formula":
+            signature = self.topology.regular_taylor_signature(
+                sector,
+                zero_positions=tuple(sorted(int(position) for position in zero_positions)),
+                max_orders=tuple(int(order) for order in max_orders),
+                output_pairs=output_pairs,
+            )
+            if signature in self.topology._regular_taylor_formulas:
+                return self._g_taylor_eps_series_formula_batch(
+                    sector,
+                    endpoint_rows,
+                    zero_positions,
+                    max_orders,
+                    timing,
+                    output_pairs=output_pairs,
+                )
+
+        if not zero_positions and not any(max_orders) and not boundary_positions:
             coeffs = self._g_coeffs_batch(sector, endpoint_rows, timing)
             return [
                 _series_constant(coeffs[:, order], max_orders, n_rows)
                 for order in range(self.topology.coefficient_count)
             ]
 
-        jacobian_series = self._jacobian_taylor_series_batch(
-            sector, endpoint_rows, max_orders, timing
-        )
-        u_series = self._residual_taylor_series_batch(
-            sector=sector,
-            endpoint_rows=endpoint_rows,
-            monomial_powers=sector.u_monomial_powers,
-            taylor_batch=self.topology.u_taylor_batch,
-            zero_positions=zero_positions,
-            max_orders=max_orders,
-            timing=timing,
-        )
-        f_series = self._residual_taylor_series_batch(
-            sector=sector,
-            endpoint_rows=endpoint_rows,
-            monomial_powers=sector.f_monomial_powers,
-            taylor_batch=self.topology.f_taylor_batch,
-            zero_positions=zero_positions,
-            max_orders=max_orders,
-            timing=timing,
-        )
-        pref_series = _series_mul(
-            jacobian_series,
-            _series_mul(
-                _series_pow_real(u_series, self.topology.u_power_base, max_orders, n_rows),
-                _series_pow_real(f_series, -self.topology.f_power_base, max_orders, n_rows),
+        if sparse_jacobian_shape is not None and sparse_jacobian_index is not None:
+            j_taylor = sector.jacobian_taylor_batch_for_shape(
+                endpoint_rows,
+                sparse_jacobian_shape,
+                timing,
+            )
+            jacobian_series = {
+                multi_index: j_taylor[:, sparse_jacobian_index[multi_index]]
+                for multi_index in sparse_jacobian_multis or set()
+            }
+        else:
+            jacobian_series = self._jacobian_taylor_series_batch(
+                sector, endpoint_rows, max_orders, timing
+            )
+        if self.topology.dual_evaluator_mode == "symbolic-derivatives":
+            u_taylor, f_taylor = self.topology._symbolic_derivative_taylor_pair_batch(
+                sector,
+                endpoint_rows,
+                timing,
+                output_shape=sparse_source_shape,
+                u_output_shape=sparse_u_source_shape,
+                f_output_shape=sparse_f_source_shape,
+            )
+            u_series = self._residual_taylor_series_from_values(
+                sector=sector,
+                endpoint_rows=endpoint_rows,
+                monomial_powers=sector.u_monomial_powers,
+                taylor=u_taylor,
+                zero_positions=zero_positions,
+                max_orders=max_orders,
+                taylor_index=sparse_u_source_index,
+                residual_multis=sparse_residual_multis,
+            )
+            f_series = self._residual_taylor_series_from_values(
+                sector=sector,
+                endpoint_rows=endpoint_rows,
+                monomial_powers=sector.f_monomial_powers,
+                taylor=f_taylor,
+                zero_positions=zero_positions,
+                max_orders=max_orders,
+                taylor_index=sparse_f_source_index,
+                residual_multis=sparse_residual_multis,
+            )
+        else:
+            if (
+                sparse_u_source_shape is not None
+                and sparse_u_source_index is not None
+                and sparse_f_source_shape is not None
+                and sparse_f_source_index is not None
+            ):
+                u_taylor = self.topology._taylor_batch(
+                    sector,
+                    endpoint_rows,
+                    self.topology.u_dual_evaluator(sparse_u_source_shape),
+                    evaluator_shape=sparse_u_source_shape,
+                    timing=timing,
+                )
+                f_taylor = self.topology._taylor_batch(
+                    sector,
+                    endpoint_rows,
+                    self.topology.f_dual_evaluator(sparse_f_source_shape),
+                    evaluator_shape=sparse_f_source_shape,
+                    timing=timing,
+                )
+                u_series = self._residual_taylor_series_from_values(
+                    sector=sector,
+                    endpoint_rows=endpoint_rows,
+                    monomial_powers=sector.u_monomial_powers,
+                    taylor=u_taylor,
+                    zero_positions=zero_positions,
+                    max_orders=max_orders,
+                    taylor_index=sparse_u_source_index,
+                    residual_multis=sparse_residual_multis,
+                )
+                f_series = self._residual_taylor_series_from_values(
+                    sector=sector,
+                    endpoint_rows=endpoint_rows,
+                    monomial_powers=sector.f_monomial_powers,
+                    taylor=f_taylor,
+                    zero_positions=zero_positions,
+                    max_orders=max_orders,
+                    taylor_index=sparse_f_source_index,
+                    residual_multis=sparse_residual_multis,
+                )
+            else:
+                u_series = self._residual_taylor_series_batch(
+                    sector=sector,
+                    endpoint_rows=endpoint_rows,
+                    monomial_powers=sector.u_monomial_powers,
+                    taylor_batch=self.topology.u_taylor_batch,
+                    zero_positions=zero_positions,
+                    max_orders=max_orders,
+                    timing=timing,
+                )
+                f_series = self._residual_taylor_series_batch(
+                    sector=sector,
+                    endpoint_rows=endpoint_rows,
+                    monomial_powers=sector.f_monomial_powers,
+                    taylor_batch=self.topology.f_taylor_batch,
+                    zero_positions=zero_positions,
+                    max_orders=max_orders,
+                    timing=timing,
+                )
+        allowed_multis = sparse_residual_multis
+        if allowed_multis is not None:
+            u_power_series, u_log_series = _series_pow_real_and_log_allowed(
+                u_series,
+                self.topology.u_power_base,
                 max_orders,
-            ),
-            max_orders,
-        )
+                n_rows,
+                allowed_multis,
+            )
+            f_power_series, f_log_series = _series_pow_real_and_log_allowed(
+                f_series,
+                -self.topology.f_power_base,
+                max_orders,
+                n_rows,
+                allowed_multis,
+            )
+            pref_series = _series_mul_allowed(
+                _series_filter_allowed(jacobian_series, allowed_multis),
+                _series_mul_allowed(
+                    u_power_series,
+                    f_power_series,
+                    allowed_multis,
+                ),
+                allowed_multis,
+            )
+        else:
+            pref_series = _series_mul(
+                jacobian_series,
+                _series_mul(
+                    _series_pow_real(u_series, self.topology.u_power_base, max_orders, n_rows),
+                    _series_pow_real(f_series, -self.topology.f_power_base, max_orders, n_rows),
+                    max_orders,
+                ),
+                max_orders,
+            )
         monomial_pref, monomial_log = self._regular_monomial_base_log_batch(sector, endpoint_rows)
-        pref_series = _series_mul(
-            _series_constant(monomial_pref, max_orders, n_rows),
-            pref_series,
-            max_orders,
-        )
-        log_series = _series_add(
-            _series_constant(monomial_log, max_orders, n_rows),
-            _series_add(
-                _series_scale(_series_log(u_series, max_orders, n_rows), self.topology.eps_log_u_coeff),
-                _series_scale(_series_log(f_series, max_orders, n_rows), self.topology.eps_log_f_coeff),
-            ),
-        )
+        if allowed_multis is not None:
+            pref_series = _series_mul_allowed(
+                _series_constant(monomial_pref, max_orders, n_rows),
+                pref_series,
+                allowed_multis,
+            )
+            log_series = _series_filter_allowed(
+                _series_add(
+                    _series_constant(monomial_log, max_orders, n_rows),
+                    _series_add(
+                        _series_scale(
+                            u_log_series,
+                            self.topology.eps_log_u_coeff,
+                        ),
+                        _series_scale(
+                            f_log_series,
+                            self.topology.eps_log_f_coeff,
+                        ),
+                    ),
+                ),
+                allowed_multis,
+            )
+        else:
+            pref_series = _series_mul(
+                _series_constant(monomial_pref, max_orders, n_rows),
+                pref_series,
+                max_orders,
+            )
+            log_series = _series_add(
+                _series_constant(monomial_log, max_orders, n_rows),
+                _series_add(
+                    _series_scale(_series_log(u_series, max_orders, n_rows), self.topology.eps_log_u_coeff),
+                    _series_scale(_series_log(f_series, max_orders, n_rows), self.topology.eps_log_f_coeff),
+                ),
+            )
+
+        requested_multis_by_order: dict[int, set[tuple[int, ...]]] | None = None
+        if output_pairs is not None:
+            requested_multis_by_order = {}
+            for multi_index, regular_order in output_pairs:
+                requested_multis_by_order.setdefault(int(regular_order), set()).add(
+                    tuple(int(value) for value in multi_index)
+                )
 
         out: list[MultiSeries] = []
         log_power = _series_constant(1.0 + 0.0j, max_orders, n_rows)
@@ -2697,14 +6906,251 @@ class SectorProcessor:
         for order in range(self.topology.coefficient_count):
             if order > 0:
                 factorial *= float(order)
-                log_power = _series_mul(log_power, log_series, max_orders)
+                log_power = (
+                    _series_mul_allowed(log_power, log_series, allowed_multis)
+                    if allowed_multis is not None
+                    else _series_mul(log_power, log_series, max_orders)
+                )
+            final_allowed = (
+                requested_multis_by_order.get(order, set())
+                if requested_multis_by_order is not None
+                else allowed_multis
+            )
+            if requested_multis_by_order is not None and not final_allowed:
+                out.append({})
+                continue
+            product_series = (
+                _series_mul_allowed(pref_series, log_power, final_allowed)
+                if final_allowed is not None
+                else _series_mul(pref_series, log_power, max_orders)
+            )
             out.append(
                 _series_scale(
-                    _series_mul(pref_series, log_power, max_orders),
+                    product_series,
                     1.0 / factorial,
                 )
             )
         return out
+
+    def _g_taylor_eps_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        y: np.ndarray,
+        zero_positions: set[int],
+        taylor_orders: list[int],
+        precision_digits: int,
+        timing: HotPathTiming,
+        boundary_positions: set[int] | None = None,
+        max_orders_are_explicit: bool = False,
+    ) -> list[PrecSeries]:
+        """Decimal Taylor/Laurent expansion of the regular function ``g_s``.
+
+        This mirrors ``_g_taylor_eps_series_batch`` but every ingredient is
+        obtained from Symbolica's complex multiprecision evaluator APIs and
+        combined in Decimal arithmetic.  It is intentionally single-row only:
+        the ordinary path remains vectorized and this path is reserved for
+        near-endpoint stability rescue samples.
+        """
+        axes = list(sector.singular_axes)
+        if max_orders_are_explicit:
+            max_orders = [int(order) for order in taylor_orders]
+        else:
+            max_orders = [
+                int(taylor_orders[position]) if position in zero_positions else 0
+                for position in range(len(axes))
+            ]
+        endpoint_row = np.asarray(y, dtype=float).copy()
+        for position in zero_positions:
+            endpoint_row[axes[position]] = 0.0
+        for position in boundary_positions or set():
+            endpoint_row[axes[position]] = 1.0
+
+        if not zero_positions and not any(max_orders) and not boundary_positions:
+            coeffs = self._g_coeffs_prec_row(sector, endpoint_row, precision_digits, timing)
+            return [
+                _prec_series_constant(coeff, max_orders)
+                for coeff in coeffs
+            ]
+
+        jacobian_series = self._jacobian_taylor_series_prec_row(
+            sector,
+            endpoint_row,
+            max_orders,
+            precision_digits,
+            timing,
+        )
+        u_taylor = self.topology.u_taylor_complex_prec(
+            sector,
+            endpoint_row,
+            precision_digits,
+            timing,
+        )
+        f_taylor = self.topology.f_taylor_complex_prec(
+            sector,
+            endpoint_row,
+            precision_digits,
+            timing,
+        )
+        u_series = self._residual_taylor_series_prec_row(
+            sector=sector,
+            endpoint_row=endpoint_row,
+            monomial_powers=sector.u_monomial_powers,
+            taylor_values=u_taylor,
+            zero_positions=zero_positions,
+            max_orders=max_orders,
+            precision_digits=precision_digits,
+        )
+        f_series = self._residual_taylor_series_prec_row(
+            sector=sector,
+            endpoint_row=endpoint_row,
+            monomial_powers=sector.f_monomial_powers,
+            taylor_values=f_taylor,
+            zero_positions=zero_positions,
+            max_orders=max_orders,
+            precision_digits=precision_digits,
+        )
+        pref_series = _prec_series_mul(
+            jacobian_series,
+            _prec_series_mul(
+                _prec_series_pow_real(
+                    u_series,
+                    self.topology.u_power_base,
+                    max_orders,
+                    precision_digits,
+                ),
+                _prec_series_pow_real(
+                    f_series,
+                    -self.topology.f_power_base,
+                    max_orders,
+                    precision_digits,
+                ),
+                max_orders,
+            ),
+            max_orders,
+        )
+        monomial_pref, monomial_log = self._regular_monomial_base_log_prec(
+            sector,
+            endpoint_row,
+            precision_digits,
+        )
+        pref_series = _prec_series_mul(
+            _prec_series_constant(monomial_pref, max_orders),
+            pref_series,
+            max_orders,
+        )
+        log_series = _prec_series_add(
+            _prec_series_constant(monomial_log, max_orders),
+            _prec_series_add(
+                _prec_series_scale(
+                    _prec_series_log(u_series, max_orders, precision_digits),
+                    self.topology.eps_log_u_coeff,
+                    precision_digits,
+                ),
+                _prec_series_scale(
+                    _prec_series_log(f_series, max_orders, precision_digits),
+                    self.topology.eps_log_f_coeff,
+                    precision_digits,
+                ),
+            ),
+        )
+
+        out: list[PrecSeries] = []
+        log_power = _prec_series_constant(_pc_one(), max_orders)
+        factorial = Decimal(1)
+        for order in range(self.topology.coefficient_count):
+            if order > 0:
+                factorial *= Decimal(order)
+                log_power = _prec_series_mul(log_power, log_series, max_orders)
+            out.append(
+                _prec_series_scale(
+                    _prec_series_mul(pref_series, log_power, max_orders),
+                    Decimal(1) / factorial,
+                    precision_digits,
+                )
+            )
+        return out
+
+    def _g_coeffs_prec_row(
+        self,
+        sector: SectorDefinition,
+        y: np.ndarray,
+        precision_digits: int,
+        timing: HotPathTiming,
+    ) -> list[ComplexPrecise]:
+        """High-precision scalar regular-function coefficients for one point."""
+        max_orders = [0 for _ in sector.singular_axes]
+        jacobian_series = self._jacobian_taylor_series_prec_row(
+            sector,
+            np.asarray(y, dtype=float),
+            max_orders,
+            precision_digits,
+            timing,
+        )
+        u_taylor = self.topology.u_taylor_complex_prec(sector, y, precision_digits, timing)
+        f_taylor = self.topology.f_taylor_complex_prec(sector, y, precision_digits, timing)
+        u_series = self._residual_taylor_series_prec_row(
+            sector,
+            np.asarray(y, dtype=float),
+            sector.u_monomial_powers,
+            u_taylor,
+            set(),
+            max_orders,
+            precision_digits,
+        )
+        f_series = self._residual_taylor_series_prec_row(
+            sector,
+            np.asarray(y, dtype=float),
+            sector.f_monomial_powers,
+            f_taylor,
+            set(),
+            max_orders,
+            precision_digits,
+        )
+        pref_series = _prec_series_mul(
+            jacobian_series,
+            _prec_series_mul(
+                _prec_series_pow_real(
+                    u_series,
+                    self.topology.u_power_base,
+                    max_orders,
+                    precision_digits,
+                ),
+                _prec_series_pow_real(
+                    f_series,
+                    -self.topology.f_power_base,
+                    max_orders,
+                    precision_digits,
+                ),
+                max_orders,
+            ),
+            max_orders,
+        )
+        monomial_pref, monomial_log = self._regular_monomial_base_log_prec(
+            sector,
+            y,
+            precision_digits,
+        )
+        pref = _pc_mul(
+            monomial_pref,
+            _prec_series_coefficient(pref_series, _zero_multi(len(max_orders))),
+        )
+        u_const = _prec_series_coefficient(u_series, _zero_multi(len(max_orders)))
+        f_const = _prec_series_coefficient(f_series, _zero_multi(len(max_orders)))
+        exponent_log = _pc_add(
+            monomial_log,
+            _pc_add(
+                _pc_scale(_pc_log(u_const, precision_digits), self.topology.eps_log_u_coeff, precision_digits),
+                _pc_scale(_pc_log(f_const, precision_digits), self.topology.eps_log_f_coeff, precision_digits),
+            ),
+        )
+        coeffs: list[ComplexPrecise] = [pref]
+        power = _pc_one()
+        factorial = Decimal(1)
+        for order in range(1, self.topology.coefficient_count):
+            factorial *= Decimal(order)
+            power = _pc_mul(power, exponent_log)
+            coeffs.append(_pc_mul(pref, _pc_scale(power, Decimal(1) / factorial, precision_digits)))
+        return coeffs
 
     def _recursive_taylor_subtraction_batch(
         self,

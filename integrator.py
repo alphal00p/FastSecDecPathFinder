@@ -205,10 +205,10 @@ def _evaluate_records(
     training = np.zeros(indices.size, dtype=float)
     precision_counts = np.zeros((len(sectors), 3), dtype=np.int64)
 
-    for sector_index, sector in enumerate(sectors):
+    for sector_index in np.unique(sector_indices):
+        sector_index = int(sector_index)
+        sector = sectors[sector_index]
         mask = sector_indices == sector_index
-        if not np.any(mask):
-            continue
         coeffs, train, sector_timing = processor.evaluate_batch(sector, coords[mask])
         timing.absorb(sector_timing)
         precision_counts[sector_index, :] += np.asarray(
@@ -954,10 +954,16 @@ def integrate(
     except KeyboardInterrupt:
         interrupted = True
         if not request.json:
-            print(
-                f"\n{Fore.YELLOW}Keyboard interrupt received; writing partial result "
-                f"with {stats[0].count} accumulated samples.{Style.RESET_ALL}"
-            )
+            try:
+                sample_count = stats[0].count if stats else 0
+                print(
+                    f"\n{Fore.YELLOW}Keyboard interrupt received; writing partial result "
+                    f"with {sample_count} accumulated samples.{Style.RESET_ALL}"
+                )
+            except KeyboardInterrupt:
+                # A second Ctrl-C should not turn graceful interruption into a
+                # traceback; continue returning the accumulated result.
+                pass
         return build_result()
     finally:
         if bar is not None:

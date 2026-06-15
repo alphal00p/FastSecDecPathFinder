@@ -1,0 +1,861 @@
+{
+  "coefficient_layout": [
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0,
+        1
+      ],
+      "multi": [
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 0,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 1,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 2,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 3,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 4,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 5,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        0
+      ],
+      "multi": [
+        0,
+        1
+      ],
+      "regular_order": 6,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [
+        1
+      ],
+      "multi": [
+        1,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 0,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 1,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 2,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 3,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 4,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 5,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 6,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 0,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 1,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 2,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 3,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 4,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 5,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 6,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        1,
+        1
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        1
+      ]
+    }
+  ],
+  "ibp_reduce_to_log_endpoint": true,
+  "input_names": [
+    "ep_y0",
+    "ep_y1",
+    "ep_g_b0_1_znone_m0_0_0",
+    "ep_g_b0_1_znone_m0_0_1",
+    "ep_g_b0_1_znone_m0_0_2",
+    "ep_g_b0_1_znone_m0_0_3",
+    "ep_g_b0_1_znone_m0_0_4",
+    "ep_g_b0_1_znone_m0_0_5",
+    "ep_g_b0_1_znone_m0_0_6",
+    "ep_g_b0_znone_m0_1_0",
+    "ep_g_b0_znone_m0_1_1",
+    "ep_g_b0_znone_m0_1_2",
+    "ep_g_b0_znone_m0_1_3",
+    "ep_g_b0_znone_m0_1_4",
+    "ep_g_b0_znone_m0_1_5",
+    "ep_g_b0_znone_m0_1_6",
+    "ep_g_b0_z1_m0_1_0",
+    "ep_g_b0_z1_m0_1_1",
+    "ep_g_b0_z1_m0_1_2",
+    "ep_g_b0_z1_m0_1_3",
+    "ep_g_b0_z1_m0_1_4",
+    "ep_g_b0_z1_m0_1_5",
+    "ep_g_b0_z1_m0_1_6",
+    "ep_g_b1_znone_m1_0_0",
+    "ep_g_b1_znone_m1_0_1",
+    "ep_g_b1_znone_m1_0_2",
+    "ep_g_b1_znone_m1_0_3",
+    "ep_g_b1_znone_m1_0_4",
+    "ep_g_b1_znone_m1_0_5",
+    "ep_g_b1_znone_m1_0_6",
+    "ep_g_b1_z0_m1_0_0",
+    "ep_g_b1_z0_m1_0_1",
+    "ep_g_b1_z0_m1_0_2",
+    "ep_g_b1_z0_m1_0_3",
+    "ep_g_b1_z0_m1_0_4",
+    "ep_g_b1_z0_m1_0_5",
+    "ep_g_b1_z0_m1_0_6",
+    "ep_g_bnone_znone_m1_1_0",
+    "ep_g_bnone_znone_m1_1_1",
+    "ep_g_bnone_znone_m1_1_2",
+    "ep_g_bnone_znone_m1_1_3",
+    "ep_g_bnone_znone_m1_1_4",
+    "ep_g_bnone_znone_m1_1_5",
+    "ep_g_bnone_znone_m1_1_6",
+    "ep_g_bnone_z1_m1_1_0",
+    "ep_g_bnone_z1_m1_1_1",
+    "ep_g_bnone_z1_m1_1_2",
+    "ep_g_bnone_z1_m1_1_3",
+    "ep_g_bnone_z1_m1_1_4",
+    "ep_g_bnone_z1_m1_1_5",
+    "ep_g_bnone_z1_m1_1_6",
+    "ep_g_bnone_z0_m1_1_0",
+    "ep_g_bnone_z0_m1_1_1",
+    "ep_g_bnone_z0_m1_1_2",
+    "ep_g_bnone_z0_m1_1_3",
+    "ep_g_bnone_z0_m1_1_4",
+    "ep_g_bnone_z0_m1_1_5",
+    "ep_g_bnone_z0_m1_1_6",
+    "ep_g_bnone_z0_1_m1_1_0",
+    "ep_g_bnone_z0_1_m1_1_1",
+    "ep_g_bnone_z0_1_m1_1_2",
+    "ep_g_bnone_z0_1_m1_1_3",
+    "ep_g_bnone_z0_1_m1_1_4",
+    "ep_g_bnone_z0_1_m1_1_5",
+    "ep_g_bnone_z0_1_m1_1_6"
+  ],
+  "laurent_orders": [
+    -6,
+    -5,
+    -4,
+    -3,
+    -2,
+    -1,
+    0
+  ],
+  "output_expressions": [
+    "0",
+    "0",
+    "0",
+    "0",
+    "1/4*ep_g_bnone_z0_1_m1_1_0",
+    "1/2*ep_g_b0_z1_m0_1_0+1/2*ep_g_b1_z0_m1_0_0-ep_g_bnone_z0_1_m1_1_0+1/4*ep_g_bnone_z0_1_m1_1_1-1/2*ep_g_bnone_z1_m1_1_0/ep_y0+1/2*ep_g_bnone_z0_1_m1_1_0/ep_y0-1/2*ep_g_bnone_z0_m1_1_0/ep_y1+1/2*ep_g_bnone_z0_1_m1_1_0/ep_y1",
+    "1/4*ep_g_bnone_z0_1_m1_1_2+ep_g_b0_1_znone_m0_0_0-2*ep_g_b0_z1_m0_1_0+1/2*ep_g_b0_z1_m0_1_1-2*ep_g_b1_z0_m1_0_0+1/2*ep_g_b1_z0_m1_0_1+ep_g_bnone_z1_m1_1_0*(2/ep_y0+log(ep_y0)/ep_y0)+ep_g_bnone_z0_m1_1_0*(2/ep_y1+log(ep_y1)/ep_y1)+3*ep_g_bnone_z0_1_m1_1_0+ep_g_bnone_z0_1_m1_1_0*(-2/ep_y0-log(ep_y0)/ep_y0)+ep_g_bnone_z0_1_m1_1_0*(-2/ep_y1-log(ep_y1)/ep_y1)-ep_g_bnone_z0_1_m1_1_1-ep_g_b1_znone_m1_0_0/ep_y0+ep_g_b1_z0_m1_0_0/ep_y0-1/2*ep_g_bnone_z1_m1_1_1/ep_y0+1/2*ep_g_bnone_z0_1_m1_1_1/ep_y0+ep_g_bnone_znone_m1_1_0/(ep_y0*ep_y1)-ep_g_bnone_z1_m1_1_0/(ep_y0*ep_y1)-ep_g_bnone_z0_m1_1_0/(ep_y0*ep_y1)+ep_g_bnone_z0_1_m1_1_0/(ep_y0*ep_y1)-ep_g_b0_znone_m0_1_0/ep_y1+ep_g_b0_z1_m0_1_0/ep_y1-1/2*ep_g_bnone_z0_m1_1_1/ep_y1+1/2*ep_g_bnone_z0_1_m1_1_1/ep_y1"
+  ],
+  "signature_payload": {
+    "kind": "endpoint-projector",
+    "schema_version": 1,
+    "signature": [
+      "endpoint-projector",
+      2,
+      true,
+      2,
+      [
+        [
+          -2,
+          -2.0
+        ],
+        [
+          -2,
+          -2.0
+        ]
+      ],
+      [
+        1,
+        1
+      ],
+      [
+        -6,
+        -5,
+        -4,
+        -3,
+        -2,
+        -1,
+        0
+      ]
+    ]
+  },
+  "taylor_orders": [
+    1,
+    1
+  ],
+  "zero_subsets": [
+    [],
+    [
+      1
+    ],
+    [
+      0
+    ],
+    [
+      0,
+      1
+    ]
+  ]
+}

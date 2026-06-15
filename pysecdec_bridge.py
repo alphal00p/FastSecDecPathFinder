@@ -418,6 +418,7 @@ def build_dot_bundle(
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
+            ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
         )
     pysecdec_sectors = _decompose(li, request, timings, modules, progress=progress)
     with timings.measure(

@@ -1,0 +1,1816 @@
+{
+  "coefficient_layout": [
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": []
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        1
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        1,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 0,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 1,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 2,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 3,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 4,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 5,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "boundary": [],
+      "multi": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "regular_order": 6,
+      "zero": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "ibp_reduce_to_log_endpoint": false,
+  "input_names": [
+    "ep_y0",
+    "ep_y1",
+    "ep_y2",
+    "ep_y3",
+    "ep_g_bnone_znone_m0_0_0_0_0",
+    "ep_g_bnone_znone_m0_0_0_0_1",
+    "ep_g_bnone_znone_m0_0_0_0_2",
+    "ep_g_bnone_znone_m0_0_0_0_3",
+    "ep_g_bnone_znone_m0_0_0_0_4",
+    "ep_g_bnone_znone_m0_0_0_0_5",
+    "ep_g_bnone_znone_m0_0_0_0_6",
+    "ep_g_bnone_z3_m0_0_0_0_0",
+    "ep_g_bnone_z3_m0_0_0_0_1",
+    "ep_g_bnone_z3_m0_0_0_0_2",
+    "ep_g_bnone_z3_m0_0_0_0_3",
+    "ep_g_bnone_z3_m0_0_0_0_4",
+    "ep_g_bnone_z3_m0_0_0_0_5",
+    "ep_g_bnone_z3_m0_0_0_0_6",
+    "ep_g_bnone_z2_m0_0_0_0_0",
+    "ep_g_bnone_z2_m0_0_0_0_1",
+    "ep_g_bnone_z2_m0_0_0_0_2",
+    "ep_g_bnone_z2_m0_0_0_0_3",
+    "ep_g_bnone_z2_m0_0_0_0_4",
+    "ep_g_bnone_z2_m0_0_0_0_5",
+    "ep_g_bnone_z2_m0_0_0_0_6",
+    "ep_g_bnone_z2_3_m0_0_0_0_0",
+    "ep_g_bnone_z2_3_m0_0_0_0_1",
+    "ep_g_bnone_z2_3_m0_0_0_0_2",
+    "ep_g_bnone_z2_3_m0_0_0_0_3",
+    "ep_g_bnone_z2_3_m0_0_0_0_4",
+    "ep_g_bnone_z2_3_m0_0_0_0_5",
+    "ep_g_bnone_z2_3_m0_0_0_0_6",
+    "ep_g_bnone_z1_m0_0_0_0_0",
+    "ep_g_bnone_z1_m0_0_0_0_1",
+    "ep_g_bnone_z1_m0_0_0_0_2",
+    "ep_g_bnone_z1_m0_0_0_0_3",
+    "ep_g_bnone_z1_m0_0_0_0_4",
+    "ep_g_bnone_z1_m0_0_0_0_5",
+    "ep_g_bnone_z1_m0_0_0_0_6",
+    "ep_g_bnone_z1_3_m0_0_0_0_0",
+    "ep_g_bnone_z1_3_m0_0_0_0_1",
+    "ep_g_bnone_z1_3_m0_0_0_0_2",
+    "ep_g_bnone_z1_3_m0_0_0_0_3",
+    "ep_g_bnone_z1_3_m0_0_0_0_4",
+    "ep_g_bnone_z1_3_m0_0_0_0_5",
+    "ep_g_bnone_z1_3_m0_0_0_0_6",
+    "ep_g_bnone_z1_2_m0_0_0_0_0",
+    "ep_g_bnone_z1_2_m0_0_0_0_1",
+    "ep_g_bnone_z1_2_m0_0_0_0_2",
+    "ep_g_bnone_z1_2_m0_0_0_0_3",
+    "ep_g_bnone_z1_2_m0_0_0_0_4",
+    "ep_g_bnone_z1_2_m0_0_0_0_5",
+    "ep_g_bnone_z1_2_m0_0_0_0_6",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_1",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_2",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_3",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_4",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_5",
+    "ep_g_bnone_z1_2_3_m0_0_0_0_6",
+    "ep_g_bnone_z0_m0_0_0_0_0",
+    "ep_g_bnone_z0_m0_0_0_0_1",
+    "ep_g_bnone_z0_m0_0_0_0_2",
+    "ep_g_bnone_z0_m0_0_0_0_3",
+    "ep_g_bnone_z0_m0_0_0_0_4",
+    "ep_g_bnone_z0_m0_0_0_0_5",
+    "ep_g_bnone_z0_m0_0_0_0_6",
+    "ep_g_bnone_z0_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_3_m0_0_0_0_2",
+    "ep_g_bnone_z0_3_m0_0_0_0_3",
+    "ep_g_bnone_z0_3_m0_0_0_0_4",
+    "ep_g_bnone_z0_3_m0_0_0_0_5",
+    "ep_g_bnone_z0_3_m0_0_0_0_6",
+    "ep_g_bnone_z0_2_m0_0_0_0_0",
+    "ep_g_bnone_z0_2_m0_0_0_0_1",
+    "ep_g_bnone_z0_2_m0_0_0_0_2",
+    "ep_g_bnone_z0_2_m0_0_0_0_3",
+    "ep_g_bnone_z0_2_m0_0_0_0_4",
+    "ep_g_bnone_z0_2_m0_0_0_0_5",
+    "ep_g_bnone_z0_2_m0_0_0_0_6",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_2",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_3",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_4",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_5",
+    "ep_g_bnone_z0_2_3_m0_0_0_0_6",
+    "ep_g_bnone_z0_1_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_m0_0_0_0_2",
+    "ep_g_bnone_z0_1_m0_0_0_0_3",
+    "ep_g_bnone_z0_1_m0_0_0_0_4",
+    "ep_g_bnone_z0_1_m0_0_0_0_5",
+    "ep_g_bnone_z0_1_m0_0_0_0_6",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_2",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_3",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_4",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_5",
+    "ep_g_bnone_z0_1_3_m0_0_0_0_6",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_2",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_3",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_4",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_5",
+    "ep_g_bnone_z0_1_2_m0_0_0_0_6",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_0",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_1",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_2",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_3",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_4",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_5",
+    "ep_g_bnone_z0_1_2_3_m0_0_0_0_6"
+  ],
+  "laurent_orders": [
+    -6,
+    -5,
+    -4,
+    -3,
+    -2,
+    -1,
+    0
+  ],
+  "output_expressions": [
+    "0",
+    "0",
+    "1/36*ep_g_bnone_z0_1_2_3_m0_0_0_0_0",
+    "1/36*ep_g_bnone_z0_1_2_3_m0_0_0_0_1-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_0/ep_y0+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/ep_y0-1/18*ep_g_bnone_z0_2_3_m0_0_0_0_0/ep_y1+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/ep_y1-1/18*ep_g_bnone_z0_1_3_m0_0_0_0_0/ep_y2+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/ep_y2-1/12*ep_g_bnone_z0_1_2_m0_0_0_0_0/ep_y3+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/ep_y3",
+    "1/36*ep_g_bnone_z0_1_2_3_m0_0_0_0_2+1/4*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(ep_y0)/ep_y0-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_1/ep_y0-1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y0)/ep_y0+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/ep_y0+1/6*ep_g_bnone_z2_3_m0_0_0_0_0/(ep_y0*ep_y1)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y1)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y0*ep_y1)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y1)+1/6*ep_g_bnone_z1_3_m0_0_0_0_0/(ep_y0*ep_y2)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y2)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y0*ep_y2)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y2)+1/4*ep_g_bnone_z1_2_m0_0_0_0_0/(ep_y0*ep_y3)-1/4*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y3)-1/4*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y0*ep_y3)+1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y3)+1/9*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(ep_y1)/ep_y1-1/18*ep_g_bnone_z0_2_3_m0_0_0_0_1/ep_y1-1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y1)/ep_y1+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/ep_y1+1/9*ep_g_bnone_z0_3_m0_0_0_0_0/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y1*ep_y2)+1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y1*ep_y2)+1/6*ep_g_bnone_z0_2_m0_0_0_0_0/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y1*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y1*ep_y3)+1/9*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(ep_y2)/ep_y2-1/18*ep_g_bnone_z0_1_3_m0_0_0_0_1/ep_y2-1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y2)/ep_y2+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/ep_y2+1/6*ep_g_bnone_z0_1_m0_0_0_0_0/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y2*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y2*ep_y3)+1/4*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(ep_y3)/ep_y3-1/12*ep_g_bnone_z0_1_2_m0_0_0_0_1/ep_y3-1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y3)/ep_y3+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/ep_y3",
+    "1/36*ep_g_bnone_z0_1_2_3_m0_0_0_0_3-3/8*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(ep_y0)^2/ep_y0+1/4*ep_g_bnone_z1_2_3_m0_0_0_0_1*log(ep_y0)/ep_y0-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_2/ep_y0+3/8*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y0)^2/ep_y0-1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(ep_y0)/ep_y0+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_2/ep_y0+1/6*ep_g_bnone_z2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)+1/6*ep_g_bnone_z2_3_m0_0_0_0_1/(ep_y0*ep_y1)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y1)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_1/(ep_y0*ep_y1)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y1)-1/3*ep_g_bnone_z3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z1_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2)-1/2*ep_g_bnone_z2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y3)+1/6*ep_g_bnone_z1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)+1/6*ep_g_bnone_z1_3_m0_0_0_0_1/(ep_y0*ep_y2)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y2)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_1/(ep_y0*ep_y2)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y2)-1/2*ep_g_bnone_z1_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_3_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y2*ep_y3)+1/4*ep_g_bnone_z1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y3^3))/(ep_y0*ep_y3)+1/4*ep_g_bnone_z1_2_m0_0_0_0_1/(ep_y0*ep_y3)-1/4*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y3^3))/(ep_y0*ep_y3)-1/4*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y3)-1/4*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y3^3))/(ep_y0*ep_y3)-1/4*ep_g_bnone_z0_1_2_m0_0_0_0_1/(ep_y0*ep_y3)+1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y3^3))/(ep_y0*ep_y3)+1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y3)-1/9*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(ep_y1)^2/ep_y1+1/9*ep_g_bnone_z0_2_3_m0_0_0_0_1*log(ep_y1)/ep_y1-1/18*ep_g_bnone_z0_2_3_m0_0_0_0_2/ep_y1+1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y1)^2/ep_y1-1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(ep_y1)/ep_y1+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_2/ep_y1+1/9*ep_g_bnone_z0_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y2^2))/(ep_y1*ep_y2)+1/9*ep_g_bnone_z0_3_m0_0_0_0_1/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y2^2))/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_2_3_m0_0_0_0_1/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y2^2))/(ep_y1*ep_y2)-1/9*ep_g_bnone_z0_1_3_m0_0_0_0_1/(ep_y1*ep_y2)+1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y2^2))/(ep_y1*ep_y2)+1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y1*ep_y2)-1/3*ep_g_bnone_z0_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)+1/3*ep_g_bnone_z0_3_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)+1/3*ep_g_bnone_z0_2_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)-1/3*ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)+1/3*ep_g_bnone_z0_1_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)-1/3*ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)-1/3*ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)+1/3*ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y1*ep_y2*ep_y3)+1/6*ep_g_bnone_z0_2_m0_0_0_0_0*log(1/(ep_y1^2*ep_y3^3))/(ep_y1*ep_y3)+1/6*ep_g_bnone_z0_2_m0_0_0_0_1/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y3^3))/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_1/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(1/(ep_y1^2*ep_y3^3))/(ep_y1*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_1/(ep_y1*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y1^2*ep_y3^3))/(ep_y1*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y1*ep_y3)-1/9*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(ep_y2)^2/ep_y2+1/9*ep_g_bnone_z0_1_3_m0_0_0_0_1*log(ep_y2)/ep_y2-1/18*ep_g_bnone_z0_1_3_m0_0_0_0_2/ep_y2+1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y2)^2/ep_y2-1/9*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(ep_y2)/ep_y2+1/18*ep_g_bnone_z0_1_2_3_m0_0_0_0_2/ep_y2+1/6*ep_g_bnone_z0_1_m0_0_0_0_0*log(1/(ep_y2^2*ep_y3^3))/(ep_y2*ep_y3)+1/6*ep_g_bnone_z0_1_m0_0_0_0_1/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y2^2*ep_y3^3))/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_1/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(1/(ep_y2^2*ep_y3^3))/(ep_y2*ep_y3)-1/6*ep_g_bnone_z0_1_2_m0_0_0_0_1/(ep_y2*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y2^2*ep_y3^3))/(ep_y2*ep_y3)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y2*ep_y3)-3/8*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(ep_y3)^2/ep_y3+...",
+    "1/36*ep_g_bnone_z0_1_2_3_m0_0_0_0_4+3/8*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(ep_y0)^3/ep_y0-3/8*ep_g_bnone_z1_2_3_m0_0_0_0_1*log(ep_y0)^2/ep_y0+1/4*ep_g_bnone_z1_2_3_m0_0_0_0_2*log(ep_y0)/ep_y0-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_3/ep_y0-3/8*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(ep_y0)^3/ep_y0+3/8*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(ep_y0)^2/ep_y0-1/4*ep_g_bnone_z0_1_2_3_m0_0_0_0_2*log(ep_y0)/ep_y0+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_3/ep_y0+1/12*ep_g_bnone_z2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))^2/(ep_y0*ep_y1)+1/6*ep_g_bnone_z2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)+1/6*ep_g_bnone_z2_3_m0_0_0_0_2/(ep_y0*ep_y1)-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))^2/(ep_y0*ep_y1)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_2/(ep_y0*ep_y1)-1/12*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))^2/(ep_y0*ep_y1)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)-1/6*ep_g_bnone_z0_2_3_m0_0_0_0_2/(ep_y0*ep_y1)+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2))^2/(ep_y0*ep_y1)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y1^2))/(ep_y0*ep_y1)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_2/(ep_y0*ep_y1)-1/3*ep_g_bnone_z3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z1_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)-1/3*ep_g_bnone_z0_1_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y2^2))/(ep_y0*ep_y1*ep_y2)+1/3*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y2)+ep_g_bnone_znone_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z1_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z1_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z1_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z0_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z0_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z0_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z0_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z0_1_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z0_1_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-ep_g_bnone_z0_1_2_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)+ep_g_bnone_z0_1_2_3_m0_0_0_0_0/(ep_y0*ep_y1*ep_y2*ep_y3)-1/2*ep_g_bnone_z2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z2_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_2_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y1^2*ep_y3^3))/(ep_y0*ep_y1*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y1*ep_y3)+1/12*ep_g_bnone_z1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))^2/(ep_y0*ep_y2)+1/6*ep_g_bnone_z1_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)+1/6*ep_g_bnone_z1_3_m0_0_0_0_2/(ep_y0*ep_y2)-1/12*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))^2/(ep_y0*ep_y2)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)-1/6*ep_g_bnone_z1_2_3_m0_0_0_0_2/(ep_y0*ep_y2)-1/12*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))^2/(ep_y0*ep_y2)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)-1/6*ep_g_bnone_z0_1_3_m0_0_0_0_2/(ep_y0*ep_y2)+1/12*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2))^2/(ep_y0*ep_y2)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_1*log(1/(ep_y0^3*ep_y2^2))/(ep_y0*ep_y2)+1/6*ep_g_bnone_z0_1_2_3_m0_0_0_0_2/(ep_y0*ep_y2)-1/2*ep_g_bnone_z1_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z1_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_3_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z1_2_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z1_2_3_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_3_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)-1/2*ep_g_bnone_z0_1_2_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_0*log(1/(ep_y0^3*ep_y2^2*ep_y3^3))/(ep_y0*ep_y2*ep_y3)+1/2*ep_g_bnone_z0_1_2_3_m0_0_0_0_1/(ep_y0*ep_y2*ep_y3)+1/8*ep_g_bnone_z1_2_m0_0_0_0_0*log(1/(ep_y0^3*ep_y3^3))^2/(ep_y0*ep_y3)+1/4*ep_g_bnone_z1_2_m0_0_0_0_1*log(1/(ep_y0^3*ep_y3^3))/(ep_y0*ep_y3)+1/4*ep_g_bnone_z1_2_m0_0_0_0_2/(ep_y0*ep_y3)+..."
+  ],
+  "signature_payload": {
+    "kind": "endpoint-projector",
+    "schema_version": 1,
+    "signature": [
+      "endpoint-projector",
+      2,
+      false,
+      4,
+      [
+        [
+          -1,
+          -3.0
+        ],
+        [
+          -1,
+          -2.0
+        ],
+        [
+          -1,
+          -2.0
+        ],
+        [
+          -1,
+          -3.0
+        ]
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        -6,
+        -5,
+        -4,
+        -3,
+        -2,
+        -1,
+        0
+      ]
+    ]
+  },
+  "taylor_orders": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "zero_subsets": [
+    [],
+    [
+      3
+    ],
+    [
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      1
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      2,
+      3
+    ],
+    [
+      0
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      2,
+      3
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      1,
+      3
+    ],
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      0,
+      1,
+      2,
+      3
+    ]
+  ]
+}

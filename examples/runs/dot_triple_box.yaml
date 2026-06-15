@@ -1,0 +1,21 @@
+dot-file: ../graphs/triple_box.dot
+kinematics: ../graphs/triple_box_kinematics.yaml
+dot-engine: fsd
+sector-method: iterative
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+ibp-reduce-to-log-endpoint: true
+# The direct cached endpoint projectors are faster for selected sectors, but
+# the complete six-coefficient all-sector run can spike near the 30 GiB memory
+# budget on 10 workers.  Keep the shipped preset on the lower-memory IBP
+# compound projector path.
+direct-projector-cache-term-threshold: 0
+symbolic-derivatives: true
+chain-rule-formula-signature-limit: 256
+max-eps-order: -1
+samples-per-iter: 500
+batch-size: 1
+max-iter: -1
+min-iter: 1
+workers: 10
+result-path: ../outputs/dot_triple_box_result.json

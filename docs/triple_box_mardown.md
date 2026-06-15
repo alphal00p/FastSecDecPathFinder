@@ -1,21 +1,21 @@
 # Triple-box investigation
 
-This note records the triple-box checks run on 2026-06-13.  The purpose was not
-to claim a converged physics result, but to isolate the cost of the DOT/pySecDec
-generation phase, Symbolica evaluator generation, and the current subtraction
-runtime path for a demanding three-loop example.
+This historical note records the triple-box checks run on 2026-06-13.  It is
+kept as an investigation log, not as the current performance summary.  The
+current numbers, including the IBP endpoint lowering, formula-cache path, and
+regular-Taylor accelerator, are in `performance.md` and `validation.md`.
 
 ## Topology and command
 
 The FSD run used the massless Euclidean triple box from
-`examples/dot/triple_box.dot` with `examples/dot/triple_box_kinematics.yaml`.
+`examples/graphs/triple_box.dot` with `examples/graphs/triple_box_kinematics.yaml`.
 The Laurent range was the full three-loop range through the finite part,
 `eps^-6 ... eps^0`.
 
 ```bash
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/triple_box.dot \
-  --kinematics examples/dot/triple_box_kinematics.yaml \
+  --dot-file examples/graphs/triple_box.dot \
+  --kinematics examples/graphs/triple_box_kinematics.yaml \
   --dot-engine fsd \
   --prefactor-convention pysecdec \
   --sector-method geometric_ku \
@@ -130,8 +130,8 @@ pole only:
 
 ```bash
 .venv/bin/python FSD.py \
-  --dot-file examples/dot/triple_box.dot \
-  --kinematics examples/dot/triple_box_kinematics.yaml \
+  --dot-file examples/graphs/triple_box.dot \
+  --kinematics examples/graphs/triple_box_kinematics.yaml \
   --dot-engine pysecdec \
   --prefactor-convention pysecdec \
   --sector-method geometric_ku \

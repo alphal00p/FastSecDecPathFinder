@@ -48,6 +48,59 @@ def expression_text(expr: Any) -> str:
     return str(expr)
 
 
+def dual_shape_summary(sectors: list[SectorDefinition], preview_limit: int = 20) -> JsonDict:
+    """Return compact Taylor-shape statistics without serializing every shape.
+
+    DOT triple-box runs can have thousands of sectors and large sparse Taylor
+    shapes.  Keeping every multi-index in ``result.json`` makes selected-sector
+    diagnostics hundreds of megabytes even though the summary only needs the
+    number and rough size of the distinct shapes.
+    """
+    counter: Counter[tuple[Any, ...]] = Counter()
+    max_entries = 0
+    max_rank = 0
+    max_total_degree = 0
+    shaped_sector_count = 0
+    for sector in sectors:
+        shape = sector.dual_shape
+        if not shape:
+            continue
+        shaped_sector_count += 1
+        max_entries = max(max_entries, len(shape))
+        rank = len(shape[0]) if shape else 0
+        max_orders = tuple(
+            max((int(multi[position]) for multi in shape), default=0)
+            for position in range(rank)
+        )
+        shape_total_degree = max(
+            (sum(int(value) for value in multi) for multi in shape),
+            default=0,
+        )
+        shape_key = (rank, len(shape), max_orders, shape_total_degree)
+        counter[shape_key] += 1
+        max_rank = max(max_rank, rank)
+        max_total_degree = max(max_total_degree, shape_total_degree)
+    most_common = [
+        {
+            "rank": shape[0],
+            "entries": shape[1],
+            "max_orders": list(shape[2]),
+            "max_total_degree": shape[3],
+            "sector_count": count,
+        }
+        for shape, count in counter.most_common(preview_limit)
+    ]
+    return {
+        "sector_count_with_shape": shaped_sector_count,
+        "unique_shape_count": len(counter),
+        "max_entries": max_entries,
+        "max_rank": max_rank,
+        "max_total_degree": max_total_degree,
+        "preview": most_common,
+        "preview_limit": int(preview_limit),
+    }
+
+
 def terminal_math_text(expr: Any) -> str:
     """Format a Symbolica expression and use a readable terminal epsilon."""
     return expression_text(expr).replace("eps", "ε")
@@ -118,6 +171,30 @@ def summary_data(
         "jit_compile_evaluators": request.jit_compile_evaluators,
         "dual_evaluator_mode": request.dual_evaluator_mode,
         "subtraction_backend": request.subtraction_backend,
+        "IBP_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,
+        "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
+        "direct_projector_cache_override_sectors": getattr(
+            topology, "endpoint_projector_direct_cache_override_sectors", 0
+        ),
+        "direct_projector_cache_override_signatures": getattr(
+            topology, "endpoint_projector_direct_cache_override_signatures", 0
+        ),
+        "force_regular_taylor_formulas": request.force_regular_taylor_formulas,
+        "regular_taylor_signature_limit": request.regular_taylor_signature_limit,
+        "regular_taylor_formula_volume_limit": request.regular_taylor_formula_volume_limit,
+        "regular_taylor_formula_axis_limit": request.regular_taylor_formula_axis_limit,
+        "chain_rule_formula_signature_limit": request.chain_rule_formula_signature_limit,
+        "regular_taylor_formulas_from_curated_cache": getattr(
+            topology, "regular_taylor_formulas_from_curated_cache", 0
+        ),
+        "regular_taylor_formulas_skipped": getattr(
+            topology, "regular_taylor_formulas_skipped", 0
+        ),
+        "regular_taylor_formula_policy": (
+            "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded"
+            if request.subtraction_backend == "projector-formula"
+            else "not used by this subtraction backend"
+        ),
         "runtime_ready": (
             "recursive endpoint subtraction; coefficient dual evaluators lazy"
             if request.subtraction_backend == "recursive" and request.dual_evaluator_mode == "lazy"
@@ -207,7 +284,9 @@ def summary_data(
     }
     if request.integral == "dot" and max_endpoint_taylor_order > 0:
         validation["warning"] = (
-            "DOT sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint subtraction"
+            "DOT sectors with y^(-n+c*eps), n>1, use IBP-lowered logarithmic endpoint projectors"
+            if request.ibp_reduce_to_log_endpoint
+            else "DOT sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint projectors"
         )
 
     return {
@@ -217,11 +296,47 @@ def summary_data(
             "F": expression_text(topology.f_expr),
             "parameter_order": topology.evaluator_parameter_order,
             "parameter_values": topology.parameter_values,
-            "dual_shapes": [sector.dual_shape for sector in sectors if sector.dual_shape],
+            "dual_shape_summary": dual_shape_summary(sectors),
             "dual_evaluator_mode": request.dual_evaluator_mode,
             "dual_evaluator_build_seconds": topology.dual_evaluator_build_seconds,
+            "chain_rule_formula_build_seconds": getattr(
+                topology,
+                "chain_rule_formula_build_seconds",
+                0.0,
+            ),
+            "chain_rule_formula_count": len(getattr(topology, "_chain_rule_formulas", {})),
+            "chain_rule_formulas_skipped": getattr(
+                topology,
+                "chain_rule_formulas_skipped",
+                0,
+            ),
             "subtraction_formula_count": len(topology._subtraction_formulas),
             "endpoint_projector_formula_count": len(topology._endpoint_projector_formulas),
+            "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
+            "direct_projector_cache_override_sectors": getattr(
+                topology, "endpoint_projector_direct_cache_override_sectors", 0
+            ),
+            "direct_projector_cache_override_signatures": getattr(
+                topology, "endpoint_projector_direct_cache_override_signatures", 0
+            ),
+            "regular_taylor_formula_count": len(
+                getattr(topology, "_regular_taylor_formulas", {})
+            ),
+            "regular_taylor_formulas_from_curated_cache": getattr(
+                topology,
+                "regular_taylor_formulas_from_curated_cache",
+                0,
+            ),
+            "regular_taylor_formulas_skipped": getattr(
+                topology,
+                "regular_taylor_formulas_skipped",
+                0,
+            ),
+            "regular_taylor_formula_policy": (
+                "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded"
+                if request.subtraction_backend == "projector-formula"
+                else "not used by this subtraction backend"
+            ),
             "subtraction_formula_build_seconds": topology.subtraction_formula_build_seconds,
             "parametric": parametric_data,
         },
@@ -255,19 +370,71 @@ def print_preintegration_summary(
     symanzik.add_row(["parameter values", data["symanzik"]["parameter_values"]])
     symanzik.add_row(["Taylor evaluator mode", data["symanzik"]["dual_evaluator_mode"]])
     symanzik.add_row(["Taylor evaluator build time", format_seconds(data["symanzik"]["dual_evaluator_build_seconds"])])
+    symanzik.add_row([
+        "chain-rule formula build time",
+        format_seconds(data["symanzik"].get("chain_rule_formula_build_seconds", 0.0)),
+    ])
+    symanzik.add_row([
+        "chain-rule formula count",
+        data["symanzik"].get("chain_rule_formula_count", 0),
+    ])
+    if data["symanzik"].get("chain_rule_formulas_skipped", 0):
+        symanzik.add_row([
+            "chain-rule formulas skipped",
+            data["symanzik"].get("chain_rule_formulas_skipped", 0),
+        ])
     symanzik.add_row(["subtraction formula count", data["symanzik"]["subtraction_formula_count"]])
     symanzik.add_row(["endpoint projector count", data["symanzik"]["endpoint_projector_formula_count"]])
+    symanzik.add_row([
+        "direct projector cache threshold",
+        data["symanzik"].get("direct_projector_cache_term_threshold", 0),
+    ])
+    if data["symanzik"].get("direct_projector_cache_override_sectors", 0):
+        symanzik.add_row([
+            "direct cached projector overrides",
+            (
+                f"{data['symanzik'].get('direct_projector_cache_override_sectors', 0)} sectors; "
+                f"{data['symanzik'].get('direct_projector_cache_override_signatures', 0)} signatures"
+            ),
+        ])
+    symanzik.add_row([
+        "regular Taylor formula count",
+        data["symanzik"].get("regular_taylor_formula_count", 0),
+    ])
+    symanzik.add_row([
+        "curated regular Taylor assets",
+        data["symanzik"].get("regular_taylor_formulas_from_curated_cache", 0),
+    ])
+    if data["symanzik"].get("regular_taylor_formulas_skipped", 0):
+        symanzik.add_row([
+            "regular Taylor formulas skipped",
+            data["symanzik"].get("regular_taylor_formulas_skipped", 0),
+        ])
+    symanzik.add_row([
+        "regular Taylor policy",
+        data["symanzik"].get("regular_taylor_formula_policy", "n/a"),
+    ])
     symanzik.add_row([
         "subtraction formula build time",
         format_seconds(data["symanzik"]["subtraction_formula_build_seconds"]),
     ])
     for key, value in data["symanzik"]["parametric"].items():
         symanzik.add_row([key, value])
-    unique_shapes = []
-    for shape in data["symanzik"]["dual_shapes"]:
-        if shape not in unique_shapes:
-            unique_shapes.append(shape)
-    symanzik.add_row(["U/F Taylor shapes", unique_shapes if unique_shapes else "none"])
+    shape_summary = data["symanzik"].get("dual_shape_summary")
+    if isinstance(shape_summary, dict):
+        shape_text = (
+            f"{shape_summary.get('unique_shape_count', 0)} unique; "
+            f"max entries={shape_summary.get('max_entries', 0)}, "
+            f"rank={shape_summary.get('max_rank', 0)}, "
+            f"degree={shape_summary.get('max_total_degree', 0)}"
+        )
+    else:
+        unique_shapes = []
+        for shape in data["symanzik"].get("dual_shapes", []):
+            if shape not in unique_shapes:
+                unique_shapes.append(shape)
+        shape_text = unique_shapes if unique_shapes else "none"
+    symanzik.add_row(["U/F Taylor shapes", shape_text])
     print(symanzik)
 
     if request.integral == "dot":
@@ -673,6 +840,15 @@ def make_output(
         "dual_evaluator_build_seconds": summary.get("symanzik", {}).get(
             "dual_evaluator_build_seconds", 0.0
         ),
+        "chain_rule_formula_build_seconds": summary.get("symanzik", {}).get(
+            "chain_rule_formula_build_seconds", 0.0
+        ),
+        "chain_rule_formula_count": summary.get("symanzik", {}).get(
+            "chain_rule_formula_count", 0
+        ),
+        "chain_rule_formulas_skipped": summary.get("symanzik", {}).get(
+            "chain_rule_formulas_skipped", 0
+        ),
         "python_overhead_fraction": python_overhead_fraction,
         "precision_stats": precision_stats_summary(precision_counts or {}, samples, request),
         "interrupted": interrupted,
@@ -827,6 +1003,8 @@ def print_result_table(output: JsonDict) -> None:
         + colored_kv("HavanaT", format_seconds(output["havana_seconds"]), Fore.BLUE)
         + "  "
         + colored_kv("TaylorGen", format_seconds(output["dual_evaluator_build_seconds"]), Fore.CYAN)
+        + "  "
+        + colored_kv("ChainGen", format_seconds(output.get("chain_rule_formula_build_seconds", 0.0)), Fore.CYAN)
         + "  "
         + colored_kv("avg", f"{output['avg_eval_us_per_sample_per_worker']:.3g} μs/smpl/wkr", Fore.MAGENTA)
     )

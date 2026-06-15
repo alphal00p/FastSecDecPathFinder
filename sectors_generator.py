@@ -147,6 +147,9 @@ class SectorDefinition:
         default_factory=list, init=False, repr=False
     )
     _jacobian_monomial: tuple[complex, list[int]] | None = field(default=None, init=False, repr=False)
+    _monomial_taylor_plan_cache: dict[
+        tuple[Any, ...], tuple[np.ndarray, np.ndarray, list[tuple[int, int, np.ndarray]]]
+    ] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate the declarative sector metadata."""
@@ -563,7 +566,7 @@ class SectorDefinition:
         """Pregenerate all sector-local dual callbacks for one shape."""
         if not dual_shape:
             return
-        self.prepare_jacobian_dual_evaluator(dual_shape if dual_shape == self.dual_shape else self.dual_shape)
+        self.prepare_jacobian_dual_evaluator(dual_shape)
         self.prepare_map_dual_evaluators(dual_shape)
 
     def map_dual_eval_batch_for_shape(
@@ -762,35 +765,86 @@ class SectorDefinition:
         rows = np.asarray(y_values, dtype=float)
         if rows.ndim != 2 or rows.shape[1] != self.integration_dim:
             raise ValueError(f"{self.name}: expected coordinate array with shape (n,{self.integration_dim})")
-        output = np.zeros((rows.shape[0], len(monomials), len(dual_shape)), dtype=np.complex128)
+        coefficients, _powers, groups = self._monomial_taylor_plan(monomials, dual_shape)
+        output = np.broadcast_to(
+            coefficients[np.newaxis, :, :],
+            (rows.shape[0], coefficients.shape[0], coefficients.shape[1]),
+        ).astype(np.complex128, copy=True)
+        flat_output = output.reshape(rows.shape[0], -1)
+        for axis, power_int, flat_indices in groups:
+            flat_output[:, flat_indices] *= (rows[:, axis] ** power_int)[:, np.newaxis]
+        if dtype is float:
+            return output.real.astype(float, copy=False)
+        return output.astype(dtype, copy=False)
+
+    def _monomial_taylor_plan(
+        self,
+        monomials: list[tuple[complex, list[int]] | None],
+        dual_shape: list[tuple[int, ...]],
+    ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int, np.ndarray]]]:
+        """Return cached binomial coefficients and remaining monomial powers."""
+        if monomials is self._map_monomials:
+            monomial_key: Any = ("map",)
+        elif len(monomials) == 1 and monomials[0] == self._jacobian_monomial:
+            monomial_key = ("jacobian",)
+        else:
+            monomial_key = tuple(
+                (complex(monomial[0]), tuple(int(power) for power in monomial[1]))
+                for monomial in monomials
+                if monomial is not None
+            )
+        key = (
+            tuple(tuple(int(value) for value in multi) for multi in dual_shape),
+            monomial_key,
+        )
+        cached = self._monomial_taylor_plan_cache.get(key)
+        if cached is not None:
+            return cached
+
+        coefficients = np.zeros((len(monomials), len(dual_shape)), dtype=np.complex128)
+        powers_out = np.zeros((len(monomials), len(dual_shape), self.integration_dim), dtype=np.int16)
         singular_position = {axis: position for position, axis in enumerate(self.singular_axes)}
         dual_rank = len(dual_shape[0]) if dual_shape else 0
         for expr_index, monomial in enumerate(monomials):
             if monomial is None:
-                return None
+                raise RuntimeError(f"{self.name}: monomial Taylor plan requested for non-monomial map")
             coefficient, powers = monomial
+            base_powers = [int(power) for power in powers]
             for column, multi_index in enumerate(dual_shape):
                 if any(multi_index[position] != 0 for position in range(len(self.singular_axes), dual_rank)):
                     continue
-                values = np.full(rows.shape[0], coefficient, dtype=np.complex128)
-                for axis, power in enumerate(powers):
+                coeff = complex(coefficient)
+                remaining = list(base_powers)
+                for axis, power in enumerate(base_powers):
                     position = singular_position.get(axis)
                     if position is None or position >= dual_rank:
-                        if power:
-                            values *= rows[:, axis] ** int(power)
                         continue
                     order = int(multi_index[position])
-                    if order > power:
-                        values[:] = 0.0
+                    if order > int(power):
+                        coeff = 0.0 + 0.0j
                         break
-                    values *= float(math.comb(int(power), order))
-                    remaining_power = int(power) - order
-                    if remaining_power:
-                        values *= rows[:, axis] ** remaining_power
-                output[:, expr_index, column] = values
-        if dtype is float:
-            return output.real.astype(float, copy=False)
-        return output.astype(dtype, copy=False)
+                    coeff *= float(math.comb(int(power), order))
+                    remaining[axis] = int(power) - order
+                coefficients[expr_index, column] = coeff
+                powers_out[expr_index, column, :] = remaining
+        groups: list[tuple[int, int, np.ndarray]] = []
+        flat_width = len(monomials) * len(dual_shape)
+        nonzero_flat = np.flatnonzero(coefficients.reshape(flat_width) != 0.0)
+        for axis in range(self.integration_dim):
+            axis_powers = powers_out[:, :, axis]
+            if not np.any(axis_powers):
+                continue
+            for power in np.unique(axis_powers):
+                power_int = int(power)
+                if power_int == 0:
+                    continue
+                power_mask = axis_powers.reshape(flat_width) == power_int
+                flat_indices = nonzero_flat[power_mask[nonzero_flat]]
+                if flat_indices.size:
+                    groups.append((axis, power_int, flat_indices))
+        cached = (coefficients, powers_out, groups)
+        self._monomial_taylor_plan_cache[key] = cached
+        return cached
 
     def _monomial_taylor_prec(
         self,
