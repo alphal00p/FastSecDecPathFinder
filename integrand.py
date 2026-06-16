@@ -156,8 +156,8 @@ class TopologyDefinition:
     dual_evaluator_build_seconds: float = field(default=0.0, init=False)
     subtraction_formula_build_seconds: float = field(default=0.0, init=False)
     regular_taylor_formula_signature_limit: int = 256
-    regular_taylor_formula_volume_limit: int = 64
-    regular_taylor_formula_axis_limit: int = 5
+    regular_taylor_formula_volume_limit: int = 8192
+    regular_taylor_formula_axis_limit: int = 6
     regular_taylor_dual_shape_limit: int = 256
     regular_taylor_low_signature_sector_threshold: int = 0
     direct_projector_cache_term_threshold: int = 54
@@ -531,12 +531,17 @@ class TopologyDefinition:
                     envelope_index[self._pad_multi_index(mi, rank)]
                     for mi in sector.dual_shape
                 ]
-                sector.prepare_dual_evaluators_for_shape(envelope)
+                if not _sector_has_analytic_taylor_for_shape(sector):
+                    sector.prepare_dual_evaluators_for_shape(envelope)
                 if progress is not None and (index % 25 == 0 or index == len(dim_sectors)):
                     progress.update(
                         index,
                         total=total,
-                        detail=f"overall sector duals done {index}/{len(dim_sectors)}",
+                        detail=(
+                            f"overall sector duals done {index}/{len(dim_sectors)}"
+                            if not _sector_has_analytic_taylor_for_shape(sector)
+                            else f"overall sector duals analytic {index}/{len(dim_sectors)}"
+                        ),
                     )
             if progress is not None:
                 progress.update(
@@ -574,18 +579,28 @@ class TopologyDefinition:
             except Exception:
                 offset = 0
         for index, sector in enumerate(sectors, start=1):
+            analytic_sector_taylor = _sector_has_analytic_taylor_for_shape(sector)
             if progress is not None and (index == 1 or index % 25 == 0 or index == total):
                 progress.update(
                     offset + index - 1,
                     total=max(offset + total, total),
-                    detail=f"sector duals {sector.name} {index}/{total}",
+                    detail=(
+                        f"sector duals {sector.name} {index}/{total}"
+                        if not analytic_sector_taylor
+                        else f"sector duals {sector.name} analytic {index}/{total}"
+                    ),
                 )
-            sector.prepare_dual_evaluators_for_shape(sector.dual_shape)
+            if not analytic_sector_taylor:
+                sector.prepare_dual_evaluators_for_shape(sector.dual_shape)
             if progress is not None and (index % 25 == 0 or index == total):
                 progress.update(
                     offset + index,
                     total=max(offset + total, total),
-                    detail=f"sector duals {sector.name} done {index}/{total}",
+                    detail=(
+                        f"sector duals {sector.name} done {index}/{total}"
+                        if not analytic_sector_taylor
+                        else f"sector duals {sector.name} analytic {index}/{total}"
+                    ),
                 )
 
     def prepare_subtraction_formulas(
@@ -1064,7 +1079,7 @@ class TopologyDefinition:
                             max_orders,
                         )
                     analytic_sector_taylor = _sector_has_analytic_taylor_for_shape(sector)
-                    if self.dual_evaluator_mode != "symbolic-derivatives":
+                    if self.dual_evaluator_mode != "symbolic-derivatives" and not analytic_sector_taylor:
                         sector.prepare_dual_evaluators_for_shape(source_shape)
                     elif dual_fast_path and not analytic_sector_taylor:
                         sector.prepare_dual_evaluators_for_shape(source_shape)
@@ -1588,7 +1603,12 @@ class TopologyDefinition:
         """Return and cache the raw Taylor shape needed by a residual formula."""
         zero_tuple = tuple(sorted(int(position) for position in zero_positions))
         max_tuple = tuple(int(order) for order in max_orders)
-        key = (sector.name, zero_tuple, max_tuple)
+        key = (
+            tuple(int(sector.u_monomial_powers[axis]) for axis in sector.singular_axes),
+            tuple(int(sector.f_monomial_powers[axis]) for axis in sector.singular_axes),
+            zero_tuple,
+            max_tuple,
+        )
         cached = self._regular_taylor_source_shape_cache.get(key)
         if cached is None:
             cached = _regular_taylor_source_shape(sector, zero_tuple, max_tuple)
@@ -1605,12 +1625,12 @@ class TopologyDefinition:
         """Return cached sparse source shape for a regular formula input."""
         key = (
             "all",
-            sector.name,
+            tuple(int(sector.u_monomial_powers[axis]) for axis in sector.singular_axes),
+            tuple(int(sector.f_monomial_powers[axis]) for axis in sector.singular_axes),
+            tuple(int(sector.jacobian_monomial_powers[axis]) for axis in sector.singular_axes),
             tuple(sorted(int(position) for position in zero_positions)),
             _multi_set_cache_key(residual_multis),
             _multi_set_cache_key(jacobian_multis),
-            tuple(int(power) for power in sector.u_monomial_powers),
-            tuple(int(power) for power in sector.f_monomial_powers),
         )
         cached = self._sparse_regular_source_shape_cache.get(key)
         if cached is None:
@@ -1633,10 +1653,9 @@ class TopologyDefinition:
         """Return cached sparse source shape for one residual polynomial."""
         key = (
             "one",
-            sector.name,
+            tuple(int(monomial_powers[axis]) for axis in sector.singular_axes),
             tuple(sorted(int(position) for position in zero_positions)),
             _multi_set_cache_key(residual_multis),
-            tuple(int(power) for power in monomial_powers),
         )
         cached = self._sparse_regular_source_shape_cache.get(key)
         if cached is None:
@@ -3165,7 +3184,7 @@ def _allowed_multi_key(allowed_multis: set[tuple[int, ...]]) -> tuple[tuple[int,
     return tuple(sorted((tuple(int(value) for value in multi) for multi in allowed_multis)))
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=8192)
 def _allowed_convolution_splits(
     allowed_key: tuple[tuple[int, ...], ...],
 ) -> tuple[tuple[tuple[int, ...], tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]], ...]:
@@ -3192,7 +3211,7 @@ def _allowed_convolution_splits(
     return tuple(by_result)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=8192)
 def _allowed_convolution_dense_plan(
     allowed_key: tuple[tuple[int, ...], ...],
 ) -> tuple[
@@ -3230,7 +3249,7 @@ def _allowed_convolution_dense_plan(
     )
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=8192)
 def _allowed_convolution_split_count(
     allowed_key: tuple[tuple[int, ...], ...],
 ) -> int:
@@ -3347,14 +3366,12 @@ def _series_mul_allowed(
             break
     if n_rows <= 0:
         return {}
-    if n_rows <= 16:
-        return _series_mul_allowed_sparse_direct(a, b, allowed_multis, rank)
     split_count = _allowed_convolution_split_count(allowed_key)
     # The dense kernel materializes ``split_count * n_rows`` complex products.
     # It is excellent for modest supports, but pathological for the six-axis
     # triple-box chain-rule fallback.  Keep those hard cases sparse and let
     # NumPy vectorize over the sample axis inside the direct dictionary loop.
-    if split_count * n_rows > 2_000_000:
+    if split_count * n_rows > 20_000_000:
         return _series_mul_allowed_sparse_direct(a, b, allowed_multis, rank)
     (
         support_key,

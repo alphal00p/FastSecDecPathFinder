@@ -130,6 +130,17 @@ chain-rule signatures.  Some hard sectors are genuinely Symbolica-evaluator
 heavy; others, such as `PSD2` and `PSD106`, are dominated by the Python sparse
 Taylor fallback.
 
+The latest hard-sector probe focused on `PSD649`, a six-axis sector with
+missing regular/source formulas.  In the existing strict prepared bundle it
+still takes about 53 s per one-point repeat, almost entirely in Python sparse
+Taylor composition.  A diagnostic direct-U/F-dual run reduces Python time to
+about 7 s for one point, but moves the work into Symbolica evaluator calls and
+does not improve 10-point batch throughput.  A cache-warming attempt for the
+first missing `PSD649` regular-Taylor formula was stopped after about 170 s
+while building/dualizing the generated regular expression.  So the remaining
+problem is not the original U/F dualization slowdown; it is the missing fused
+regular-source evaluator for hard six-axis signatures.
+
 The requested `1972 x 1000` democratic triple-box scan is therefore not yet a
 near-1000 s task with this implementation.  The next useful step is to finish
 moving the remaining large chain-rule/source assembly into reusable Symbolica

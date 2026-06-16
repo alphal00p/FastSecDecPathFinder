@@ -12,12 +12,36 @@ pySecDec is used only at the DOT generation boundary.
 | date | 2026-06-16 |
 | machine | Darwin arm64 |
 | Python | 3.12.6 |
-| Symbolica | 2.0.0 |
+| Symbolica | 2.0.0 local `symbolica-community` wheel patched to `symbolica/dev` |
+| Symbolica dev commit | `07f1de5fc119b01e2875c8d0163b25eacabadf21` |
 | pySecDec | 1.6.6 |
 | Normaliz | not found on `PATH`; iterative/geometric_ku paths used |
 | heavy DOT derivative mode | `--symbolic-derivatives` |
 | default precision thresholds | `1e-8` and `1e-12` |
 | default precision digits | 100 and 1000 |
+
+## Symbolica Dev Dualization Check
+
+The standalone reproducer `U_dualization_slowdown.py` was used before and
+after installing a local `symbolica-community` wheel patched to
+`symbolica/dev` commit `07f1de5fc119b01e2875c8d0163b25eacabadf21`.  The
+default case is the triple-box U polynomial with the six-axis dual shape
+`[3,3,3,3,3,4]`, i.e. 5120 requested Taylor coefficients.
+
+| Symbolica source | scalar evaluator build [s] | copied evaluator dualize [s] | speedup |
+|---|---:|---:|---:|
+| previous venv wheel | 0.000282 | 191.316 | 1x |
+| local community/dev wheel | 0.000200 | 11.385 | 16.8x |
+
+The quick two-axis sanity case stayed sub-millisecond after the replacement
+(`dualize = 0.000214 s`).  This removes the previous several-minute U/F
+dualization bottleneck for the exact six-axis shape that motivated the
+standalone script.  It does not automatically make the generated
+regular-Taylor formula path cheap: some six-axis regular-source expressions
+are still costly to build or dualize.  The regular-Taylor defaults now allow
+attempting these six-axis boxes (`--regular-taylor-formula-volume-limit 8192`,
+`--regular-taylor-formula-axis-limit 6`), while the guards remain configurable
+for fallback studies.
 
 Common run presets live in `examples/runs`.  CLI options override YAML values:
 
@@ -138,6 +162,29 @@ Representative slow completed sectors:
 | `PSD697` | 28.91 | 27.52 | 1.39 | 2.20 |
 | `PSD349` | 28.90 | 17.73 | 11.16 | 0.326 |
 | `PSD350` | 28.63 | 18.28 | 10.35 | `2.15e3` |
+
+After installing the local `symbolica-community` wheel patched to
+`symbolica/dev`, the old prepared-bundle `PSD649` one-point profile was rerun
+without regenerating the bundle:
+
+| sector | mode | wall [s] | Symbolica eval [s] | Python/glue [s] | max coefficient |
+|---|---|---:|---:|---:|---:|
+| `PSD649` | existing strict bundle, symbolic-derivative fallback | 80.36 | 0.034 | 80.32 | 21.0 |
+| `PSD649` | repeated strict bundle, symbolic-derivative fallback | 53.06 | 0.005 | 53.05 | 2.24 |
+| `PSD649` | diagnostic direct U/F duals, second one-point repeat | 46.62 | 39.39 | 7.23 | 13.7 |
+| `PSD649` | diagnostic direct U/F duals, 10-point repeat | 143.11 | 106.28 | 36.83 | `1.68e7` |
+
+This confirms that the old prepared artifact is not bottlenecked by U/F
+`Evaluator.dualize()` at runtime.  It is still bottlenecked by missing fused
+source/chain evaluators.  Switching to direct U/F duals moves most of the
+one-point cost into Symbolica, but does not improve vectorized batch cost for
+this sector.
+
+A cache-warming probe for the first missing `PSD649` six-axis regular-Taylor
+signature was stopped after about 170 s.  The scalar-dualized construction was
+interrupted inside `Evaluator.dualize(...)`; an explicit coefficient-extraction
+construction was also still building after a similar time.  This is the
+current blocker for a fully baked triple-box runtime bundle.
 
 This shows two distinct bottlenecks.  Some hard sectors are real Symbolica
 evaluator work.  Others, such as `PSD2` and `PSD106`, spend almost all time in

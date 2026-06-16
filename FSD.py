@@ -508,7 +508,7 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--regular-taylor-formula-volume-limit",
         type=int,
-        default=64,
+        default=8192,
         help=(
             "Maximum product of (Taylor order + 1) for a universal "
             "regular-Taylor formula prepared in all-sector projector-formula "
@@ -519,7 +519,7 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--regular-taylor-formula-axis-limit",
         type=int,
-        default=5,
+        default=6,
         help=(
             "Maximum number of singular Taylor axes for universal "
             "regular-Taylor formulas prepared by default. Higher-axis "

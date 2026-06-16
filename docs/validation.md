@@ -130,6 +130,12 @@ large one-point coefficients mean that a full precision run still needs
 substantial optimization.  The main remaining technical risk is the high-axis
 chain-rule/source assembly path, especially sectors where Symbolica evaluation
 is cheap but the Python sparse Taylor fallback is tens of seconds per point.
+The latest `PSD649` diagnostic makes this concrete: the strict prepared bundle
+uses a Python sparse fallback for missing six-axis regular/source signatures
+and takes about 53 s per one-point repeat; direct U/F dual evaluators reduce
+Python overhead but are still too slow in vectorized batches.  A cold build of
+the first missing regular-Taylor formula was stopped after about 170 s, so the
+fully fused hard-sector path remains the next implementation target.
 
 The next validation target is therefore not more blind statistics.  It is to
 move the remaining large universal chain-rule/source signatures into

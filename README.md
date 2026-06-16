@@ -453,11 +453,13 @@ loader prefers a curated copy over a local generated copy with the same
 signature.  The regular-Taylor layer is guarded by
 `--regular-taylor-signature-limit`,
 `--regular-taylor-formula-volume-limit`, and
-`--regular-taylor-formula-axis-limit`.  These caps keep cold generation fast by
-leaving high-axis or large Taylor-box signatures on the Python fallback path;
-the triple-box default prepares the cheaper universal formulas and skips the
-hard six-axis ones unless a vetted curated asset exists for that exact
-signature.  In that case the direct formula is used by default, and the
+`--regular-taylor-formula-axis-limit`.  After the Symbolica dev dualization
+fix, U/F dual evaluator preparation is no longer the main blocker for six-axis
+Taylor boxes.  The cold regular-Taylor formula itself can still be expensive:
+some triple-box signatures spend minutes in formula extraction or in
+dualizing the generated regular expression.  The caps therefore remain useful
+for fallback and memory studies, and lowering them deliberately leaves
+high-axis or large Taylor-box signatures on the Python fallback path.  A
 curated signature also bypasses the cold-build signature-count cap because it
 is treated as already generated source data rather than new work for the
 current run.  The additional
