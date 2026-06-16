@@ -68,6 +68,19 @@ pySecDec source builds can be sensitive to locale/toolchain settings.  If the
 build fails while compiling GiNaC documentation with `LC_ALL=C.UTF-8`, retry
 with a supported locale such as `LC_ALL=C LANG=C`.
 
+Large DOT runs can reuse a precomputed formula cache.  The cache is not tracked
+in this repository; install it from a local archive or a hosted URL:
+
+```sh
+./install.sh --cache-tar /path/to/FSD_cache.tar.gz
+./install.sh --cache-url https://example.invalid/FSD_cache.tar.gz
+```
+
+The same inputs may be supplied with `FSD_CACHE_TARBALL` or `FSD_CACHE_URL`.
+Archives may contain either `cache/` or `subtraction_formulae/`; both are
+installed under the top-level `cache/` directory.  Cold generation falls back to
+building any missing formula and writes it into `cache/subtraction_formulae`.
+
 ## Tests
 
 The pytest suite requires the same configured `.venv` and external
@@ -161,6 +174,75 @@ DOT mode uses:
   evaluated with Symbolica,
 - `pysecdec_bridge.py` as the only module importing pySecDec,
 - the same generic `SectorProcessor` used by the hard-coded examples.
+
+For heavier DOT topologies, prefer the two-stage prepared-bundle workflow:
+
+```sh
+.venv/bin/python FSD.py generate \
+  --dot-file examples/graphs/triple_box.dot \
+  --kinematics examples/graphs/triple_box_kinematics.yaml \
+  --sector-method iterative \
+  --subtraction-backend projector-formula \
+  --ibp-reduce-to-log-endpoint \
+  --direct-projector-cache-term-threshold 0 \
+  --symbolic-derivatives \
+  --chain-rule-formula-signature-limit 4096 \
+  --chain-rule-formula-output-length-limit 288 \
+  --max-eps-order 0 \
+  --output examples/outputs/prepared_triple_box
+
+.venv/bin/python FSD.py integrate \
+  --output examples/outputs/prepared_triple_box \
+  --samples-per-iter 100000 \
+  --batch-size 10000 \
+  --workers 10
+```
+
+`generate` is DOT-only.  It writes `manifest.json`, topology/sector metadata,
+reference Symbolica expression strings, generation timings, and serialized
+Symbolica evaluator bytes under the selected `--output` directory.  `integrate`
+is strict: it loads evaluator bytes from that bundle and does not call
+pySecDec, rebuild Symanzik polynomials, or generate Symbolica formula/evaluator
+artifacts.  In other words, the integration process is a disk-only consumer of
+the prepared bundle, apart from lazy loading the serialized evaluator files.
+The default result path for `integrate` is
+`<output>/result.json`; use `--result-path` to override it.  Evaluator artifacts
+are loaded lazily through an LRU cache controlled by `--evaluator-lru-size`
+(`0` means unlimited).  The current prepared loader uses the Laurent range
+stored in the bundle by default.  An explicit `--max-eps-order` in
+`integrate` may request any lower or equal maximum order; for example a bundle
+prepared through `eps^0` can be reused for a leading-pole result view through
+`eps^-1`.  The current strict loader still evaluates the prepared formula
+artifacts at their stored range and trims the displayed/persisted coefficients;
+it does not rebuild smaller formulas.  Requesting an order above the prepared
+range fails strictly.
+
+Current 3-loop triple-box status: a full `eps^-6..eps^0` prepared bundle was
+generated under a 30 GiB process-tree memory cap.  The bundle contains 1972
+sectors and 22996 serialized evaluator artifacts, occupies about 4.1 GiB on
+disk, and recorded 0.198 s for U/F construction, 1.191 s for sector
+generation, 288.842 s for Symbolica evaluator preparation, plus 457.193 s for
+evaluator serialization.  A one-point all-sector diagnostic completed 1746
+sectors, hit the 30 s classification cap in 226 sectors, and triggered no
+precision rescue in completed sectors.  This is a subtraction/stability and
+runtime diagnostic rather than a precision validation.
+
+For sector-coverage diagnostics, use democratic sampling instead of the
+default Havana sector sampling:
+
+```sh
+.venv/bin/python FSD.py integrate \
+  --output examples/outputs/prepared_triple_box \
+  --sampling-mode democratic \
+  --democratic-samples-per-sector 1000 \
+  --batch-size 1000 \
+  --workers 10
+```
+
+This forces the same number of uniform points in every selected sector and
+records per-sector sample counts, timing, precision-rescue fractions, and
+maximum observed weights in `result.json`.  It is intended as a diagnostic
+mode; the default adaptive mode remains the production integration path.
 
 Run pySecDec’s generated integrator instead:
 
@@ -337,13 +419,13 @@ lowering, but a selected-sector comparison can disable it explicitly:
 
 The IBP mode lowers endpoints such as `y^(-2+c eps)` and `y^(-3+c eps)` to
 logarithmic child projectors plus boundary and derivative terms.  Independently
-of that toggle, the formula cache under `assets/subtraction_formulae` stores
-endpoint-projector and regular-Taylor expression strings.  These formulae are
-universal for their endpoint/Taylor signature, so curated cache files are FSD
-assets.  The shipped `assets/subtraction_formulae/curated` directory contains
-the validated endpoint-projector cache set and a small validated regular-Taylor
-set.  These assets are default-on source data rather than a local warm-cache
-accident.
+of that toggle, the top-level `cache/subtraction_formulae` directory stores
+universal endpoint-projector, regular-Taylor, and chain-rule formula assets:
+reference Symbolica expression metadata where practical and serialized
+Symbolica evaluator bytes for fast reuse.  The older
+`assets/subtraction_formulae` location is still searched as a read-only
+fallback for legacy and curated assets, but new cold-cache generation writes to
+`cache/subtraction_formulae`.
 When IBP lowering would produce a large compound tree, FSD automatically uses a
 curated direct endpoint projector instead if one is shipped for that exact
 universal signature.  The default switch point is controlled by:
@@ -380,10 +462,12 @@ curated signature also bypasses the cold-build signature-count cap because it
 is treated as already generated source data rather than new work for the
 current run.  The additional
 `--chain-rule-formula-signature-limit` guard controls the Symbolica
-chain-rule composition formulas used by the symbolic-derivative path.  Those
-formulas are not U/F-specific, but they still depend on the sector-map jet
-layout, so they are guarded separately from the universal endpoint-projector
-and regular-Taylor assets.
+chain-rule composition formulas used by the symbolic-derivative path.  These
+signatures are topology-independent: they are keyed by active-coordinate
+count, sector-variable rank, and requested Taylor shape.  The additional
+`--chain-rule-formula-output-length-limit` leaves very large cold signatures on
+the strict Python sparse Taylor fallback while still reusing any matching
+cached evaluator artifacts.
 
 For cache-warming experiments, the guarded path can be disabled explicitly:
 
@@ -397,10 +481,11 @@ For cache-warming experiments, the guarded path can be disabled explicitly:
 
 This is intentionally not the default.  The resulting regular-Taylor formulae
 are universal for their endpoint/Taylor signature and are stored under
-`assets/subtraction_formulae`, so a cold build can be expensive once while a
-warm-cache run may be useful for runtime studies.  Promote only the signatures
-that show a clear benefit into `assets/subtraction_formulae/curated`; those
-promoted assets then become normal default FSD behavior.  The lower-level cap
+`cache/subtraction_formulae`, so a cold build can be expensive once while a
+warm-cache run may be useful for runtime studies.  The generated cache can be
+packaged as `FSD_cache.tar.gz` and installed later with `install.sh`; the
+generation summary reports how many formulae were loaded from cache and how
+many had to be generated.  The lower-level cap
 flags remain available for partial comparisons such as “six axes, but only
 small Taylor volume”.
 
@@ -612,7 +697,10 @@ Experimental DOT scope:
   `--dot-engine both`,
 - FSD uses pySecDec decomposition data to build declarative sectors, but the
   hot-path processor still treats U and F as black-box Symbolica evaluators,
-- in FSD DOT mode, pySecDec is used before integration only.  Prepared
-  `TopologyDefinition` and `SectorDefinition` objects are inherited by workers
-  through a fork context; if fork is unavailable, multi-worker DOT integration
-  fails clearly instead of regenerating sectors at runtime.
+- in legacy single-shot FSD DOT mode, pySecDec is used before integration only.
+  Prepared `TopologyDefinition` and `SectorDefinition` objects are inherited by
+  workers through a fork context; if fork is unavailable, multi-worker DOT
+  integration fails clearly instead of regenerating sectors at runtime,
+- in two-stage `integrate` mode, the runtime boots from serialized evaluator
+  artifacts in `--output` and fails if any required artifact is missing.  It
+  never regenerates missing pySecDec sectors or Symbolica evaluators.

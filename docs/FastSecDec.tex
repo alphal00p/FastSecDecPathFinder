@@ -1636,8 +1636,10 @@ result file after \(301\) seconds and plateaued near \(11.4\) GiB RSS before
 the watchdog timeout stopped it.  The bottleneck in that mode is therefore
 cold construction of the oversized regular formula, not Monte Carlo sampling.
 For the full active triple-box sector set, the chain-rule request count exceeds
-the guard and is reported as skipped; this avoids turning all-sector generation
-into a long cold-build phase.
+the guard and is reported as a skipped cold-build request; this does not mean
+that sectors are missing.  It only means that those auxiliary chain-rule
+evaluator signatures are left to the runtime fallback rather than turning
+all-sector generation into a long cold-build phase.
 For leading-pole probes, sectors whose endpoint pole depth is too shallow to
 overlap the requested Laurent range are now returned as exact zero before any
 endpoint-subtraction algebra is assembled.  This removes guaranteed-zero
@@ -1728,10 +1730,13 @@ validated universal formulae, about \(49\) MB, and is treated as shipped FSD
 source data.  For the current triple-box leading-pole smoke, all \(1972\)
 sectors and prepared formulae were generated in about \(5.6\) seconds:
 \(0.18\) seconds for U/F construction, \(1.11\) seconds for sector generation,
-and \(4.29\) seconds for Symbolica evaluator construction.  The same run
-prepared \(147\) regular-Taylor formula signatures, skipped \(29\) harder
-regular signatures behind the default guard, and selected direct cached
-endpoint projectors for \(382\) sectors across \(55\) endpoint signatures.
+and \(4.29\) seconds for Symbolica evaluator construction.  The same legacy
+guarded run prepared \(147\) regular-Taylor formula signatures, left \(29\)
+harder high-axis regular signatures behind the default cold-build guard, and
+selected direct cached endpoint projectors for \(382\) sectors across \(55\)
+endpoint signatures.  The prepared-bundle workflow is the stricter production
+path: it materializes all sectors and serialized evaluator artifacts under the
+output directory before integration.
 When IBP lowering would produce a large compound endpoint tree and a direct
 endpoint-projector formula is already curated for that exact universal
 signature, FSD uses the direct cached endpoint projector by default.  The

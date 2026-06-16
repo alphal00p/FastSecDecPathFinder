@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 import os
@@ -37,6 +38,7 @@ from dot_topology import get_dot_bundle
 from generation_timing import GenerationProgress
 from integrand import build_topology
 from integrator import integrate
+from prepared_bundle import load_prepared_bundle, save_prepared_bundle
 from pysecdec_bridge import run_pysecdec_package
 from result_io import (
     environment_metadata,
@@ -58,12 +60,39 @@ def resolve_mode(m: float, requested: str) -> str:
 
 def validate_request(request: IntegralRequest) -> None:
     """Reject unsupported kinematics before building sectors or benchmarks."""
+    if request.command not in {"run", "generate", "integrate"}:
+        raise ValueError(f"unsupported command {request.command!r}")
+    if request.evaluator_lru_size < 0:
+        raise ValueError("--evaluator-lru-size must be >= 0")
+    if request.command in {"generate", "integrate"} and request.output is None:
+        raise ValueError(f"{request.command} requires --output DIR")
+    if request.command == "generate":
+        if request.dot_file is None:
+            raise ValueError("generate currently supports DOT topologies only and requires --dot-file")
+        if request.kinematics_file is None:
+            raise ValueError("generate requires --kinematics")
+        if request.dual_evaluator_mode == "lazy":
+            raise ValueError(
+                "generate cannot use --lazy-dual-evaluators-generation because "
+                "prepared integrate mode is strict and cannot create missing evaluators"
+            )
+    if request.command == "integrate":
+        output = Path(request.output or "").expanduser()
+        if not output.is_dir():
+            raise ValueError(f"prepared bundle directory does not exist: {output}")
+        if request.target_args == ("pysecdec",):
+            raise ValueError("integrate from a prepared bundle cannot use --target pysecdec")
+
     if request.max_iter != -1 and request.max_iter <= 0:
         raise ValueError("--max-iter must be positive, or -1 for an unbounded run")
     if request.samples_per_iter <= 0:
         raise ValueError("--samples-per-iter must be positive")
     if request.batch_size < 0:
         raise ValueError("--batch-size must be >= 0, where 0 means one batch per worker chunk")
+    if request.sampling_mode not in {"havana", "democratic"}:
+        raise ValueError("--sampling-mode must be 'havana' or 'democratic'")
+    if request.democratic_samples_per_sector <= 0:
+        raise ValueError("--democratic-samples-per-sector must be positive")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
     if request.stability_threshold < 0.0:
@@ -102,10 +131,14 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--regular-taylor-formula-axis-limit must be >= 0")
     if request.chain_rule_formula_signature_limit < 0:
         raise ValueError("--chain-rule-formula-signature-limit must be >= 0")
+    if request.chain_rule_formula_output_length_limit < 0:
+        raise ValueError("--chain-rule-formula-output-length-limit must be >= 0")
     if request.direct_projector_cache_term_threshold < 0:
         raise ValueError("--direct-projector-cache-term-threshold must be >= 0")
 
     if request.integral == "dot":
+        if request.command == "integrate":
+            return
         if request.dot_file is None:
             raise ValueError("DOT-file topology mode requires --dot-file")
         dot_path = Path(request.dot_file).expanduser()
@@ -220,6 +253,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
         "result_path",
         "log_file",
         "show_results",
+        "output",
     }
     for raw_key, raw_value in data.items():
         key = _normalise_run_key(raw_key)
@@ -262,6 +296,17 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         description="FSD modular black-box sector-decomposition prototype."
     )
     parser.set_defaults(**defaults)
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["run", "generate", "integrate"],
+        default=defaults.get("command", "run"),
+        help=(
+            "Two-stage DOT workflow command. Omit for the legacy single-shot "
+            "generate+integrate path; use 'generate' to prepare a bundle and "
+            "'integrate' to run strictly from a prepared bundle."
+        ),
+    )
     parser.add_argument(
         "--run",
         dest="run_file",
@@ -318,6 +363,29 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--max-iter", type=int, default=8, help="Maximum Havana iterations, or -1 for unbounded.")
     parser.add_argument("--min-iter", type=int, default=2)
     parser.add_argument("--samples-per-iter", type=int, default=50000)
+    parser.add_argument(
+        "--sampling-mode",
+        choices=["havana", "democratic"],
+        default="havana",
+        help=(
+            "Sector sampling policy. 'havana' uses the adaptive discrete sector "
+            "dimension; 'democratic' gives every active sector the same number "
+            "of uniform samples and records per-sector diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--democratic-sampling",
+        dest="sampling_mode",
+        action="store_const",
+        const="democratic",
+        help="Shortcut for --sampling-mode democratic.",
+    )
+    parser.add_argument(
+        "--democratic-samples-per-sector",
+        type=int,
+        default=1000,
+        help="Uniform sample count assigned to each active sector in democratic mode.",
+    )
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -480,6 +548,16 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--chain-rule-formula-output-length-limit",
+        type=int,
+        default=0,
+        help=(
+            "Skip cold chain-rule formula generation when the requested output "
+            "coefficient count exceeds this value. Cached formulas above the "
+            "limit are still reused. 0 disables the per-signature guard."
+        ),
+    )
+    parser.add_argument(
         "--direct-projector-cache-term-threshold",
         type=int,
         default=54,
@@ -516,6 +594,23 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--pysecdec-epsrel", type=float, default=1.0e-2)
     parser.add_argument("--pysecdec-maxeval", type=int, default=100000)
     parser.add_argument("--keep-pysecdec-workdir", action="store_true")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Prepared bundle directory. Required by 'generate' and 'integrate'. "
+            "Integrate writes result.json inside this directory unless --result-path is supplied."
+        ),
+    )
+    parser.add_argument(
+        "--evaluator-lru-size",
+        type=int,
+        default=128,
+        help=(
+            "Prepared integrate-mode evaluator LRU size, counted in artifact groups. "
+            "Use 0 for an unlimited cache."
+        ),
+    )
     parser.add_argument(
         "--max-eps-order",
         type=int,
@@ -580,27 +675,38 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Build the CLI parser and return parsed command-line options."""
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--run", dest="run_file", default=None)
-    pre_args, _unknown = pre_parser.parse_known_args(argv)
+    pre_args, _unknown = pre_parser.parse_known_args(raw_argv)
     try:
         defaults = _load_run_defaults(pre_args.run_file)
     except Exception as exc:
         raise SystemExit(f"error: {exc}") from exc
     parser = build_parser(defaults)
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(raw_argv)
+    parsed.max_eps_order_explicit = (
+        "--max-eps-order" in raw_argv
+        or "max_eps_order" in defaults
+        or "max-eps-order" in defaults
+    )
+    return parsed
 
 
 def build_request(args: argparse.Namespace) -> IntegralRequest:
     """Convert argparse output into the immutable request object used below."""
     mode = resolve_mode(args.m, args.mode)
+    command = getattr(args, "command", "run") or "run"
     dot_file = str(Path(args.dot_file).expanduser()) if args.dot_file is not None else None
     kinematics_file = str(Path(args.kinematics).expanduser()) if args.kinematics is not None else None
     prefactor_convention = args.prefactor_convention
     if prefactor_convention is None:
-        prefactor_convention = "pysecdec" if dot_file is not None else "raw"
+        prefactor_convention = "pysecdec" if dot_file is not None or command in {"generate", "integrate"} else "raw"
+    output = str(Path(args.output).expanduser()) if args.output is not None else None
     if args.result_path is not None:
         result_path = str(Path(args.result_path).expanduser())
+    elif command == "integrate" and output is not None:
+        result_path = str(Path(output).expanduser() / "result.json")
     else:
         result_path = (
             str(Path(dot_file).expanduser().resolve().parent / "result.json")
@@ -619,6 +725,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     regular_taylor_formula_volume_limit = int(args.regular_taylor_formula_volume_limit)
     regular_taylor_formula_axis_limit = int(args.regular_taylor_formula_axis_limit)
     chain_rule_formula_signature_limit = int(args.chain_rule_formula_signature_limit)
+    chain_rule_formula_output_length_limit = int(args.chain_rule_formula_output_length_limit)
     if force_regular_taylor_formulas:
         regular_taylor_signature_limit = max(regular_taylor_signature_limit, 1_000_000)
         regular_taylor_formula_volume_limit = max(regular_taylor_formula_volume_limit, 1_000_000)
@@ -626,7 +733,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
 
     return IntegralRequest(
         run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
-        integral="dot" if dot_file is not None else args.integral,
+        integral="dot" if dot_file is not None or command in {"generate", "integrate"} else args.integral,
         dot_file=dot_file,
         kinematics_file=kinematics_file,
         graph_name=args.graph_name,
@@ -659,6 +766,8 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         min_iter=args.min_iter,
         samples_per_iter=args.samples_per_iter,
         batch_size=args.batch_size,
+        sampling_mode=args.sampling_mode,
+        democratic_samples_per_sector=args.democratic_samples_per_sector,
         target_rel_accuracy=args.target_rel_accuracy,
         min_error=args.min_error,
         bins=args.bins,
@@ -673,6 +782,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         regular_taylor_formula_volume_limit=regular_taylor_formula_volume_limit,
         regular_taylor_formula_axis_limit=regular_taylor_formula_axis_limit,
         chain_rule_formula_signature_limit=chain_rule_formula_signature_limit,
+        chain_rule_formula_output_length_limit=chain_rule_formula_output_length_limit,
         stability_threshold=args.stability_threshold,
         high_precision_stability_threshold=args.high_precision_stability_threshold,
         stability_precision=args.stability_precision,
@@ -683,6 +793,10 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         json=args.json,
         mu=args.mu,
         onshell_threshold=args.onshell_threshold,
+        command=command,
+        output=output,
+        evaluator_lru_size=int(args.evaluator_lru_size),
+        max_eps_order_explicit=bool(getattr(args, "max_eps_order_explicit", False)),
     )
 
 
@@ -710,6 +824,61 @@ def configure_laurent_range(request: IntegralRequest, topology, sectors) -> None
             f"2L depth {-min_order}; examples: {', '.join(worst)}"
         )
     topology.set_laurent_range(min_order, request.max_eps_order)
+
+
+def _prepared_output_count(request: IntegralRequest, topology) -> int:
+    """Return how many Laurent coefficients should be shown for integrate mode."""
+    if request.command != "integrate" or not request.max_eps_order_explicit:
+        return topology.coefficient_count
+    max_order = min(int(request.max_eps_order), topology.laurent_max_order)
+    return max_order - topology.laurent_min_order + 1
+
+
+def _trim_sequence(values: list, count: int) -> list:
+    """Return the deepest-pole-first prefix used by the displayed Laurent range."""
+    return list(values[:count])
+
+
+def _trim_target(target: TargetDefinition | None, count: int) -> TargetDefinition | None:
+    """Trim an optional comparison target to the displayed prepared subrange."""
+    if target is None:
+        return None
+    return TargetDefinition(
+        source=target.source,
+        convention=target.convention,
+        coefficients=_trim_sequence(target.coefficients, count),
+        errors=_trim_sequence(target.errors, count),
+        metadata=target.metadata,
+    )
+
+
+def _trim_sector_rows(rows: list[dict], count: int) -> list[dict]:
+    """Trim per-sector coefficient arrays to the displayed prepared subrange."""
+    trimmed_rows: list[dict] = []
+    for row in rows:
+        copied = dict(row)
+        for key in ("raw", "raw_sector", "display"):
+            if key in copied:
+                block = dict(copied[key])
+                block["coefficients"] = _trim_sequence(block.get("coefficients", []), count)
+                block["errors"] = _trim_sequence(block.get("errors", []), count)
+                copied[key] = block
+        display = copied.get("display", {})
+        coeffs = display.get("coefficients", []) if isinstance(display, dict) else []
+        errors = display.get("errors", []) if isinstance(display, dict) else []
+        copied["sort_keys"] = {
+            "abs_central": max((abs(value) for value in coeffs), default=0.0),
+            "abs_error": max((abs(value) for value in errors), default=0.0),
+        }
+        trimmed_rows.append(copied)
+    return trimmed_rows
+
+
+def _trim_summary_laurent(summary: dict, topology, count: int) -> None:
+    """Update summary Laurent labels after prepared subrange output trimming."""
+    labels = topology.expected_laurent_orders[:count]
+    summary.setdefault("validation", {})["expected_laurent_orders"] = labels
+    summary.setdefault("symanzik", {})["expected_laurent_orders"] = labels
 
 
 def validate_sector_selection(request: IntegralRequest, sectors) -> None:
@@ -912,6 +1081,10 @@ def resolve_target(
                     metadata=target.metadata,
                 )
             if not _is_numeric_token(token):
+                if request.command == "integrate":
+                    raise ValueError(
+                        "prepared integrate mode accepts only numeric targets or an existing result.json file"
+                    )
                 _write_pysecdec_target_file(request, candidate_path, summary, logger=logger)
                 target = target_from_result_file(candidate_path, request.prefactor_convention)
                 return TargetDefinition(
@@ -962,6 +1135,107 @@ def compute_benchmark_quietly(request: IntegralRequest):
             os.close(saved_stdout)
 
 
+def _prepare_sector_runtime_artifacts(
+    request: IntegralRequest,
+    topology,
+    active_sectors,
+    generation_progress: GenerationProgress | None,
+) -> float:
+    """Apply CLI generation options and build all runtime evaluator artifacts."""
+    topology.regular_taylor_formula_signature_limit = request.regular_taylor_signature_limit
+    topology.regular_taylor_formula_volume_limit = request.regular_taylor_formula_volume_limit
+    topology.regular_taylor_formula_axis_limit = request.regular_taylor_formula_axis_limit
+    topology.chain_rule_formula_signature_limit = request.chain_rule_formula_signature_limit
+    topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
+    topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
+    topology.prepare_dual_evaluators(
+        active_sectors,
+        request.dual_evaluator_mode,
+        progress=generation_progress,
+    )
+    extra_dual_build_before = topology.dual_evaluator_build_seconds
+    if request.subtraction_backend == "formula":
+        topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
+    elif request.subtraction_backend == "projector-formula":
+        topology.prepare_endpoint_projector_formulas(active_sectors, progress=generation_progress)
+        topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
+        topology.prepare_chain_rule_formulas(active_sectors, progress=generation_progress)
+    return extra_dual_build_before
+
+
+def _record_generation_artifact_timings(
+    request: IntegralRequest,
+    topology,
+    extra_dual_build_before: float,
+) -> None:
+    """Append evaluator/formula build timings to the DOT generation timeline."""
+    if request.integral != "dot" or request.command == "integrate":
+        return
+    if topology.subtraction_formula_build_seconds > 0.0:
+        if request.subtraction_backend == "projector-formula":
+            signature_count = len(topology._endpoint_projector_formulas)
+            regular_count = len(getattr(topology, "_regular_taylor_formulas", {}))
+            skipped_regular = getattr(topology, "regular_taylor_formulas_skipped", 0)
+            curated_regular = getattr(
+                topology, "regular_taylor_formulas_from_curated_cache", 0
+            )
+            detail = (
+                f"{signature_count} endpoint projector signature(s), "
+                f"{regular_count} regular Taylor signature(s)"
+            )
+            endpoint_cache_hits = getattr(topology, "endpoint_projector_formulas_from_cache", 0)
+            endpoint_generated = getattr(topology, "endpoint_projector_formulas_generated", 0)
+            regular_cache_hits = getattr(topology, "regular_taylor_formulas_from_cache", 0)
+            regular_generated = getattr(topology, "regular_taylor_formulas_generated", 0)
+            if endpoint_cache_hits or endpoint_generated:
+                detail += (
+                    f", endpoint cache hits/generated="
+                    f"{endpoint_cache_hits}/{endpoint_generated}"
+                )
+            if regular_cache_hits or regular_generated:
+                detail += (
+                    f", regular cache hits/generated="
+                    f"{regular_cache_hits}/{regular_generated}"
+                )
+            if curated_regular:
+                detail += f", {curated_regular} curated regular Taylor asset(s)"
+            if skipped_regular:
+                detail += f", skipped {skipped_regular} regular Taylor signature(s)"
+        else:
+            signature_count = len(topology._subtraction_formulas)
+            detail = f"{signature_count} formula signature(s)"
+        get_dot_bundle(request).timings.add(
+            "Symbolica subtraction formula build",
+            topology.subtraction_formula_build_seconds,
+            detail=detail,
+        )
+    extra_dual_build = topology.dual_evaluator_build_seconds - extra_dual_build_before
+    if extra_dual_build > 0.0:
+        get_dot_bundle(request).timings.add(
+            "Symbolica dual evaluator build",
+            extra_dual_build,
+            detail="regular Taylor source shapes",
+        )
+    if topology.chain_rule_formula_build_seconds > 0.0:
+        get_dot_bundle(request).timings.add(
+            "Symbolica chain-rule formula build",
+            topology.chain_rule_formula_build_seconds,
+            detail=(
+                f"{len(getattr(topology, '_chain_rule_formulas', {}))} "
+                "mapped derivative formula(s), "
+                f"cache hits/generated="
+                f"{getattr(topology, 'chain_rule_formulas_from_cache', 0)}/"
+                f"{getattr(topology, 'chain_rule_formulas_generated', 0)}"
+            ),
+        )
+    elif getattr(topology, "chain_rule_formulas_skipped", 0):
+        get_dot_bundle(request).timings.add(
+            "Symbolica chain-rule formula build",
+            0.0,
+            detail=f"skipped {topology.chain_rule_formulas_skipped} mapped derivative formula(s)",
+        )
+
+
 def main() -> int:
     """Run the complete CLI workflow and return a process exit code."""
     colorama_init(strip=False)
@@ -977,13 +1251,54 @@ def main() -> int:
     request = build_request(args)
     logger = configure_logging(request)
     generation_progress: GenerationProgress | None = None
+    prepared_manifest: dict | None = None
 
     try:
         validate_request(request)
-        if request.integral == "dot":
+        if request.command == "integrate":
+            topology, sectors, prepared_manifest = load_prepared_bundle(
+                request.output or "",
+                lru_size=request.evaluator_lru_size,
+            )
+            generation_options = prepared_manifest.get("generation_options", {})
+            prepared_min_order = topology.laurent_min_order
+            prepared_max_order = topology.laurent_max_order
+            if request.max_eps_order_explicit:
+                if request.max_eps_order < prepared_min_order:
+                    raise ValueError(
+                        "--max-eps-order is below the deepest pole prepared in "
+                        f"the bundle: got eps^{request.max_eps_order}, prepared "
+                        f"starts at eps^{prepared_min_order}"
+                    )
+                if request.max_eps_order > prepared_max_order:
+                    raise ValueError(
+                        "--max-eps-order cannot exceed the prepared bundle range: "
+                        f"got eps^{request.max_eps_order}, prepared through "
+                        f"eps^{prepared_max_order}"
+                    )
+            request = replace(
+                request,
+                dot_global_prefactor_coeffs=tuple(topology.global_prefactor_coeffs or []),
+                dual_evaluator_mode=topology.dual_evaluator_mode,
+                ibp_reduce_to_log_endpoint=topology.ibp_reduce_to_log_endpoint,
+                subtraction_backend=str(
+                    generation_options.get("subtraction_backend", request.subtraction_backend)
+                ),
+                direct_projector_cache_term_threshold=int(
+                    generation_options.get(
+                        "direct_projector_cache_term_threshold",
+                        request.direct_projector_cache_term_threshold,
+                    )
+                ),
+            )
+        elif request.integral == "dot":
             generation_progress = _generation_progress(request, logger, "FSD generation")
             bundle = get_dot_bundle(request, progress=generation_progress)
             bundle.timings.log(logger)
+            request = replace(
+                request,
+                dot_global_prefactor_coeffs=tuple(bundle.topology.global_prefactor_coeffs or []),
+            )
         elif request.target_args is None:
             check_oneloop_bridge()
     except Exception as exc:
@@ -992,11 +1307,15 @@ def main() -> int:
         print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
         return 2
 
-    topology = build_topology(request)
-    sectors = generate_sectors(request)
+    if request.command != "integrate":
+        topology = build_topology(request)
+        if request.command == "generate":
+            topology.chain_rule_metadata_only = True
+        sectors = generate_sectors(request)
     try:
         validate_sector_selection(request, sectors)
-        configure_laurent_range(request, topology, sectors)
+        if request.command != "integrate":
+            configure_laurent_range(request, topology, sectors)
     except Exception as exc:
         if generation_progress is not None:
             generation_progress.close()
@@ -1007,75 +1326,70 @@ def main() -> int:
         if request.sectors is not None
         else sectors
     )
-    topology.regular_taylor_formula_signature_limit = request.regular_taylor_signature_limit
-    topology.regular_taylor_formula_volume_limit = request.regular_taylor_formula_volume_limit
-    topology.regular_taylor_formula_axis_limit = request.regular_taylor_formula_axis_limit
-    topology.chain_rule_formula_signature_limit = request.chain_rule_formula_signature_limit
-    topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
-    topology.prepare_dual_evaluators(active_sectors, request.dual_evaluator_mode)
-    extra_dual_build_before = topology.dual_evaluator_build_seconds
-    if request.subtraction_backend == "formula":
-        topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
-    elif request.subtraction_backend == "projector-formula":
-        topology.prepare_endpoint_projector_formulas(active_sectors, progress=generation_progress)
-        topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
-        topology.prepare_chain_rule_formulas(active_sectors, progress=generation_progress)
-    if generation_progress is not None:
-        generation_progress.close()
-        generation_progress = None
-    if request.integral == "dot" and topology.subtraction_formula_build_seconds > 0.0:
-        if request.subtraction_backend == "projector-formula":
-            signature_count = len(topology._endpoint_projector_formulas)
-            regular_count = len(getattr(topology, "_regular_taylor_formulas", {}))
-            skipped_regular = getattr(topology, "regular_taylor_formulas_skipped", 0)
-            curated_regular = getattr(
-                topology, "regular_taylor_formulas_from_curated_cache", 0
-            )
-            detail = (
-                f"{signature_count} endpoint projector signature(s), "
-                f"{regular_count} regular Taylor signature(s)"
-            )
-            if curated_regular:
-                detail += f", {curated_regular} curated regular Taylor asset(s)"
-            if skipped_regular:
-                detail += f", skipped {skipped_regular} regular Taylor signature(s)"
-        else:
-            signature_count = len(topology._subtraction_formulas)
-            detail = f"{signature_count} formula signature(s)"
-        get_dot_bundle(request).timings.add(
-            "Symbolica subtraction formula build",
-            topology.subtraction_formula_build_seconds,
-            detail=detail,
+
+    if request.command != "integrate":
+        extra_dual_build_before = _prepare_sector_runtime_artifacts(
+            request,
+            topology,
+            active_sectors,
+            generation_progress,
         )
-    if request.integral == "dot":
-        extra_dual_build = topology.dual_evaluator_build_seconds - extra_dual_build_before
-        if extra_dual_build > 0.0:
-            get_dot_bundle(request).timings.add(
-                "Symbolica dual evaluator build",
-                extra_dual_build,
-                detail="regular Taylor source shapes",
-            )
-        if topology.chain_rule_formula_build_seconds > 0.0:
-            get_dot_bundle(request).timings.add(
-                "Symbolica chain-rule formula build",
-                topology.chain_rule_formula_build_seconds,
-                detail=(
-                    f"{len(getattr(topology, '_chain_rule_formulas', {}))} "
-                    "mapped derivative formula(s)"
-                ),
-            )
-        elif getattr(topology, "chain_rule_formulas_skipped", 0):
-            get_dot_bundle(request).timings.add(
-                "Symbolica chain-rule formula build",
-                0.0,
-                detail=(
-                    f"skipped {topology.chain_rule_formulas_skipped} "
-                    "mapped derivative formula(s)"
-                ),
-            )
+        if generation_progress is not None:
+            generation_progress.close()
+            generation_progress = None
+        _record_generation_artifact_timings(request, topology, extra_dual_build_before)
     summary = summary_data(request, topology, sectors, benchmark_available=False)
-    if request.integral == "dot":
+    if request.command == "integrate" and prepared_manifest is not None:
+        summary["prepared_bundle"] = prepared_manifest
+        timings_file = Path(request.output or "") / "generation_timings.json"
+        if timings_file.is_file():
+            try:
+                import json as _json
+
+                summary["generation_timings"] = _json.loads(timings_file.read_text(encoding="utf-8"))
+            except Exception:
+                summary["generation_timings"] = {}
+    elif request.integral == "dot":
         summary["generation_timings"] = get_dot_bundle(request).timings.to_summary_dict()
+
+    if request.command == "generate":
+        try:
+            manifest = save_prepared_bundle(
+                request.output or "",
+                request,
+                topology,
+                sectors,
+                generation_timings=summary.get("generation_timings", {}),
+            )
+        except Exception as exc:
+            print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+            return 1
+        output = {
+            "schema_version": 1,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "command": sys.argv,
+            "integral": request.integral,
+            "mode": request.mode,
+            "prefactor_convention": request.prefactor_convention,
+            "request": request_metadata(request),
+            "environment": environment_metadata(),
+            "summary": summary,
+            "prepared_bundle": manifest,
+            "output": str(Path(request.output or "").expanduser().resolve()),
+        }
+        if request.json:
+            print(output_json(output))
+        else:
+            print(
+                f"{Fore.GREEN}prepared bundle written:{Style.RESET_ALL} "
+                f"{Path(request.output or '').expanduser().resolve()}"
+            )
+            print(
+                f"{Fore.CYAN}artifact counts:{Style.RESET_ALL} "
+                f"{manifest.get('artifact_counts', {})}"
+            )
+        return 0
+
     try:
         target = resolve_target(request, topology, summary, logger=logger)
     except Exception as exc:
@@ -1090,7 +1404,7 @@ def main() -> int:
         print_preintegration_summary(request, topology, sectors, benchmark_available=target is not None)
 
     try:
-        if request.integral == "dot":
+        if request.integral == "dot" and request.command != "integrate":
             integration = None
             if request.dot_engine in {"fsd", "both"}:
                 integration = integrate(request, topology, sectors, target)
@@ -1137,6 +1451,12 @@ def main() -> int:
         integration.raw_sector_errors,
         request,
     )
+    displayed_count = _prepared_output_count(request, topology)
+    if displayed_count != topology.coefficient_count:
+        raw_coeffs = _trim_sequence(raw_coeffs, displayed_count)
+        raw_errors = _trim_sequence(raw_errors, displayed_count)
+        target = _trim_target(target, displayed_count)
+        _trim_summary_laurent(summary, topology, displayed_count)
     summary.setdefault("symanzik", {})["dual_evaluator_build_seconds"] = topology.dual_evaluator_build_seconds
     summary.setdefault("symanzik", {})[
         "chain_rule_formula_build_seconds"
@@ -1148,6 +1468,8 @@ def main() -> int:
         "chain_rule_formulas_skipped"
     ] = getattr(topology, "chain_rule_formulas_skipped", 0)
     sector_rows = build_sector_result_rows(request, sectors, integration.per_sector)
+    if displayed_count != topology.coefficient_count:
+        sector_rows = _trim_sector_rows(sector_rows, displayed_count)
     output = make_output(
         request=request,
         raw_coeffs=raw_coeffs,
@@ -1165,12 +1487,19 @@ def main() -> int:
         sector_results=sector_rows,
         interrupted=integration.interrupted,
     )
+    if integration.diagnostics:
+        output["integration_diagnostics"] = integration.diagnostics
     output["request"] = request_metadata(request)
     output["environment"] = environment_metadata()
     output["created_utc"] = datetime.now(timezone.utc).isoformat()
     output["command"] = sys.argv
     output["result_path"] = str(result_output_path(request))
-    if request.integral == "dot":
+    if request.command == "integrate":
+        output["input_metadata"] = {
+            "prepared_bundle": str(Path(request.output or "").expanduser().resolve()),
+            "manifest": prepared_manifest or {},
+        }
+    elif request.integral == "dot":
         bundle = get_dot_bundle(request)
         output["input_metadata"] = {
             "dot_file": request.dot_file,

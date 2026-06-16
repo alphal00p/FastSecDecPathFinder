@@ -66,6 +66,7 @@ from subtraction_formula import endpoint_projector_formula_has_curated_cache
 import integrator as integrator_module
 from integrator import integrate
 from kinematics import load_kinematics
+from prepared_bundle import load_prepared_bundle, save_prepared_bundle
 from result_io import print_saved_results, target_from_result_file, write_result_json
 from sectors_generator import SectorDefinition, generate_sectors
 from symbolica import E
@@ -109,6 +110,8 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "min_iter": 1,
         "samples_per_iter": 4096,
         "batch_size": 2048,
+        "sampling_mode": "havana",
+        "democratic_samples_per_sector": 1000,
         "target_rel_accuracy": None,
         "min_error": 0.0,
         "bins": 32,
@@ -123,6 +126,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "regular_taylor_formula_volume_limit": 64,
         "regular_taylor_formula_axis_limit": 5,
         "chain_rule_formula_signature_limit": 256,
+        "chain_rule_formula_output_length_limit": 0,
         "stability_threshold": 1.0e-8,
         "high_precision_stability_threshold": 1.0e-12,
         "stability_precision": 100,
@@ -167,10 +171,30 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     """CLI flags select exactly one dual evaluator generation mode."""
     monkeypatch.setattr(sys, "argv", ["FSD.py"])
     default_request = build_request(parse_args())
+    assert default_request.command == "run"
     assert default_request.dual_evaluator_mode == "pregenerate"
     assert default_request.sector_method == "iterative"
     assert default_request.direct_projector_cache_term_threshold == 54
     assert default_request.subtraction_backend == "projector-formula"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "FSD.py",
+            "generate",
+            "--dot-file",
+            "examples/graphs/triangle.dot",
+            "--kinematics",
+            "examples/graphs/triangle_kinematics.yaml",
+            "--output",
+            "prepared/triangle",
+        ],
+    )
+    generated_request = build_request(parse_args())
+    assert generated_request.command == "generate"
+    assert generated_request.integral == "dot"
+    assert generated_request.output == "prepared/triangle"
 
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--lazy-dual-evaluators-generation"])
     assert build_request(parse_args()).dual_evaluator_mode == "lazy"
@@ -2139,6 +2163,213 @@ def test_dot_fsd_integration_does_not_reenter_pysecdec_after_generation(
         pytest.skip(f"multiprocessing semaphores unavailable in this sandbox: {exc}")
 
     assert result.samples == request.samples_per_iter
+
+
+def _prepared_triangle_bundle(tmp_path: Path) -> tuple[IntegralRequest, Path]:
+    """Generate a tiny DOT triangle prepared bundle for serialization tests."""
+    output_dir = tmp_path / "prepared_triangle"
+    request = make_request(
+        command="generate",
+        output=str(output_dir),
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/triangle.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        prefactor_convention="sector",
+        subtraction_backend="projector-formula",
+        samples_per_iter=64,
+        batch_size=32,
+        workers=1,
+    )
+    try:
+        validate_request(request)
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+    save_prepared_bundle(
+        output_dir,
+        request,
+        topology,
+        sectors,
+        generation_timings={"headline": [], "total": 0.0},
+    )
+    return request, output_dir
+
+
+def test_prepared_bundle_round_trips_symbolica_evaluators(tmp_path: Path) -> None:
+    """A prepared bundle reloads evaluator bytes instead of rebuilding expressions."""
+    _request, output_dir = _prepared_triangle_bundle(tmp_path)
+
+    topology, sectors, manifest = load_prepared_bundle(output_dir, lru_size=2)
+
+    assert manifest["artifact_counts"]["evaluator_files"] > 0
+    assert len(sectors) == 3
+    values = topology.u_values(np.asarray([[0.2, 0.3, 0.5]], dtype=float))
+    assert np.all(np.isfinite(values))
+
+
+def test_prepared_bundle_missing_evaluator_fails_strictly(tmp_path: Path) -> None:
+    """Integrate-mode bundle loading fails when a serialized evaluator is absent."""
+    _request, output_dir = _prepared_triangle_bundle(tmp_path)
+    first_evaluator = next((output_dir / "evaluators").glob("*.bin*"))
+    first_evaluator.unlink()
+
+    with pytest.raises(RuntimeError, match="missing evaluator artifact"):
+        load_prepared_bundle(output_dir)
+
+
+def test_prepared_bundle_integrates_without_generation_reentry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Disk-prepared DOT bundles can be integrated after disabling generation hooks."""
+    _request, output_dir = _prepared_triangle_bundle(tmp_path)
+    topology, sectors, _manifest = load_prepared_bundle(output_dir)
+    request = make_request(
+        command="integrate",
+        output=str(output_dir),
+        integral="dot",
+        dot_file=None,
+        kinematics_file=None,
+        mode="massless",
+        m=0.0,
+        prefactor_convention="sector",
+        subtraction_backend="projector-formula",
+        dual_evaluator_mode=topology.dual_evaluator_mode,
+        ibp_reduce_to_log_endpoint=topology.ibp_reduce_to_log_endpoint,
+        samples_per_iter=64,
+        batch_size=32,
+        workers=1,
+        target_args=("0", "0", "0", "0", "0", "0"),
+        result_path=str(output_dir / "result.json"),
+        dot_global_prefactor_coeffs=tuple(topology.global_prefactor_coeffs or []),
+    )
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("prepared integrate mode re-entered generation")
+
+    monkeypatch.setattr("pysecdec_bridge.require_pysecdec", forbidden)
+    monkeypatch.setattr("dot_topology.build_dot_bundle", forbidden)
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.samples == request.samples_per_iter
+
+
+def test_prepared_bundle_can_display_lower_laurent_subrange(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bundle prepared through eps^0 can persist a leading-order result view."""
+    _request, output_dir = _prepared_triangle_bundle(tmp_path)
+    result_path = output_dir / "subrange.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "FSD.py",
+            "integrate",
+            "--output",
+            str(output_dir),
+            "--prefactor-convention",
+            "sector",
+            "--max-eps-order",
+            "-1",
+            "--samples-per-iter",
+            "64",
+            "--batch-size",
+            "32",
+            "--workers",
+            "1",
+            "--target",
+            "0",
+            "0",
+            "0",
+            "0",
+            "--result-path",
+            str(result_path),
+            "--json",
+            "--no-progress",
+            "--quiet-summary",
+        ],
+    )
+
+    assert main() == 0
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+
+    assert data["laurent_labels"] == ["eps^-2", "eps^-1"]
+    assert len(data["aggregate_results"]["display"]["coefficients"]) == 2
+    assert len(data["sector_results"][0]["display"]["coefficients"]) == 2
+
+
+def test_democratic_sampling_hits_every_sector_equally() -> None:
+    """Democratic mode gives each active sector the same explicit sample count."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        m=0.0,
+        s=-1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="democratic",
+        democratic_samples_per_sector=3,
+        batch_size=3,
+        samples_per_iter=9,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.samples == 3 * len(sectors)
+    assert result.diagnostics["sampling_mode"] == "democratic"
+    assert result.diagnostics["samples_per_sector"] == 3
+    for sector_result in result.per_sector:
+        assert sector_result.samples == 3
+        assert sector_result.diagnostics["sampling_mode"] == "democratic"
+        assert "max_abs_weight" in sector_result.diagnostics
+
+
+def test_democratic_batches_are_round_robin() -> None:
+    """Small democratic chunks should cover every sector before the next round."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        m=0.0,
+        s=-1.0,
+        sampling_mode="democratic",
+        democratic_samples_per_sector=3,
+        batch_size=1,
+    )
+    sectors = generate_sectors(request)
+
+    batches = integrator_module.democratic_batches(
+        request,
+        list(range(len(sectors))),
+        sectors,
+    )
+
+    first_round = [batch.sector_id for batch in batches[: len(sectors)]]
+    second_round = [batch.sector_id for batch in batches[len(sectors) : 2 * len(sectors)]]
+    assert first_round == list(range(len(sectors)))
+    assert second_round == list(range(len(sectors)))
+    assert [batch.coords.shape[0] for batch in batches] == [1] * (3 * len(sectors))
 
 
 def test_result_table_marks_missing_dot_reference_as_na(capsys: pytest.CaptureFixture[str]) -> None:

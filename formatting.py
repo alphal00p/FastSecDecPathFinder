@@ -11,6 +11,7 @@ from colorama import Fore, Style
 from prettytable import PrettyTable
 from symbolica import E
 
+from cache_utils import formula_cache_dir
 from definitions import (
     BenchmarkResult,
     EULER_GAMMA,
@@ -184,6 +185,26 @@ def summary_data(
         "regular_taylor_formula_volume_limit": request.regular_taylor_formula_volume_limit,
         "regular_taylor_formula_axis_limit": request.regular_taylor_formula_axis_limit,
         "chain_rule_formula_signature_limit": request.chain_rule_formula_signature_limit,
+        "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
+        "formula_cache_dir": str(formula_cache_dir()),
+        "endpoint_projector_formulas_from_cache": getattr(
+            topology, "endpoint_projector_formulas_from_cache", 0
+        ),
+        "endpoint_projector_formulas_generated": getattr(
+            topology, "endpoint_projector_formulas_generated", 0
+        ),
+        "regular_taylor_formulas_from_cache": getattr(
+            topology, "regular_taylor_formulas_from_cache", 0
+        ),
+        "regular_taylor_formulas_generated": getattr(
+            topology, "regular_taylor_formulas_generated", 0
+        ),
+        "chain_rule_formulas_from_cache": getattr(
+            topology, "chain_rule_formulas_from_cache", 0
+        ),
+        "chain_rule_formulas_generated": getattr(
+            topology, "chain_rule_formulas_generated", 0
+        ),
         "regular_taylor_formulas_from_curated_cache": getattr(
             topology, "regular_taylor_formulas_from_curated_cache", 0
         ),
@@ -298,6 +319,7 @@ def summary_data(
             "parameter_values": topology.parameter_values,
             "dual_shape_summary": dual_shape_summary(sectors),
             "dual_evaluator_mode": request.dual_evaluator_mode,
+            "formula_cache_dir": str(formula_cache_dir()),
             "dual_evaluator_build_seconds": topology.dual_evaluator_build_seconds,
             "chain_rule_formula_build_seconds": getattr(
                 topology,
@@ -305,13 +327,34 @@ def summary_data(
                 0.0,
             ),
             "chain_rule_formula_count": len(getattr(topology, "_chain_rule_formulas", {})),
+            "chain_rule_formulas_from_cache": getattr(
+                topology,
+                "chain_rule_formulas_from_cache",
+                0,
+            ),
+            "chain_rule_formulas_generated": getattr(
+                topology,
+                "chain_rule_formulas_generated",
+                0,
+            ),
             "chain_rule_formulas_skipped": getattr(
                 topology,
                 "chain_rule_formulas_skipped",
                 0,
             ),
+            "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
             "subtraction_formula_count": len(topology._subtraction_formulas),
             "endpoint_projector_formula_count": len(topology._endpoint_projector_formulas),
+            "endpoint_projector_formulas_from_cache": getattr(
+                topology,
+                "endpoint_projector_formulas_from_cache",
+                0,
+            ),
+            "endpoint_projector_formulas_generated": getattr(
+                topology,
+                "endpoint_projector_formulas_generated",
+                0,
+            ),
             "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
             "direct_projector_cache_override_sectors": getattr(
                 topology, "endpoint_projector_direct_cache_override_sectors", 0
@@ -321,6 +364,16 @@ def summary_data(
             ),
             "regular_taylor_formula_count": len(
                 getattr(topology, "_regular_taylor_formulas", {})
+            ),
+            "regular_taylor_formulas_from_cache": getattr(
+                topology,
+                "regular_taylor_formulas_from_cache",
+                0,
+            ),
+            "regular_taylor_formulas_generated": getattr(
+                topology,
+                "regular_taylor_formulas_generated",
+                0,
             ),
             "regular_taylor_formulas_from_curated_cache": getattr(
                 topology,
@@ -369,6 +422,7 @@ def print_preintegration_summary(
     symanzik.add_row(["evaluator order", ", ".join(data["symanzik"]["parameter_order"])])
     symanzik.add_row(["parameter values", data["symanzik"]["parameter_values"]])
     symanzik.add_row(["Taylor evaluator mode", data["symanzik"]["dual_evaluator_mode"]])
+    symanzik.add_row(["formula cache dir", data["symanzik"].get("formula_cache_dir", "n/a")])
     symanzik.add_row(["Taylor evaluator build time", format_seconds(data["symanzik"]["dual_evaluator_build_seconds"])])
     symanzik.add_row([
         "chain-rule formula build time",
@@ -378,13 +432,32 @@ def print_preintegration_summary(
         "chain-rule formula count",
         data["symanzik"].get("chain_rule_formula_count", 0),
     ])
+    symanzik.add_row([
+        "chain-rule cache hit/generated",
+        (
+            f"{data['symanzik'].get('chain_rule_formulas_from_cache', 0)} / "
+            f"{data['symanzik'].get('chain_rule_formulas_generated', 0)}"
+        ),
+    ])
     if data["symanzik"].get("chain_rule_formulas_skipped", 0):
         symanzik.add_row([
             "chain-rule formulas skipped",
             data["symanzik"].get("chain_rule_formulas_skipped", 0),
         ])
+    if data["symanzik"].get("chain_rule_formula_output_length_limit", 0):
+        symanzik.add_row([
+            "chain-rule output limit",
+            data["symanzik"].get("chain_rule_formula_output_length_limit", 0),
+        ])
     symanzik.add_row(["subtraction formula count", data["symanzik"]["subtraction_formula_count"]])
     symanzik.add_row(["endpoint projector count", data["symanzik"]["endpoint_projector_formula_count"]])
+    symanzik.add_row([
+        "endpoint cache hit/generated",
+        (
+            f"{data['symanzik'].get('endpoint_projector_formulas_from_cache', 0)} / "
+            f"{data['symanzik'].get('endpoint_projector_formulas_generated', 0)}"
+        ),
+    ])
     symanzik.add_row([
         "direct projector cache threshold",
         data["symanzik"].get("direct_projector_cache_term_threshold", 0),
@@ -400,6 +473,13 @@ def print_preintegration_summary(
     symanzik.add_row([
         "regular Taylor formula count",
         data["symanzik"].get("regular_taylor_formula_count", 0),
+    ])
+    symanzik.add_row([
+        "regular Taylor cache hit/generated",
+        (
+            f"{data['symanzik'].get('regular_taylor_formulas_from_cache', 0)} / "
+            f"{data['symanzik'].get('regular_taylor_formulas_generated', 0)}"
+        ),
     ])
     symanzik.add_row([
         "curated regular Taylor assets",
@@ -607,6 +687,7 @@ def apply_global_convention(
     sector_coeffs: list[complex],
     sector_errors: list[complex],
     request: IntegralRequest,
+    dot_global_prefactor_coeffs: list[complex] | tuple[complex, ...] | None = None,
 ) -> tuple[list[complex], list[complex]]:
     """Apply gamma-scheme and stripped-convention shifts to sector coefficients."""
     def convolve_regular_factor(
@@ -632,9 +713,15 @@ def apply_global_convention(
 
     if request.integral == "dot":
         if request.prefactor_convention == "pysecdec":
-            from dot_topology import get_dot_bundle
+            prefactor = (
+                list(dot_global_prefactor_coeffs)
+                if dot_global_prefactor_coeffs is not None
+                else list(request.dot_global_prefactor_coeffs or [])
+            )
+            if not prefactor:
+                from dot_topology import get_dot_bundle
 
-            prefactor = get_dot_bundle(request).topology.global_prefactor_coeffs or [1.0 + 0.0j]
+                prefactor = get_dot_bundle(request).topology.global_prefactor_coeffs or [1.0 + 0.0j]
             return convolve_regular_factor(sector_coeffs, sector_errors, prefactor)
         return sector_coeffs[:], sector_errors[:]
 
@@ -929,6 +1016,7 @@ def build_sector_result_rows(
                     "coefficients": display_coeffs,
                     "errors": display_errors,
                 },
+                "diagnostics": result.diagnostics,
                 "sort_keys": {
                     "abs_central": max((abs(value) for value in display_coeffs), default=0.0),
                     "abs_error": max((abs(value) for value in display_errors), default=0.0),

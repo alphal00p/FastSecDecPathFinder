@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -89,6 +89,8 @@ class IntegralRequest:
     min_iter: int
     samples_per_iter: int
     batch_size: int
+    sampling_mode: str
+    democratic_samples_per_sector: int
     target_rel_accuracy: float | None
     min_error: float
     bins: int
@@ -103,6 +105,7 @@ class IntegralRequest:
     regular_taylor_formula_volume_limit: int
     regular_taylor_formula_axis_limit: int
     chain_rule_formula_signature_limit: int
+    chain_rule_formula_output_length_limit: int
     stability_threshold: float
     high_precision_stability_threshold: float
     stability_precision: int
@@ -113,6 +116,11 @@ class IntegralRequest:
     json: bool
     mu: float | None
     onshell_threshold: float | None
+    command: str = "run"
+    output: str | None = None
+    evaluator_lru_size: int = 128
+    dot_global_prefactor_coeffs: tuple[complex, ...] | None = None
+    max_eps_order_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +157,7 @@ class SectorIntegrationResult:
     raw_sector_coeffs: list[complex]
     raw_sector_errors: list[complex]
     precision_counts: dict[str, int]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -167,6 +176,7 @@ class IntegrationResult:
     python_overhead_fraction: float
     precision_counts: dict[str, int]
     interrupted: bool = False
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

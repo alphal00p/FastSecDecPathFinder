@@ -11,16 +11,22 @@ from __future__ import annotations
 import copy
 import cmath
 from functools import lru_cache
+import gzip
+import hashlib
 from itertools import product
+import json
 import math
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
+import os
+from pathlib import Path
 import time
 from typing import Any
 
 import numpy as np
-from symbolica import E, Expression, S
+from symbolica import E, Evaluator, Expression, S
 
+from cache_utils import formula_cache_dir, formula_cache_read_roots, mirror_cache_entry_to_primary
 from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
 from sectors_generator import SectorDefinition
 from subtraction_formula import (
@@ -35,6 +41,16 @@ from utils import decimal_complex_with_precision, decimal_with_precision
 
 ComplexPrecise = tuple[Any, Any]
 ComplexPreciseRow = list[ComplexPrecise]
+
+# The universal chain-rule formula path is currently scoped to scalar
+# parameter integrals up to three loops, where U has degree L and F has degree
+# L+1.  Dense derivative slots up to degree four therefore cover every
+# topology-specific nonzero U/F derivative in the present DOT backend while
+# keeping the formula signature independent of the number of original
+# Feynman parameters and the sparse derivative support of one particular
+# topology.
+CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS = 4
+CHAIN_RULE_FORMULA_CACHE_VERSION = 4
 
 
 def _decimal_real(value: Any, precision_digits: int) -> Decimal:
@@ -67,6 +83,9 @@ class TopologyDefinition:
     jit_compile_evaluators: bool = False
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
+    skip_evaluator_build: bool = False
+    strict_prepared_bundle: bool = False
+    chain_rule_metadata_only: bool = False
     parametric_representation: ParametricRepresentation | None = None
     _u_evaluator: Any = field(init=False, repr=False)
     _f_evaluator: Any = field(init=False, repr=False)
@@ -145,11 +164,18 @@ class TopologyDefinition:
     _regular_taylor_signature_version: int = field(default=1, init=False, repr=False)
     regular_taylor_formulas_skipped: int = field(default=0, init=False)
     regular_taylor_formulas_from_curated_cache: int = field(default=0, init=False)
+    endpoint_projector_formulas_from_cache: int = field(default=0, init=False)
+    endpoint_projector_formulas_generated: int = field(default=0, init=False)
+    regular_taylor_formulas_from_cache: int = field(default=0, init=False)
+    regular_taylor_formulas_generated: int = field(default=0, init=False)
     endpoint_projector_direct_cache_override_sectors: int = field(default=0, init=False)
     endpoint_projector_direct_cache_override_signatures: int = field(default=0, init=False)
     chain_rule_formula_build_seconds: float = field(default=0.0, init=False)
     chain_rule_formula_signature_limit: int = 256
+    chain_rule_formula_output_length_limit: int = 0
     chain_rule_formulas_skipped: int = field(default=0, init=False)
+    chain_rule_formulas_from_cache: int = field(default=0, init=False)
+    chain_rule_formulas_generated: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Build the scalar U and F evaluators in the declared row order."""
@@ -159,8 +185,12 @@ class TopologyDefinition:
                 f"{self.family}: unsupported dual evaluator mode {self.dual_evaluator_mode!r}"
             )
         params = [S(name) for name in [*self.x_names, *self.parameter_names]]
-        self._u_evaluator = self.u_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
-        self._f_evaluator = self.f_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+        if self.skip_evaluator_build:
+            self._u_evaluator = None
+            self._f_evaluator = None
+        else:
+            self._u_evaluator = self.u_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+            self._f_evaluator = self.f_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
         if self.parametric_representation is None:
             propagator_powers = tuple(1.0 for _ in self.x_names)
             self.parametric_representation = ParametricRepresentation(
@@ -229,6 +259,50 @@ class TopologyDefinition:
         if min_order > max_order:
             raise ValueError(f"{self.family}: invalid Laurent range {min_order}..{max_order}")
         self.expected_laurent_orders = self.order_labels(min_order, max_order)
+
+    @staticmethod
+    def _signature_laurent_orders(fragment: Any) -> tuple[int, ...]:
+        """Parse the Laurent-order tail used by formula cache signatures."""
+        orders: list[int] = []
+        for item in fragment:
+            text = str(item)
+            if text == "eps^0":
+                orders.append(0)
+            elif text.startswith("eps^"):
+                orders.append(int(text[4:]))
+            else:
+                orders.append(int(item))
+        return tuple(orders)
+
+    def _lookup_formula_with_laurent_superset(
+        self,
+        formulas: dict[tuple[Any, ...], Any],
+        signature: tuple[Any, ...],
+    ) -> Any | None:
+        """Return a formula whose signature only differs by a larger Laurent range.
+
+        Prepared bundles may be generated through a high order and later loaded
+        for a leading-pole-only integration.  Formula signatures include their
+        prepared Laurent orders, so strict prepared mode needs this lookup
+        relaxation to reuse the serialized superset evaluator instead of trying
+        to rebuild a smaller one.
+        """
+        formula = formulas.get(signature)
+        if formula is not None or not self.strict_prepared_bundle or not signature:
+            return formula
+        prefix = signature[:-1]
+        active_orders = set(self._signature_laurent_orders(signature[-1]))
+        candidates: list[tuple[int, Any]] = []
+        for prepared_signature, prepared_formula in formulas.items():
+            if prepared_signature[:-1] != prefix:
+                continue
+            prepared_orders = set(self._signature_laurent_orders(prepared_signature[-1]))
+            if active_orders.issubset(prepared_orders):
+                candidates.append((len(prepared_orders), prepared_formula))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
 
     def _row(self, x: list[float] | tuple[float, ...]) -> list[float]:
         """Build one evaluator row from Feynman parameters and invariants."""
@@ -336,6 +410,10 @@ class TopologyDefinition:
         key = tuple(dual_shape)
         evaluator = cache.get(key)
         if evaluator is None:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(
+                    f"{self.family}: missing prepared dual evaluator for shape {key}"
+                )
             start = time.perf_counter()
             evaluator = copy.copy(scalar_evaluator)
             evaluator.dualize([list(mi) for mi in dual_shape])
@@ -590,7 +668,10 @@ class TopologyDefinition:
     def subtraction_formula_for(self, sector: SectorDefinition) -> "SubtractionFormulaDefinition":
         """Return a pregenerated subtraction formula or fail clearly."""
         signature = self.subtraction_formula_signature(sector)
-        formula = self._subtraction_formulas.get(signature)
+        formula = self._lookup_formula_with_laurent_superset(
+            self._subtraction_formulas,
+            signature,
+        )
         if formula is None:
             raise RuntimeError(
                 f"{sector.name}: missing pregenerated subtraction formula; "
@@ -659,7 +740,11 @@ class TopologyDefinition:
                 progress.finish_stage(
                     "Symbolica endpoint projector build",
                     time.perf_counter() - start_all,
-                    detail=f"{len(pending)} endpoint signature(s)",
+                    detail=(
+                        f"{len(pending)} endpoint signature(s), "
+                        f"{self.endpoint_projector_formulas_from_cache} cache hit(s), "
+                        f"{self.endpoint_projector_formulas_generated} generated"
+                    ),
                 )
 
     def _endpoint_projector_signature_components(
@@ -761,7 +846,25 @@ class TopologyDefinition:
     ) -> "EndpointProjectorFormulaDefinition":
         """Return a pregenerated endpoint projector formula or fail clearly."""
         signature = self.endpoint_projector_signature(sector)
-        formula = self._endpoint_projector_formulas.get(signature)
+        formula = self._lookup_formula_with_laurent_superset(
+            self._endpoint_projector_formulas,
+            signature,
+        )
+        if formula is None and self.strict_prepared_bundle:
+            endpoint_powers, taylor_orders = self._endpoint_projector_signature_components(sector)
+            for use_ibp in (False, True):
+                alternate_signature = self._endpoint_projector_signature_from_components(
+                    sector,
+                    endpoint_powers,
+                    taylor_orders,
+                    use_ibp=use_ibp,
+                )
+                formula = self._lookup_formula_with_laurent_superset(
+                    self._endpoint_projector_formulas,
+                    alternate_signature,
+                )
+                if formula is not None:
+                    break
         if formula is None:
             raise RuntimeError(
                 f"{sector.name}: missing pregenerated endpoint projector formula; "
@@ -979,6 +1082,8 @@ class TopologyDefinition:
                     time.perf_counter() - start_all,
                     detail=(
                         f"{len(pending)} regular signature(s)"
+                        f", {self.regular_taylor_formulas_from_cache} cache hit(s)"
+                        f", {self.regular_taylor_formulas_generated} generated"
                         + (
                             f", {self.regular_taylor_formulas_from_curated_cache} curated"
                             if self.regular_taylor_formulas_from_curated_cache
@@ -1089,13 +1194,14 @@ class TopologyDefinition:
                         add_chain_request(sector, "u", source_shape)
                         add_chain_request(sector, "f", source_shape)
                     else:
-                        fallback_by_zero.setdefault(tuple(zero), []).append(
-                            (
-                                key,
-                                tuple(int(order) for order in max_orders),
-                                tuple(output_pairs),
-                            )
-                        )
+                        # Do not derive chain-rule formulas for regular
+                        # Taylor signatures that were deliberately skipped.
+                        # The fallback source shapes can be enormous for
+                        # six-axis triple-box sectors.  In strict prepared
+                        # bundles those sectors use the Python regular
+                        # composer rather than triggering runtime formula
+                        # generation.
+                        continue
                 iterable = []
                 for zero, entries in fallback_by_zero.items():
                     entries.sort(key=lambda item: (len(item[0][0]), item[0][0], item[1]))
@@ -1175,37 +1281,13 @@ class TopologyDefinition:
                     add_chain_request(sector, "f", source_shape)
                     continue
 
-                if output_pairs:
-                    requested_multis = [
-                        tuple(int(value) for value in multi_index)
-                        for multi_index, _regular_order in output_pairs
-                    ]
-                    residual_multis = _ancestor_closed_multi_set(
-                        requested_multis,
-                        len(tuple(max_orders)),
-                    )
-                    u_shape = self.sparse_regular_source_shape_for_monomial_powers(
-                        sector,
-                        zero,
-                        residual_multis,
-                        sector.u_monomial_powers,
-                    )
-                    f_shape = self.sparse_regular_source_shape_for_monomial_powers(
-                        sector,
-                        zero,
-                        residual_multis,
-                        sector.f_monomial_powers,
-                    )
-                else:
-                    source_shape = self.regular_taylor_source_shape(
-                        sector,
-                        zero,
-                        max_orders,
-                    )
-                    u_shape = source_shape
-                    f_shape = source_shape
-                add_chain_request(sector, "u", u_shape)
-                add_chain_request(sector, "f", f_shape)
+                # Chain-rule formulas are only useful when the regular
+                # Taylor algebra that consumes them is also prepared.  Missing
+                # regular signatures are handled by the Python fallback path;
+                # generating chain formulas for those source shapes caused the
+                # triple-box preparation to spend time and memory on formulas
+                # that no prepared regular evaluator would actually call.
+                continue
             if len(requests) > request_limit:
                 # For huge all-sector triple-box runs, it is enough to know
                 # that the runtime-ready chain-rule layer would be too large.
@@ -1213,15 +1295,54 @@ class TopologyDefinition:
                 # time enumerating thousands of formulas that will be skipped.
                 break
 
+        output_length_limit = int(self.chain_rule_formula_output_length_limit)
+        oversized_skipped = 0
+        filtered_requests: list[
+            tuple[str, str, tuple[tuple[int, ...], ...]]
+        ] = []
+        for signature, request in requests.items():
+            _sector_name, _polynomial, shape_tuple = request
+            if output_length_limit > 0 and len(shape_tuple) > output_length_limit:
+                cached = _load_chain_rule_formula_from_cache(
+                    signature,
+                    load_evaluators=False,
+                )
+                if cached is None:
+                    oversized_skipped += 1
+                    continue
+            filtered_requests.append(request)
+
         ordered_requests = sorted(
-            requests.values(),
+            filtered_requests,
             key=lambda item: (len(item[2]), len(item[2][0]) if item[2] else 0, item[0], item[1]),
         )
-        self.chain_rule_formulas_skipped = 0
+        self.chain_rule_formulas_skipped = oversized_skipped
         if not ordered_requests:
+            if progress is not None and oversized_skipped:
+                progress.start_stage(
+                    "Symbolica chain-rule build",
+                    detail=(
+                        f"skipped {oversized_skipped} mapped derivative formula(s); "
+                        f"output length limit={output_length_limit}"
+                    ),
+                    total=1,
+                )
+                progress.update(
+                    1,
+                    total=1,
+                    detail="all cold chain-rule requests exceeded output-length guard",
+                )
+                progress.finish_stage(
+                    "Symbolica chain-rule build",
+                    0.0,
+                    detail=(
+                        f"skipped {oversized_skipped} mapped derivative formula(s); "
+                        f"output length limit={output_length_limit}"
+                    ),
+                )
             return
         if len(ordered_requests) > request_limit:
-            self.chain_rule_formulas_skipped = len(ordered_requests)
+            self.chain_rule_formulas_skipped = oversized_skipped + len(ordered_requests)
             if progress is not None:
                 progress.start_stage(
                     "Symbolica chain-rule build",
@@ -1239,7 +1360,10 @@ class TopologyDefinition:
                 progress.finish_stage(
                     "Symbolica chain-rule build",
                     0.0,
-                    detail=f"skipped {len(ordered_requests)} mapped derivative formula(s)",
+                    detail=(
+                        f"skipped {len(ordered_requests)} mapped derivative formula(s), "
+                        f"{oversized_skipped} already skipped by output length"
+                    ),
                 )
             return
         if progress is not None:
@@ -1277,7 +1401,16 @@ class TopologyDefinition:
                 progress.finish_stage(
                     "Symbolica chain-rule build",
                     time.perf_counter() - start_all,
-                    detail=f"{len(ordered_requests)} mapped derivative formula(s)",
+                    detail=(
+                        f"{len(ordered_requests)} mapped derivative formula(s), "
+                        f"{self.chain_rule_formulas_from_cache} cache hit(s), "
+                        f"{self.chain_rule_formulas_generated} generated"
+                        + (
+                            f", {oversized_skipped} skipped by output length"
+                            if oversized_skipped
+                            else ""
+                        )
+                    ),
                 )
 
     def regular_taylor_signatures_for_sector(
@@ -1435,7 +1568,10 @@ class TopologyDefinition:
             max_orders,
             output_pairs=output_pairs,
         )
-        formula = self._regular_taylor_formulas.get(signature)
+        formula = self._lookup_formula_with_laurent_superset(
+            self._regular_taylor_formulas,
+            signature,
+        )
         if formula is None:
             raise RuntimeError(
                 f"{sector.name}: missing pregenerated regular Taylor formula; "
@@ -1630,6 +1766,11 @@ class TopologyDefinition:
         else:
             raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
         if max_total not in indices_by_order:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(
+                    f"{self.family}: missing prepared {polynomial} derivative index set "
+                    f"for total degree {max_total}"
+                )
             self._prepare_symbolic_derivative_evaluators(polynomial, max_total)
         return indices_by_order[max_total]
 
@@ -1647,6 +1788,11 @@ class TopologyDefinition:
             raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
         evaluator = cache.get(multi_index)
         if evaluator is None:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(
+                    f"{self.family}: missing prepared {polynomial} derivative evaluator "
+                    f"for {multi_index}"
+                )
             derivative_expr = expr_cache.get(multi_index)
             if derivative_expr is None:
                 derivative_expr = self._differentiate_expr(expr, multi_index)
@@ -1681,6 +1827,11 @@ class TopologyDefinition:
         evaluator = multi_cache.get(key)
         if evaluator is not None:
             return evaluator
+        if self.strict_prepared_bundle:
+            raise RuntimeError(
+                f"{self.family}: missing prepared {polynomial} multi-derivative evaluator "
+                f"for {key}"
+            )
         expressions: list[Any] = []
         for multi_index in key:
             derivative_expr = expr_cache.get(multi_index)
@@ -1710,7 +1861,37 @@ class TopologyDefinition:
         rows = self._rows(x_values)
         if not derivative_indices:
             return {}
-        evaluator = self._symbolic_derivative_multi_evaluator(polynomial, derivative_indices)
+        requested_key = tuple(tuple(int(value) for value in multi) for multi in derivative_indices)
+        actual_key = requested_key
+        if polynomial == "u":
+            multi_cache = self._u_derivative_multi_evaluators
+        elif polynomial == "f":
+            multi_cache = self._f_derivative_multi_evaluators
+        else:
+            raise ValueError(f"{self.family}: unknown polynomial {polynomial!r}")
+
+        evaluator = multi_cache.get(requested_key)
+        if evaluator is None and self.strict_prepared_bundle:
+            # Prepared bundles often store one evaluator for a larger total
+            # derivative order.  A sector may later need only a sparse subset
+            # of those columns, especially after the universal chain-rule
+            # formulas compress active coordinates.  Reusing the smallest
+            # prepared superset keeps strict integrate mode disk-only: no
+            # Symbolica derivative evaluator is built here.
+            requested = set(requested_key)
+            candidates = [
+                key
+                for key in multi_cache
+                if requested.issubset(set(key))
+            ]
+            if candidates:
+                actual_key = min(
+                    candidates,
+                    key=lambda key: (len(key), sum(sum(multi) for multi in key)),
+                )
+                evaluator = multi_cache[actual_key]
+        if evaluator is None:
+            evaluator = self._symbolic_derivative_multi_evaluator(polynomial, derivative_indices)
         start = time.perf_counter()
         matrix = np.asarray(
             evaluator.evaluate_complex(np.ascontiguousarray(rows)),
@@ -1718,9 +1899,10 @@ class TopologyDefinition:
         )
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
+        actual_index = {tuple(multi_index): column for column, multi_index in enumerate(actual_key)}
         return {
-            tuple(multi_index): matrix[:, column]
-            for column, multi_index in enumerate(derivative_indices)
+            tuple(multi_index): matrix[:, actual_index[tuple(multi_index)]]
+            for multi_index in derivative_indices
         }
 
     def _symbolic_derivative_taylor_batch(
@@ -1737,8 +1919,20 @@ class TopologyDefinition:
         original Feynman parameters and reused for every sector.  Sector
         dependence only enters through the numerical map Taylor coefficients.
         """
-        context = self._symbolic_derivative_taylor_context_batch(sector, y_values, timing)
-        return self._compose_symbolic_derivative_taylor_batch(sector, context, polynomial, timing)
+        requested_shape = [tuple(int(value) for value in multi) for multi in sector.dual_shape]
+        context = self._symbolic_derivative_taylor_context_batch(
+            sector,
+            y_values,
+            timing,
+            output_shape=requested_shape,
+        )
+        return self._compose_symbolic_derivative_taylor_batch(
+            sector,
+            context,
+            polynomial,
+            timing,
+            output_shape=requested_shape,
+        )
 
     def _symbolic_derivative_taylor_pair_batch(
         self,
@@ -1792,9 +1986,10 @@ class TopologyDefinition:
         output_shape: list[tuple[int, ...]] | None = None,
     ) -> dict[str, Any]:
         """Build reusable sector-map Taylor data for symbolic derivatives."""
-        active_shape = list(output_shape or sector.dual_shape)
-        if not active_shape:
+        requested_shape = [tuple(int(value) for value in multi) for multi in (output_shape or sector.dual_shape)]
+        if not requested_shape:
             raise ValueError(f"{sector.name}: no dual shape declared")
+        active_shape = _chain_rule_envelope_shape(requested_shape)
 
         rows_in = np.asarray(y_values, dtype=float)
         n_rows = rows_in.shape[0]
@@ -1834,6 +2029,7 @@ class TopologyDefinition:
             "x0": x0,
             "h_series": h_series,
             "output_shape": active_shape,
+            "requested_output_shape": requested_shape,
         }
 
     def _chain_rule_h_layout(
@@ -1867,11 +2063,89 @@ class TopologyDefinition:
                 if multi == zero:
                     continue
                 value = x_jets[:, x_index, shape_index[multi]]
-                if np.any(value):
+                if value.any():
                     layout.append((int(x_index), tuple(int(v) for v in multi)))
         out = tuple(layout)
         self._chain_rule_h_layout_cache[cache_key] = out
         return out
+
+    def _chain_rule_active_x_indices(
+        self,
+        sector: SectorDefinition,
+        output_shape: list[tuple[int, ...]],
+    ) -> tuple[int, ...]:
+        """Return original Feynman-parameter indices that vary in the map.
+
+        The mapped-derivative chain rule only needs coordinates whose sector
+        map has at least one non-constant Taylor coefficient.  Compressing to
+        this active set removes the total topology arity from the universal
+        formula signature.  The original indices are kept only at runtime to
+        lift compressed derivative multi-indices back to U/F derivative
+        evaluator inputs.
+        """
+        monomial_active = sector.structurally_active_map_indices()
+        if monomial_active is not None:
+            return tuple(int(index) for index in monomial_active)
+        return tuple(
+            sorted({int(x_index) for x_index, _multi in self._chain_rule_h_layout(sector, output_shape)})
+        )
+
+    def _chain_rule_compressed_derivative_indices(
+        self,
+        polynomial: str,
+        max_total: int,
+        active_x_indices: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], ...]:
+        """Project nonzero U/F derivative indices onto active map coordinates."""
+        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
+        active = set(int(index) for index in active_x_indices)
+        compressed: set[tuple[int, ...]] = set()
+        for multi_index in derivative_indices:
+            # Derivatives with powers on inactive coordinates multiply a zero
+            # sector-map Taylor series and cannot contribute to P(X_s(y)).
+            if any(int(value) and position not in active for position, value in enumerate(multi_index)):
+                continue
+            compressed.add(tuple(int(multi_index[index]) for index in active_x_indices))
+        return tuple(sorted(compressed, key=lambda item: (sum(item), item)))
+
+    def _chain_rule_original_derivative_indices(
+        self,
+        compressed_derivative_indices: list[tuple[int, ...]] | tuple[tuple[int, ...], ...],
+        active_x_indices: tuple[int, ...],
+    ) -> list[tuple[int, ...]]:
+        """Lift compressed derivative indices back to original x-space."""
+        out: list[tuple[int, ...]] = []
+        for compressed in compressed_derivative_indices:
+            full = [0 for _ in self.x_names]
+            if len(compressed) != len(active_x_indices):
+                raise ValueError(
+                    f"{self.family}: chain-rule derivative arity mismatch: "
+                    f"{compressed!r} for active coordinates {active_x_indices!r}"
+                )
+            for active_position, x_index in enumerate(active_x_indices):
+                full[int(x_index)] = int(compressed[active_position])
+            out.append(tuple(full))
+        return out
+
+    def _chain_rule_dense_derivative_indices_for_signature(
+        self,
+        signature: tuple[Any, ...],
+    ) -> tuple[tuple[int, ...], ...]:
+        """Return the universal dense derivative slots for a chain formula.
+
+        These slots intentionally depend only on the compressed active
+        coordinate count and the requested Taylor order.  Topology-specific
+        polynomial derivatives that are structurally zero are passed as zero
+        numeric inputs when the formula is evaluated.
+        """
+        active_coordinate_count = int(signature[0])
+        output_shape = tuple(tuple(int(value) for value in multi) for multi in signature[2])
+        max_total = max((sum(multi) for multi in output_shape), default=0)
+        max_degree = min(
+            CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
+            max_total,
+        )
+        return _dense_total_degree_multi_indices(active_coordinate_count, max_degree)
 
     def _chain_rule_formula_signature(
         self,
@@ -1880,24 +2154,27 @@ class TopologyDefinition:
         output_shape: list[tuple[int, ...]],
     ) -> tuple[Any, ...]:
         """Return a cache key for a mapped-derivative composition formula."""
-        active_shape = tuple(tuple(int(value) for value in multi) for multi in output_shape)
-        max_total = max((sum(multi) for multi in active_shape), default=0)
-        derivative_indices = tuple(self._symbolic_derivative_indices(polynomial, max_total))
-        h_layout = self._chain_rule_h_layout(sector, list(active_shape))
-        # Version 2 removes sector names and map-expression strings from the
-        # key.  The only sector-specific information retained is the structural
-        # map-jet input layout, which is part of the numerical contract.
-        return (
-            "chain-rule",
-            2,
-            polynomial,
-            len(self.x_names),
-            int(sector.integration_dim),
-            active_shape,
-            derivative_indices,
-            h_layout,
-            bool(self.jit_compile_evaluators),
+        loop_count = (
+            int(self.parametric_representation.loop_count)
+            if self.parametric_representation is not None
+            else 1
         )
+        if loop_count > 3:
+            raise NotImplementedError(
+                f"{self.family}: universal chain-rule formula cache is currently "
+                "validated only through three loops"
+            )
+        original_envelope_shape = _chain_rule_envelope_shape(output_shape)
+        canonical_envelope_shape = tuple(_chain_rule_canonical_envelope_shape(output_shape))
+        active_x_indices = self._chain_rule_active_x_indices(sector, original_envelope_shape)
+        rank = len(canonical_envelope_shape[0]) if canonical_envelope_shape else 0
+        # The mathematical chain-rule formula is universal once the sector map
+        # is compressed to its active coordinates.  U/F derivative support,
+        # original Feynman-parameter arity, sector name, polynomial label, and
+        # JIT policy are deliberately not part of the signature.  The Taylor
+        # shape is the dense coordinate envelope requested by the caller, not a
+        # sparse sector-specific coefficient list.
+        return (len(active_x_indices), rank, canonical_envelope_shape)
 
     def chain_rule_formula_for(
         self,
@@ -1906,9 +2183,10 @@ class TopologyDefinition:
         output_shape: list[tuple[int, ...]],
     ) -> "ChainRuleFormulaDefinition":
         """Return or build a Symbolica chain-rule composition evaluator."""
-        active_shape = [tuple(int(value) for value in multi) for multi in output_shape]
-        if not active_shape:
+        requested_shape = [tuple(int(value) for value in multi) for multi in output_shape]
+        if not requested_shape:
             raise ValueError(f"{sector.name}: empty chain-rule output shape")
+        active_shape = _chain_rule_canonical_envelope_shape(requested_shape)
         lookup_key = (sector.name, polynomial, tuple(active_shape))
         direct_cached = self._chain_rule_formula_lookup_cache.get(lookup_key)
         if direct_cached is not None:
@@ -1918,11 +2196,34 @@ class TopologyDefinition:
         if cached is not None:
             self._chain_rule_formula_lookup_cache[lookup_key] = cached
             return cached
+        cached = _load_chain_rule_formula_from_cache(
+            signature,
+            load_evaluators=not self.chain_rule_metadata_only,
+        )
+        if cached is not None:
+            self.chain_rule_formulas_from_cache += 1
+            self._chain_rule_formulas[signature] = cached
+            self._chain_rule_formula_lookup_cache[lookup_key] = cached
+            return cached
+        if self.strict_prepared_bundle:
+            raise RuntimeError(
+                f"{sector.name}: missing prepared chain-rule formula for "
+                f"{polynomial} shape {tuple(active_shape)}"
+            )
 
         start = time.perf_counter()
         formula = self._build_chain_rule_formula(sector, polynomial, active_shape, signature)
         formula.build_seconds = time.perf_counter() - start
         self.chain_rule_formula_build_seconds += formula.build_seconds
+        self.chain_rule_formulas_generated += 1
+        _write_chain_rule_formula_to_cache(formula)
+        if self.chain_rule_metadata_only:
+            metadata_formula = _load_chain_rule_formula_from_cache(
+                signature,
+                load_evaluators=False,
+            )
+            if metadata_formula is not None:
+                formula = metadata_formula
         self._chain_rule_formulas[signature] = formula
         self._chain_rule_formula_lookup_cache[lookup_key] = formula
         return formula
@@ -1937,26 +2238,29 @@ class TopologyDefinition:
         """Build Symbolica expressions for ``P(X_s(y))`` Taylor composition."""
         rank = len(output_shape[0])
         zero = _zero_multi(rank)
-        max_total = max(sum(multi) for multi in output_shape)
-        derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
         allowed_multis = {tuple(multi) for multi in output_shape}
         allowed_multis.add(zero)
-        h_layout = self._chain_rule_h_layout(sector, output_shape)
+        active_x_count = int(signature[0])
+        derivative_indices = [
+            tuple(int(value) for value in multi)
+            for multi in self._chain_rule_dense_derivative_indices_for_signature(signature)
+        ]
+        h_multis = [multi for multi in output_shape if tuple(multi) != zero]
 
         input_names: list[str] = []
         input_symbols: list[Any] = []
         h_series: list[ExprSeries] = []
-        h_by_x: dict[int, list[tuple[int, tuple[int, ...]]]] = {}
-        for layout_index, (x_index, multi) in enumerate(h_layout):
-            h_by_x.setdefault(int(x_index), []).append((layout_index, tuple(multi)))
-        for x_index in range(len(self.x_names)):
+        h_layout: list[tuple[int, tuple[int, ...]]] = []
+        for active_index in range(active_x_count):
             series: ExprSeries = {}
-            for _layout_index, multi in h_by_x.get(x_index, []):
-                name = f"ch_h_{x_index}_{_multi_suffix(multi)}"
+            for multi in h_multis:
+                multi_tuple = tuple(int(value) for value in multi)
+                name = f"ch_h_{active_index}_{_multi_suffix(multi_tuple)}"
                 symbol = S(name)
                 input_names.append(name)
                 input_symbols.append(symbol)
-                series[multi] = symbol
+                series[multi_tuple] = symbol
+                h_layout.append((active_index, multi_tuple))
             h_series.append(series)
 
         derivative_symbols: dict[tuple[int, ...], Any] = {}
@@ -1999,14 +2303,14 @@ class TopologyDefinition:
                 return cached
             term = _expr_series_constant(E("1"), [0 for _ in range(rank)])
             factorial = 1
-            for x_index, power in enumerate(x_multi_index):
+            for active_index, power in enumerate(x_multi_index):
                 power_int = int(power)
                 if not power_int:
                     continue
                 factorial *= math.factorial(power_int)
                 term = _expr_series_mul_allowed(
                     term,
-                    h_power(x_index, power_int),
+                    h_power(active_index, power_int),
                     allowed_multis,
                 )
                 if not term:
@@ -2030,10 +2334,17 @@ class TopologyDefinition:
             _expr_series_coefficient(composed, tuple(multi))
             for multi in output_shape
         ]
-        evaluators = [
-            expr.evaluator(input_symbols, jit_compile=self.jit_compile_evaluators)
-            for expr in output_expressions
-        ]
+        evaluators = (
+            [
+                Expression.evaluator_multiple(
+                    output_expressions,
+                    input_symbols,
+                    jit_compile=self.jit_compile_evaluators,
+                )
+            ]
+            if output_expressions
+            else []
+        )
         return ChainRuleFormulaDefinition(
             signature=signature,
             input_names=input_names,
@@ -2043,6 +2354,7 @@ class TopologyDefinition:
             output_shape=list(output_shape),
             derivative_indices=[tuple(multi) for multi in derivative_indices],
             h_layout=list(h_layout),
+            evaluator_mode="multiple",
         )
 
     def _compose_symbolic_derivative_taylor_batch(
@@ -2066,38 +2378,109 @@ class TopologyDefinition:
         # regular-Taylor signature has closed only the actually requested
         # coefficients under ancestors.  Compose the chain rule directly in
         # that sparse space instead of materialising the full box.
-        active_output_shape = list(output_shape or context.get("output_shape", []))
+        requested_output_shape = [
+            tuple(int(value) for value in multi_index)
+            for multi_index in (
+                output_shape
+                or context.get("requested_output_shape")
+                or context.get("output_shape", [])
+            )
+        ]
+        active_output_shape = list(requested_output_shape)
         allowed_multis = {
             tuple(int(value) for value in multi_index)
             for multi_index in active_output_shape
         }
-        allowed_multis.add(_zero_multi(rank))
+        zero_multi = _zero_multi(rank)
+        allowed_multis.add(zero_multi)
         derivative_indices = self._symbolic_derivative_indices(polynomial, max_total)
-
-        if use_chain_formula:
-            formula = self.chain_rule_formula_for(sector, polynomial, active_output_shape)
+        if active_output_shape == [zero_multi] and max_total == 0:
+            zero_x = tuple(0 for _ in self.x_names)
             derivative_values = self._derivative_values_batch(
                 polynomial,
                 x0,
+                [zero_x],
+                timing,
+            )
+            return derivative_values[zero_x][:, np.newaxis]
+
+        if use_chain_formula:
+            formula_output_shape = _chain_rule_canonical_envelope_shape(active_output_shape)
+            canonical_positions = _chain_rule_canonical_positions(active_output_shape)
+            signature = self._chain_rule_formula_signature(
+                sector,
+                polynomial,
+                active_output_shape,
+            )
+            if signature in self._chain_rule_formulas or not self.strict_prepared_bundle:
+                formula = self.chain_rule_formula_for(sector, polynomial, formula_output_shape)
+            else:
+                formula = None
+        else:
+            formula = None
+        if formula is not None:
+            active_x_indices = self._chain_rule_active_x_indices(
+                sector,
+                active_output_shape,
+            )
+            original_derivative_indices = self._chain_rule_original_derivative_indices(
                 formula.derivative_indices,
+                active_x_indices,
+            )
+            available_derivative_indices = set(derivative_indices)
+            evaluated_derivative_indices = [
+                multi_index
+                for multi_index in original_derivative_indices
+                if tuple(multi_index) in available_derivative_indices
+            ]
+            derivative_values = self._derivative_values_batch(
+                polynomial,
+                x0,
+                evaluated_derivative_indices,
                 timing,
             )
             input_matrix = np.zeros((n_rows, len(formula.input_names)), dtype=np.complex128)
             offset = 0
-            for x_index, multi_index in formula.h_layout:
-                values = h_series[int(x_index)].get(tuple(multi_index))
+            for active_position, multi_index in formula.h_layout:
+                x_index = active_x_indices[int(active_position)]
+                original_multi = _chain_rule_canonical_to_original(
+                    tuple(multi_index),
+                    canonical_positions,
+                )
+                values = h_series[int(x_index)].get(original_multi)
                 if values is not None:
                     input_matrix[:, offset] = values
                 offset += 1
-            for multi_index in formula.derivative_indices:
-                input_matrix[:, offset] = derivative_values[tuple(multi_index)]
+            for original_multi_index in original_derivative_indices:
+                values = derivative_values.get(tuple(original_multi_index))
+                if values is not None:
+                    input_matrix[:, offset] = values
                 offset += 1
             if offset != len(formula.input_names):
                 raise RuntimeError(
                     f"{sector.name}: chain-rule formula input mismatch: filled {offset}, "
                     f"expected {len(formula.input_names)}"
                 )
-            return formula.evaluate_complex_batch(input_matrix, timing)
+            formula_values = formula.evaluate_complex_batch(input_matrix, timing)
+            if list(formula.output_shape) == active_output_shape:
+                return formula_values
+            formula_columns = {
+                tuple(int(value) for value in multi): column
+                for column, multi in enumerate(formula.output_shape)
+            }
+            try:
+                selected_columns = [
+                    formula_columns[
+                        _chain_rule_original_to_canonical(tuple(multi), canonical_positions)
+                    ]
+                    for multi in active_output_shape
+                ]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"{sector.name}: chain-rule envelope does not cover requested "
+                    f"coefficient {exc.args[0]!r}"
+                ) from exc
+            return formula_values[:, selected_columns]
 
         derivative_values = self._derivative_values_batch(polynomial, x0, derivative_indices, timing)
 
@@ -2685,6 +3068,35 @@ def _multi_indices(max_orders: list[int]) -> list[tuple[int, ...]]:
     return [tuple(mi) for mi in product(*[range(order + 1) for order in max_orders])]
 
 
+@lru_cache(maxsize=256)
+def _dense_total_degree_multi_indices(rank: int, max_total: int) -> tuple[tuple[int, ...], ...]:
+    """Enumerate dense multi-indices with bounded total degree.
+
+    The recursive enumeration avoids the large Cartesian product that would
+    appear for signatures such as nine active coordinates and degree four.
+    """
+    rank = int(rank)
+    max_total = int(max_total)
+    if rank < 0 or max_total < 0:
+        raise ValueError(f"invalid dense multi-index request rank={rank}, max_total={max_total}")
+    if rank == 0:
+        return ((),)
+
+    out: list[tuple[int, ...]] = []
+
+    def visit(prefix: list[int], remaining_rank: int, remaining_total: int) -> None:
+        if remaining_rank == 0:
+            out.append(tuple(prefix))
+            return
+        for value in range(remaining_total + 1):
+            prefix.append(value)
+            visit(prefix, remaining_rank - 1, remaining_total - value)
+            prefix.pop()
+
+    visit([], rank, max_total)
+    return tuple(sorted(out, key=lambda item: (sum(item), item)))
+
+
 def _zero_multi(dim: int) -> tuple[int, ...]:
     """Return the zero multi-index for a Taylor series dimension."""
     return tuple(0 for _ in range(dim))
@@ -2818,6 +3230,52 @@ def _allowed_convolution_dense_plan(
     )
 
 
+@lru_cache(maxsize=128)
+def _allowed_convolution_split_count(
+    allowed_key: tuple[tuple[int, ...], ...],
+) -> int:
+    """Return the number of dense convolution products for one support.
+
+    For a full six-axis cubic support this is already ``10^6`` products for a
+    single series multiplication.  Multiplying that by a large batch size
+    creates multi-GB temporaries in the dense kernel, so the runtime uses this
+    count to stay on the sparse direct path for hard endpoint sectors.
+    """
+    total = 0
+    for result in allowed_key:
+        count = 1
+        for value in result:
+            count *= int(value) + 1
+        total += count
+    return int(total)
+
+
+def _series_mul_allowed_sparse_direct(
+    a: MultiSeries,
+    b: MultiSeries,
+    allowed_multis: set[tuple[int, ...]],
+    rank: int,
+) -> MultiSeries:
+    """Multiply two sparse Taylor series by direct dictionary convolution.
+
+    Dense convolution is faster for wide batches and broad support, but the
+    hard prepared-bundle diagnostics often evaluate one or a few points in a
+    very sparse ancestor-closed shape.  In that regime repeatedly building and
+    reducing dense support arrays dominates the runtime.  This direct path
+    keeps the same algebra while avoiding the dense temporary layout.
+    """
+    out: MultiSeries = {}
+    for key_a, value_a in a.items():
+        value_a_array = np.asarray(value_a, dtype=np.complex128)
+        for key_b, value_b in b.items():
+            merged = tuple(int(key_a[index]) + int(key_b[index]) for index in range(rank))
+            if merged not in allowed_multis:
+                continue
+            term = value_a_array * np.asarray(value_b, dtype=np.complex128)
+            out[merged] = out[merged] + term if merged in out else term.copy()
+    return out
+
+
 def _series_mul_allowed(
     a: MultiSeries,
     b: MultiSeries,
@@ -2889,6 +3347,15 @@ def _series_mul_allowed(
             break
     if n_rows <= 0:
         return {}
+    if n_rows <= 16:
+        return _series_mul_allowed_sparse_direct(a, b, allowed_multis, rank)
+    split_count = _allowed_convolution_split_count(allowed_key)
+    # The dense kernel materializes ``split_count * n_rows`` complex products.
+    # It is excellent for modest supports, but pathological for the six-axis
+    # triple-box chain-rule fallback.  Keep those hard cases sparse and let
+    # NumPy vectorize over the sample axis inside the direct dictionary loop.
+    if split_count * n_rows > 2_000_000:
+        return _series_mul_allowed_sparse_direct(a, b, allowed_multis, rank)
     (
         support_key,
         key_to_index,
@@ -3917,13 +4384,25 @@ class ChainRuleFormulaDefinition:
     output_shape: list[tuple[int, ...]]
     derivative_indices: list[tuple[int, ...]]
     h_layout: list[tuple[int, tuple[int, ...]]]
+    evaluator_mode: str = "separate"
     build_seconds: float = 0.0
+    cache_json_path: str | None = None
+    cache_evaluator_files: list[str] = field(default_factory=list)
 
     def evaluate_complex_batch(self, rows: np.ndarray, timing: HotPathTiming | None = None) -> np.ndarray:
         """Evaluate all mapped Taylor coefficients for a complex batch."""
         start = time.perf_counter()
         if not self.evaluators:
+            if self.output_shape:
+                raise RuntimeError(
+                    "chain-rule formula was loaded as metadata only; "
+                    "it can be serialized into a prepared bundle but cannot be evaluated"
+                )
             values = np.zeros((rows.shape[0], 0), dtype=np.complex128)
+        elif self.evaluator_mode == "multiple":
+            values = np.asarray(self.evaluators[0].evaluate_complex(rows), dtype=np.complex128)
+            if values.ndim == 1:
+                values = values.reshape(rows.shape[0], 1)
         else:
             values = np.column_stack(
                 [
@@ -3934,6 +4413,210 @@ class ChainRuleFormulaDefinition:
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return values
+
+
+def _chain_rule_formula_cache_dir() -> Path:
+    """Return the local generated cache directory for universal chain formulas."""
+    configured = os.environ.get("FSD_SUBTRACTION_FORMULA_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return formula_cache_dir()
+
+
+def _chain_rule_jsonable(value: Any) -> Any:
+    """Convert tuple-heavy signatures/layouts into deterministic JSON values."""
+    if isinstance(value, tuple):
+        return [_chain_rule_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_chain_rule_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _chain_rule_jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _chain_rule_tupled(value: Any) -> Any:
+    """Convert nested JSON lists back to tuples for cache signatures/layouts."""
+    if isinstance(value, list):
+        return tuple(_chain_rule_tupled(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _chain_rule_tupled(item) for key, item in value.items()}
+    return value
+
+
+def _chain_rule_signature_payload(signature: tuple[Any, ...]) -> dict[str, Any]:
+    """Return the topology-independent cache payload for a chain formula."""
+    return {
+        "schema_version": CHAIN_RULE_FORMULA_CACHE_VERSION,
+        "kind": "chain-rule",
+        "signature": _chain_rule_jsonable(signature),
+    }
+
+
+def _chain_rule_formula_cache_path(signature: tuple[Any, ...]) -> Path:
+    """Return the generated JSON cache path for one universal chain formula."""
+    payload = _chain_rule_signature_payload(signature)
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return _chain_rule_formula_cache_dir() / f"chain_rule_{digest}.json"
+
+
+def _chain_rule_formula_cache_read_paths(path: Path) -> list[Path]:
+    """Return generated and curated cache candidates for one chain formula."""
+    paths: list[Path] = []
+    for root in formula_cache_read_roots():
+        for candidate in (root / "curated" / path.name, root / path.name):
+            if candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
+def _chain_rule_evaluator_cache_name(path: Path, index: int) -> str:
+    """Return the sidecar filename for one chain-rule evaluator."""
+    return f"{path.stem}.eval_{int(index)}.bin.gz"
+
+
+def _chain_rule_expression_cache_name(path: Path) -> str:
+    """Return the compressed reference-expression sidecar filename."""
+    return f"{path.stem}.expr.json.gz"
+
+
+def _write_chain_rule_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write one chain-rule cache JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_chain_rule_formula_to_cache(formula: ChainRuleFormulaDefinition) -> None:
+    """Persist a generated universal chain-rule formula and evaluator sidecars."""
+    path = _chain_rule_formula_cache_path(formula.signature)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar_names: list[str] = []
+        for index, evaluator in enumerate(formula.evaluators):
+            name = _chain_rule_evaluator_cache_name(path, index)
+            raw_bytes = evaluator.save()
+            (path.parent / name).write_bytes(gzip.compress(raw_bytes, compresslevel=6))
+            sidecar_names.append(name)
+        expression_sidecar_name: str | None = None
+        if formula.output_expressions:
+            try:
+                expression_sidecar_name = _chain_rule_expression_cache_name(path)
+                expression_payload = json.dumps(
+                    [str(expr) for expr in formula.output_expressions],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                (path.parent / expression_sidecar_name).write_bytes(
+                    gzip.compress(expression_payload, compresslevel=6)
+                )
+            except Exception:
+                expression_sidecar_name = None
+        payload = {
+            "signature_payload": _chain_rule_signature_payload(formula.signature),
+            "signature": _chain_rule_jsonable(formula.signature),
+            "input_names": list(formula.input_names),
+            # Runtime needs only the serialized evaluator plus the coefficient
+            # layouts below.  Reference expressions, when written, live in a
+            # compressed sidecar so the main metadata stays cheap to inspect.
+            "output_expressions": [],
+            "output_expression_count": len(formula.output_expressions),
+            "expression_cache_file": expression_sidecar_name,
+            "output_shape": _chain_rule_jsonable(tuple(formula.output_shape)),
+            "derivative_indices": _chain_rule_jsonable(tuple(formula.derivative_indices)),
+            "h_layout": _chain_rule_jsonable(tuple(formula.h_layout)),
+            "evaluator_mode": str(formula.evaluator_mode),
+            "evaluator_cache_files": sidecar_names,
+            "build_seconds": float(formula.build_seconds),
+        }
+        _write_chain_rule_json_atomic(path, payload)
+    except Exception:
+        # The cache is an optimization only.  A full prepared bundle will still
+        # serialize the in-memory evaluator if this local cache write fails.
+        return
+
+
+def _load_chain_rule_formula_from_cache(
+    signature: tuple[Any, ...],
+    *,
+    load_evaluators: bool = True,
+) -> ChainRuleFormulaDefinition | None:
+    """Load a cached universal chain-rule formula if all sidecars are present.
+
+    Prepared-bundle generation often only needs the formula metadata and the
+    sidecar byte paths.  Avoiding ``Evaluator.load()`` there is important for
+    large three-loop bundles, because the bundle writer can copy the sidecars
+    directly.
+    """
+    path = _chain_rule_formula_cache_path(signature)
+    for candidate in _chain_rule_formula_cache_read_paths(path):
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            if data.get("signature_payload") != _chain_rule_signature_payload(signature):
+                continue
+            sidecar_names = [str(name) for name in data.get("evaluator_cache_files", [])]
+            if not sidecar_names:
+                continue
+            mirror_cache_entry_to_primary(
+                candidate,
+                data,
+                sidecar_fields=("evaluator_cache_files", "expression_cache_file"),
+            )
+            sidecar_paths = []
+            for name in sidecar_names:
+                path = candidate.parent / name
+                if not path.is_file() and path.suffix != ".gz":
+                    compressed = path.with_name(path.name + ".gz")
+                    if compressed.is_file():
+                        path = compressed
+                sidecar_paths.append(path)
+            if any(not path.is_file() for path in sidecar_paths):
+                continue
+            evaluators = (
+                [
+                    Evaluator.load(
+                        gzip.decompress(path.read_bytes())
+                        if path.suffix == ".gz"
+                        else path.read_bytes()
+                    )
+                    for path in sidecar_paths
+                ]
+                if load_evaluators
+                else []
+            )
+            input_names = [str(name) for name in data["input_names"]]
+            # Chain-rule formula evaluation goes through the serialized
+            # evaluator; the symbolic expression list is reference-only and is
+            # intentionally omitted from current caches.  Avoid parsing legacy
+            # expression strings as that can be as expensive as rebuilding the
+            # formula.
+            input_symbols = []
+            output_expressions = []
+            return ChainRuleFormulaDefinition(
+                signature=tuple(_chain_rule_tupled(data["signature"])),
+                input_names=input_names,
+                input_symbols=input_symbols,
+                output_expressions=output_expressions,
+                evaluators=evaluators,
+                output_shape=[tuple(item) for item in _chain_rule_tupled(data["output_shape"])],
+                derivative_indices=[
+                    tuple(item) for item in _chain_rule_tupled(data["derivative_indices"])
+                ],
+                h_layout=[
+                    (int(item[0]), tuple(item[1]))
+                    for item in _chain_rule_tupled(data["h_layout"])
+                ],
+                evaluator_mode=str(data.get("evaluator_mode", "separate")),
+                build_seconds=float(data.get("build_seconds", 0.0)),
+                cache_json_path=str(candidate),
+                cache_evaluator_files=[str(path) for path in sidecar_paths],
+            )
+        except Exception:
+            continue
+    return None
 
 
 def _subset_mask(subset: tuple[int, ...]) -> int:
@@ -4323,6 +5006,84 @@ def _merge_multi_shapes(
     if not merged:
         return []
     return _ordered_multi_shape(merged, rank)
+
+
+def _chain_rule_envelope_shape(
+    shape: list[tuple[int, ...]] | tuple[tuple[int, ...], ...],
+) -> list[tuple[int, ...]]:
+    """Return the dense Taylor box in the original sector-variable order.
+
+    The symbolic chain-rule evaluator itself is independent of the sparse set
+    of coefficients a sector happens to request.  Keying it by the rectangular
+    Taylor envelope collapses many sector-specific requests onto one reusable
+    evaluator; callers slice the requested sparse coefficients from the dense
+    output after evaluation.
+    """
+    normalized = [tuple(int(value) for value in multi) for multi in shape]
+    if not normalized:
+        return []
+    rank = len(normalized[0])
+    if any(len(multi) != rank for multi in normalized):
+        raise ValueError(f"inconsistent chain-rule Taylor shape ranks: {shape!r}")
+    max_orders = [
+        max(int(multi[position]) for multi in normalized)
+        for position in range(rank)
+    ]
+    return _ordered_multi_shape(set(_multi_indices(max_orders)), rank)
+
+
+def _chain_rule_canonical_positions(
+    shape: list[tuple[int, ...]] | tuple[tuple[int, ...], ...],
+) -> tuple[int, ...]:
+    """Return sector-variable positions ordered by descending Taylor depth."""
+    normalized = [tuple(int(value) for value in multi) for multi in shape]
+    if not normalized:
+        return ()
+    rank = len(normalized[0])
+    max_orders = [
+        max(int(multi[position]) for multi in normalized)
+        for position in range(rank)
+    ]
+    return tuple(
+        sorted(
+            range(rank),
+            key=lambda position: (-int(max_orders[position]), int(position)),
+        )
+    )
+
+
+def _chain_rule_original_to_canonical(
+    multi_index: tuple[int, ...],
+    canonical_positions: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Map a sector-order Taylor multi-index to canonical formula order."""
+    return tuple(int(multi_index[position]) for position in canonical_positions)
+
+
+def _chain_rule_canonical_to_original(
+    multi_index: tuple[int, ...],
+    canonical_positions: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Map a canonical formula multi-index back to sector-variable order."""
+    out = [0 for _ in canonical_positions]
+    for canonical_position, original_position in enumerate(canonical_positions):
+        out[int(original_position)] = int(multi_index[canonical_position])
+    return tuple(out)
+
+
+def _chain_rule_canonical_envelope_shape(
+    shape: list[tuple[int, ...]] | tuple[tuple[int, ...], ...],
+) -> list[tuple[int, ...]]:
+    """Return the dense Taylor box in canonical axis order."""
+    normalized = [tuple(int(value) for value in multi) for multi in shape]
+    if not normalized:
+        return []
+    positions = _chain_rule_canonical_positions(normalized)
+    canonical_shape = {
+        _chain_rule_original_to_canonical(multi, positions)
+        for multi in _chain_rule_envelope_shape(normalized)
+    }
+    return _ordered_multi_shape(canonical_shape, len(positions))
 
 
 def _regular_taylor_canonical_positions(max_orders: tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -4783,6 +5544,20 @@ class SectorProcessor:
         coeffs, training, _ = self.evaluate_batch(sector, coords)
         return [complex(value) for value in coeffs[0]], float(training[0])
 
+    @staticmethod
+    def _charge_unprofiled_python(timing: HotPathTiming, start_time: float) -> None:
+        """Charge batch wall time not already attributed to evaluator calls.
+
+        The symbolic-derivative path composes Taylor jets through Python/NumPy
+        chain-rule algebra.  That work is not visible to the narrow evaluator
+        timers around Symbolica calls, so account for it at the sector-batch
+        boundary.  Any helper that already reports Python time is respected by
+        subtracting the existing profile before adding the residual.
+        """
+        elapsed = time.perf_counter() - start_time
+        accounted = timing.eval_seconds + timing.python_seconds + timing.havana_seconds
+        timing.add_python(max(elapsed - accounted, 0.0))
+
     def evaluate_batch(
         self,
         sector: SectorDefinition,
@@ -4816,7 +5591,9 @@ class SectorProcessor:
         ):
             timing = HotPathTiming()
             timing.add_precision_samples(ordinary=rows.shape[0])
+            start_time = time.perf_counter()
             coeffs, training = self._evaluate_batch_impl(sector, rows, timing)
+            self._charge_unprofiled_python(timing, start_time)
             return coeffs, training, timing
 
         singular_coords = rows[:, sector.singular_axes]
@@ -4830,7 +5607,9 @@ class SectorProcessor:
         if np.all(ordinary_mask):
             timing = HotPathTiming()
             timing.add_precision_samples(ordinary=rows.shape[0])
+            start_time = time.perf_counter()
             coeffs, training = self._evaluate_batch_impl(sector, rows, timing)
+            self._charge_unprofiled_python(timing, start_time)
             return coeffs, training, timing
 
         coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
@@ -4848,11 +5627,13 @@ class SectorProcessor:
                 chunk_timing.add_precision_samples(ordinary=chunk_size)
             else:
                 chunk_timing.add_precision_samples(stability=chunk_size)
+            start_time = time.perf_counter()
             chunk_coeffs, chunk_training = self._evaluate_batch_impl(
                 sector,
                 rows[mask],
                 chunk_timing,
             )
+            self._charge_unprofiled_python(chunk_timing, start_time)
             timing.absorb(chunk_timing)
             coeffs[mask] = chunk_coeffs
             training[mask] = chunk_training
@@ -4860,11 +5641,13 @@ class SectorProcessor:
             chunk_timing = HotPathTiming(precision_digits=self.high_precision_stability_precision)
             chunk_size = int(np.count_nonzero(high_mask))
             chunk_timing.add_precision_samples(high=chunk_size)
+            start_time = time.perf_counter()
             chunk_coeffs, chunk_training = self._evaluate_batch_impl(
                 sector,
                 rows[high_mask],
                 chunk_timing,
             )
+            self._charge_unprofiled_python(chunk_timing, start_time)
             timing.absorb(chunk_timing)
             coeffs[high_mask] = chunk_coeffs
             training[high_mask] = chunk_training
@@ -5272,6 +6055,50 @@ class SectorProcessor:
             endpoint_rows[:, sector.singular_axes[position]] = 0.0
         return endpoint_rows
 
+    def _select_active_laurent_columns(
+        self,
+        values: np.ndarray,
+        prepared_orders: list[int],
+        label: str,
+    ) -> np.ndarray:
+        """Project prepared formula outputs onto the requested Laurent range.
+
+        Prepared bundles can be generated through a high order, for example
+        ``eps^0``, and later integrated only through a lower order.  The
+        serialized Symbolica evaluators still return the full prepared output
+        vector, so the strict prepared path trims columns here instead of
+        rebuilding a smaller evaluator.
+        """
+        active_orders = self.topology.laurent_orders
+        if list(prepared_orders) == active_orders:
+            return values
+        index_by_order = {int(order): index for index, order in enumerate(prepared_orders)}
+        try:
+            columns = [index_by_order[int(order)] for order in active_orders]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"{label}: prepared formula does not contain Laurent order eps^{exc.args[0]}"
+            ) from exc
+        return values[:, columns]
+
+    def _select_active_laurent_list(
+        self,
+        values: list[complex],
+        prepared_orders: list[int],
+        label: str,
+    ) -> list[complex]:
+        """List equivalent of ``_select_active_laurent_columns`` for prec rows."""
+        active_orders = self.topology.laurent_orders
+        if list(prepared_orders) == active_orders:
+            return values
+        index_by_order = {int(order): index for index, order in enumerate(prepared_orders)}
+        try:
+            return [values[index_by_order[int(order)]] for order in active_orders]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"{label}: prepared formula does not contain Laurent order eps^{exc.args[0]}"
+            ) from exc
+
     def _subtraction_formula_input_matrix(
         self,
         sector: SectorDefinition,
@@ -5346,7 +6173,11 @@ class SectorProcessor:
         precision_digits = timing.precision_digits
         if precision_digits is None:
             input_matrix = self._subtraction_formula_input_matrix(sector, rows, formula, timing)
-            coeffs = formula.evaluate_complex_batch(input_matrix, timing)
+            coeffs = self._select_active_laurent_columns(
+                formula.evaluate_complex_batch(input_matrix, timing),
+                formula.laurent_orders,
+                sector.name,
+            )
         else:
             coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
             for row_index, row in enumerate(rows):
@@ -5357,11 +6188,15 @@ class SectorProcessor:
                     int(precision_digits),
                     timing,
                 )
-                coeffs[row_index, :] = formula.evaluate_complex_prec(
-                    input_row,
-                    int(precision_digits),
-                    timing,
-            )
+                coeffs[row_index, :] = self._select_active_laurent_list(
+                    formula.evaluate_complex_prec(
+                        input_row,
+                        int(precision_digits),
+                        timing,
+                    ),
+                    formula.laurent_orders,
+                    sector.name,
+                )
         return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
 
     def _endpoint_projector_input_matrix(
@@ -5683,7 +6518,11 @@ class SectorProcessor:
                 formula,
                 timing,
             )
-            coeffs = formula.evaluate_complex_batch(input_matrix, timing)
+            coeffs = self._select_active_laurent_columns(
+                formula.evaluate_complex_batch(input_matrix, timing),
+                formula.laurent_orders,
+                sector.name,
+            )
         else:
             coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
             for row_index, row in enumerate(rows):
@@ -5694,10 +6533,14 @@ class SectorProcessor:
                     int(precision_digits),
                     timing,
                 )
-                coeffs[row_index, :] = formula.evaluate_complex_prec(
-                    input_row,
-                    int(precision_digits),
-                    timing,
+                coeffs[row_index, :] = self._select_active_laurent_list(
+                    formula.evaluate_complex_prec(
+                        input_row,
+                        int(precision_digits),
+                        timing,
+                    ),
+                    formula.laurent_orders,
+                    sector.name,
                 )
         return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
 
@@ -6124,7 +6967,11 @@ class SectorProcessor:
             for child_signature, entries in terms_by_child.items():
                 child = formula.child_formulas[child_signature]
                 stacked_inputs = np.vstack([inputs for _term, inputs in entries])
-                stacked_values = child.evaluate_complex_batch(stacked_inputs, timing)
+                stacked_values = self._select_active_laurent_columns(
+                    child.evaluate_complex_batch(stacked_inputs, timing),
+                    child.laurent_orders,
+                    sector.name,
+                )
                 offset = 0
                 for term, child_inputs in entries:
                     width = child_inputs.shape[0]
@@ -6155,7 +7002,11 @@ class SectorProcessor:
                         timing,
                     )
                     child_coeffs[row_index, :] = self._convolve_regular_prefactor_list(
-                        values,
+                        self._select_active_laurent_list(
+                            values,
+                            child.laurent_orders,
+                            sector.name,
+                        ),
                         term.prefactor_coeffs,
                     )
                 coeffs += child_coeffs

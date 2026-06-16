@@ -124,6 +124,29 @@ class EvaluationBatch:
     weights: np.ndarray
 
 
+@dataclass(frozen=True)
+class DemocraticBatch:
+    """Uniform samples for one explicit sector in democratic mode."""
+
+    sector_position: int
+    sector_id: int
+    coords: np.ndarray
+
+
+@dataclass(frozen=True)
+class DemocraticReducedBatch:
+    """Pre-reduced democratic sector contribution returned by a worker."""
+
+    sector_id: int
+    count: int
+    sums: np.ndarray
+    sumsq_re: np.ndarray
+    sumsq_im: np.ndarray
+    max_abs: np.ndarray
+    precision_counts: np.ndarray
+    timing: HotPathTiming
+
+
 _WORKER_SECTORS: list[SectorDefinition] | None = None
 _WORKER_PROCESSOR: SectorProcessor | None = None
 _PARENT_TOPOLOGY: TopologyDefinition | None = None
@@ -180,6 +203,13 @@ def _evaluate_records_worker(
     return _evaluate_records(_WORKER_PROCESSOR, _WORKER_SECTORS, batch)
 
 
+def _evaluate_democratic_batch_worker(batch: DemocraticBatch) -> DemocraticReducedBatch:
+    """Evaluate one democratic sector batch in a worker process."""
+    if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
+        raise RuntimeError("worker processor not initialized")
+    return _evaluate_democratic_batch(_WORKER_PROCESSOR, _WORKER_SECTORS, batch)
+
+
 def _evaluate_records(
     processor: SectorProcessor,
     sectors: list[SectorDefinition],
@@ -227,6 +257,58 @@ def _evaluate_records(
     return indices, weighted, training, precision_counts, timing
 
 
+def _evaluate_democratic_batch(
+    processor: SectorProcessor,
+    sectors: list[SectorDefinition],
+    batch: DemocraticBatch,
+) -> DemocraticReducedBatch:
+    """Evaluate and reduce one uniform sector batch.
+
+    Democratic mode estimates every sector integral separately.  The sample
+    weight is therefore one: the aggregate integral is assembled as a sum of
+    per-sector means rather than as a mean over a discrete Havana sector
+    coordinate.
+    """
+    hot_start = time.perf_counter()
+    timing = HotPathTiming()
+    sector = sectors[int(batch.sector_position)]
+    coords = np.asarray(batch.coords, dtype=float)
+    if coords.size == 0:
+        count = 0
+        coeff_count = processor.topology.coefficient_count
+        return DemocraticReducedBatch(
+            sector_id=int(batch.sector_id),
+            count=0,
+            sums=np.zeros(coeff_count, dtype=np.complex128),
+            sumsq_re=np.zeros(coeff_count, dtype=float),
+            sumsq_im=np.zeros(coeff_count, dtype=float),
+            max_abs=np.zeros(coeff_count, dtype=float),
+            precision_counts=np.zeros(3, dtype=np.int64),
+            timing=timing,
+        )
+    coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+    timing.absorb(sector_timing)
+    hot_elapsed = time.perf_counter() - hot_start
+    timing.add_python(hot_elapsed - timing.total_seconds)
+    return DemocraticReducedBatch(
+        sector_id=int(batch.sector_id),
+        count=int(coeffs.shape[0]),
+        sums=np.sum(coeffs, axis=0),
+        sumsq_re=np.sum(coeffs.real * coeffs.real, axis=0),
+        sumsq_im=np.sum(coeffs.imag * coeffs.imag, axis=0),
+        max_abs=np.max(np.abs(coeffs), axis=0),
+        precision_counts=np.asarray(
+            [
+                sector_timing.ordinary_precision_samples,
+                sector_timing.stability_precision_samples,
+                sector_timing.high_precision_samples,
+            ],
+            dtype=np.int64,
+        ),
+        timing=timing,
+    )
+
+
 def split_evaluation_batches(
     indices: np.ndarray,
     sector_indices: np.ndarray,
@@ -253,6 +335,49 @@ def split_evaluation_batches(
         )
         for start in range(0, n_samples, step)
     ]
+
+
+def democratic_batches(
+    request: IntegralRequest,
+    active_sector_ids: list[int],
+    active_sectors: list[SectorDefinition],
+) -> list[DemocraticBatch]:
+    """Create deterministic uniform batches covering every active sector.
+
+    Batches are scheduled round-robin across sectors.  This matters for
+    diagnostics: if early sector ids are expensive, a sector-by-sector schedule
+    can spend the whole watchdog budget before later sectors receive any
+    points, even though the final estimator would be democratic.
+    """
+    samples_per_sector = int(request.democratic_samples_per_sector)
+    step = samples_per_sector if request.batch_size <= 0 else int(request.batch_size)
+    step = max(step, 1)
+    batches: list[DemocraticBatch] = []
+    rngs = [
+        np.random.default_rng(int(request.seed) + 1_000_003 * int(sector_id))
+        for sector_id in active_sector_ids
+    ]
+    remaining_by_sector = [samples_per_sector for _ in active_sector_ids]
+    while any(remaining > 0 for remaining in remaining_by_sector):
+        for sector_position, (sector_id, sector) in enumerate(
+            zip(active_sector_ids, active_sectors)
+        ):
+            remaining = remaining_by_sector[sector_position]
+            if remaining <= 0:
+                continue
+            count = min(step, remaining)
+            batches.append(
+                DemocraticBatch(
+                    sector_position=int(sector_position),
+                    sector_id=int(sector_id),
+                    coords=rngs[sector_position].random(
+                        (count, sector.integration_dim),
+                        dtype=float,
+                    ),
+                )
+            )
+            remaining_by_sector[sector_position] -= count
+    return batches
 
 
 def format_progress_scalar(value: float | None) -> str:
@@ -637,6 +762,256 @@ def target_accuracy_reached(
     return math.isfinite(relerr) and relerr <= request.target_rel_accuracy
 
 
+def _stats_from_reduced_batches(
+    sectors: list[SectorDefinition],
+    active_sector_ids: list[int],
+    topology: TopologyDefinition,
+    sector_stats: list[list[RunningStats]],
+    sector_hits: list[int],
+    sector_precision_counts: list[dict[str, int]],
+    sector_timing: list[HotPathTiming],
+    sector_max_abs: list[np.ndarray],
+    total_timing: HotPathTiming,
+    start_time: float,
+    interrupted: bool,
+    diagnostics: dict[str, Any],
+) -> IntegrationResult:
+    """Materialize a democratic integration result from per-sector statistics."""
+    coeff_count = topology.coefficient_count
+    aggregate_coeffs: list[complex] = []
+    aggregate_errors: list[complex] = []
+    for coeff_index in range(coeff_count):
+        coeff = sum(
+            sector_stats[sector_id][coeff_index].mean
+            for sector_id in active_sector_ids
+        )
+        err_re2 = sum(
+            sector_stats[sector_id][coeff_index].error.real ** 2
+            for sector_id in active_sector_ids
+            if math.isfinite(sector_stats[sector_id][coeff_index].error.real)
+        )
+        err_im2 = sum(
+            sector_stats[sector_id][coeff_index].error.imag ** 2
+            for sector_id in active_sector_ids
+            if math.isfinite(sector_stats[sector_id][coeff_index].error.imag)
+        )
+        aggregate_coeffs.append(coeff)
+        aggregate_errors.append(complex(math.sqrt(err_re2), math.sqrt(err_im2)))
+
+    total_samples = sum(sector_hits[sector_id] for sector_id in active_sector_ids)
+    timing_per_sector: list[dict[str, Any]] = []
+    for sector_id in active_sector_ids:
+        hits = int(sector_hits[sector_id])
+        timing = sector_timing[sector_id]
+        avg_eval = avg_eval_us_per_sample_per_worker(timing, hits)
+        timing_per_sector.append(
+            {
+                "sector_id": sector_id,
+                "name": sectors[sector_id].name,
+                "samples": hits,
+                "avg_eval_us_per_sample": avg_eval,
+                "eval_seconds": timing.eval_seconds,
+                "python_seconds": timing.python_seconds,
+                "profile": {
+                    "python_fraction": timing.python_overhead_fraction,
+                    "evaluator_fraction": timing.evaluator_fraction,
+                    "havana_fraction": timing.havana_fraction,
+                },
+                "max_abs_weight": float(np.max(sector_max_abs[sector_id])) if hits else 0.0,
+                "max_abs_by_order": [float(value) for value in sector_max_abs[sector_id]],
+            }
+        )
+    nonzero_timings = [
+        row for row in timing_per_sector if int(row["samples"]) > 0
+    ]
+    if nonzero_timings:
+        min_row = min(nonzero_timings, key=lambda row: float(row["avg_eval_us_per_sample"]))
+        max_row = max(nonzero_timings, key=lambda row: float(row["avg_eval_us_per_sample"]))
+        max_weight_row = max(nonzero_timings, key=lambda row: float(row["max_abs_weight"]))
+        diagnostics.update(
+            {
+                "min_avg_eval_us_per_sample_sector": min_row,
+                "max_avg_eval_us_per_sample_sector": max_row,
+                "max_abs_weight_sector": max_weight_row,
+            }
+        )
+    diagnostics["sector_timing_summary"] = timing_per_sector
+    return IntegrationResult(
+        raw_sector_coeffs=aggregate_coeffs,
+        raw_sector_errors=aggregate_errors,
+        per_sector=[
+            SectorIntegrationResult(
+                sector_id=sector_index,
+                sector_name=sectors[sector_index].name,
+                samples=sector_hits[sector_index],
+                raw_sector_coeffs=[stat.mean for stat in coeff_stats],
+                raw_sector_errors=[stat.error for stat in coeff_stats],
+                precision_counts=sector_precision_counts[sector_index].copy(),
+                diagnostics={
+                    "sampling_mode": "democratic",
+                    "avg_eval_us_per_sample": avg_eval_us_per_sample_per_worker(
+                        sector_timing[sector_index],
+                        sector_hits[sector_index],
+                    ),
+                    "eval_seconds": sector_timing[sector_index].eval_seconds,
+                    "python_seconds": sector_timing[sector_index].python_seconds,
+                    "havana_seconds": sector_timing[sector_index].havana_seconds,
+                    "max_abs_weight": float(np.max(sector_max_abs[sector_index]))
+                    if sector_hits[sector_index]
+                    else 0.0,
+                    "max_abs_by_order": [
+                        float(value) for value in sector_max_abs[sector_index]
+                    ],
+                },
+            )
+            for sector_index, coeff_stats in enumerate(sector_stats)
+        ],
+        samples=total_samples,
+        elapsed_seconds=time.perf_counter() - start_time,
+        avg_eval_us_per_sample_per_worker=avg_eval_us_per_sample_per_worker(
+            total_timing, total_samples
+        ),
+        eval_seconds=total_timing.eval_seconds,
+        python_seconds=total_timing.python_seconds,
+        havana_seconds=total_timing.havana_seconds,
+        python_overhead_fraction=total_timing.python_overhead_fraction,
+        precision_counts=total_timing.precision_counts,
+        interrupted=interrupted,
+        diagnostics=diagnostics,
+    )
+
+
+def integrate_democratic(
+    request: IntegralRequest,
+    topology: TopologyDefinition,
+    sectors: list[SectorDefinition],
+    target: TargetDefinition | None,
+) -> IntegrationResult:
+    """Run explicit equal-statistics sampling over every active sector."""
+    if not sectors:
+        raise ValueError("no sectors generated")
+    active_sector_ids = list(request.sectors) if request.sectors is not None else list(range(len(sectors)))
+    if not active_sector_ids:
+        raise ValueError("no active sectors selected")
+    active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
+    continuous_dim = active_sectors[0].integration_dim
+    if any(sector.integration_dim != continuous_dim for sector in active_sectors):
+        raise ValueError("all sectors must have the same integration dimension for democratic mode")
+
+    sector_stats = [
+        [RunningStats() for _ in range(topology.coefficient_count)]
+        for _sector in sectors
+    ]
+    sector_hits = [0 for _sector in sectors]
+    sector_precision_counts = [
+        {"ordinary": 0, "stability": 0, "high_precision": 0}
+        for _sector in sectors
+    ]
+    sector_timing = [HotPathTiming() for _sector in sectors]
+    sector_max_abs = [
+        np.zeros(topology.coefficient_count, dtype=float)
+        for _sector in sectors
+    ]
+    total_timing = HotPathTiming()
+    start_time = time.perf_counter()
+    interrupted = False
+    diagnostics: dict[str, Any] = {
+        "sampling_mode": "democratic",
+        "samples_per_sector": int(request.democratic_samples_per_sector),
+        "active_sector_count": len(active_sector_ids),
+        "requested_total_samples": len(active_sector_ids)
+        * int(request.democratic_samples_per_sector),
+        "note": (
+            "Each active sector is sampled uniformly with equal statistics; "
+            "the aggregate integral is the sum of per-sector means."
+        ),
+    }
+
+    batches = democratic_batches(request, active_sector_ids, active_sectors)
+
+    def absorb_reduced(reduced: DemocraticReducedBatch) -> None:
+        aggregate_start = time.perf_counter()
+        sector_id = int(reduced.sector_id)
+        sector_hits[sector_id] += int(reduced.count)
+        sector_precision_counts[sector_id]["ordinary"] += int(reduced.precision_counts[0])
+        sector_precision_counts[sector_id]["stability"] += int(reduced.precision_counts[1])
+        sector_precision_counts[sector_id]["high_precision"] += int(reduced.precision_counts[2])
+        sector_timing[sector_id].absorb(reduced.timing)
+        total_timing.absorb(reduced.timing)
+        sector_max_abs[sector_id] = np.maximum(sector_max_abs[sector_id], reduced.max_abs)
+        for coeff_index, stat in enumerate(sector_stats[sector_id]):
+            stat.add_aggregate(
+                int(reduced.count),
+                float(reduced.sums[coeff_index].real),
+                float(reduced.sums[coeff_index].imag),
+                float(reduced.sumsq_re[coeff_index]),
+                float(reduced.sumsq_im[coeff_index]),
+            )
+        total_timing.add_python(time.perf_counter() - aggregate_start)
+
+    executor: ProcessPoolExecutor | None = None
+    processor: SectorProcessor | None = None
+    try:
+        if request.workers > 1:
+            if "fork" not in mp.get_all_start_methods():
+                raise RuntimeError("democratic multi-worker integration requires a fork-capable Python runtime")
+            global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
+            _PARENT_TOPOLOGY = topology
+            _PARENT_SECTORS = active_sectors
+            _PARENT_REQUEST = request
+            executor = ProcessPoolExecutor(
+                max_workers=request.workers,
+                mp_context=mp.get_context("fork"),
+                initializer=_init_worker_from_parent,
+            )
+            pending: set[Future[DemocraticReducedBatch]] = set()
+            batch_iter = iter(batches)
+            pending_limit = max(int(request.workers), len(active_sector_ids), 1)
+            diagnostics["pending_batch_limit"] = int(pending_limit)
+
+            def submit_until_full() -> None:
+                submit_start = time.perf_counter()
+                try:
+                    while len(pending) < pending_limit:
+                        pending.add(executor.submit(_evaluate_democratic_batch_worker, next(batch_iter)))
+                except StopIteration:
+                    pass
+                total_timing.add_python(time.perf_counter() - submit_start)
+
+            submit_until_full()
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    absorb_reduced(future.result())
+                submit_until_full()
+        else:
+            processor = _make_sector_processor(topology, request)
+            for batch in batches:
+                absorb_reduced(_evaluate_democratic_batch(processor, active_sectors, batch))
+    except KeyboardInterrupt:
+        interrupted = True
+        if executor is not None:
+            _terminate_executor_workers(executor)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=not interrupted, cancel_futures=True)
+
+    return _stats_from_reduced_batches(
+        sectors,
+        active_sector_ids,
+        topology,
+        sector_stats,
+        sector_hits,
+        sector_precision_counts,
+        sector_timing,
+        sector_max_abs,
+        total_timing,
+        start_time,
+        interrupted,
+        diagnostics,
+    )
+
+
 def integrate(
     request: IntegralRequest,
     topology: TopologyDefinition,
@@ -644,6 +1019,8 @@ def integrate(
     target: TargetDefinition | None,
 ) -> IntegrationResult:
     """Run the adaptive Monte Carlo integration and return raw coefficients."""
+    if request.sampling_mode == "democratic":
+        return integrate_democratic(request, topology, sectors, target)
     if not sectors:
         raise ValueError("no sectors generated")
     active_sector_ids = list(request.sectors) if request.sectors is not None else list(range(len(sectors)))

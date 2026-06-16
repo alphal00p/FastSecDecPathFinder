@@ -6,19 +6,66 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 CLONE_ONELOOPBRIDGE=0
+CACHE_TARBALL="${FSD_CACHE_TARBALL:-}"
+CACHE_URL="${FSD_CACHE_URL:-}"
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --clone-oneloopbridge)
       CLONE_ONELOOPBRIDGE=1
+      shift
+      ;;
+    --cache-tar)
+      if [[ $# -lt 2 ]]; then
+        echo "--cache-tar requires a path" >&2
+        exit 2
+      fi
+      CACHE_TARBALL="$2"
+      shift 2
+      ;;
+    --cache-url)
+      if [[ $# -lt 2 ]]; then
+        echo "--cache-url requires a URL" >&2
+        exit 2
+      fi
+      CACHE_URL="$2"
+      shift 2
       ;;
     *)
-      echo "unknown argument: $arg" >&2
-      echo "usage: ./install.sh [--clone-oneloopbridge]" >&2
+      echo "unknown argument: $1" >&2
+      echo "usage: ./install.sh [--clone-oneloopbridge] [--cache-tar FSD_cache.tar.gz] [--cache-url URL]" >&2
       exit 2
       ;;
   esac
 done
+
+install_cache_archive() {
+  local archive="$1"
+  if [[ ! -f "${archive}" ]]; then
+    echo "FSD cache archive does not exist: ${archive}" >&2
+    exit 1
+  fi
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  tar -xzf "${archive}" -C "${tmpdir}"
+  mkdir -p "${ROOT_DIR}/cache"
+  if [[ -d "${tmpdir}/cache" ]]; then
+    cp -R "${tmpdir}/cache/." "${ROOT_DIR}/cache/"
+  elif [[ -d "${tmpdir}/subtraction_formulae" ]]; then
+    mkdir -p "${ROOT_DIR}/cache/subtraction_formulae"
+    cp -R "${tmpdir}/subtraction_formulae/." "${ROOT_DIR}/cache/subtraction_formulae/"
+  else
+    echo "FSD cache archive must contain cache/ or subtraction_formulae/" >&2
+    exit 1
+  fi
+  rm -rf "${tmpdir}"
+  echo "FSD formula cache installed under ${ROOT_DIR}/cache"
+}
+
+if [[ -n "${CACHE_URL}" && -n "${CACHE_TARBALL}" ]]; then
+  echo "Use only one of --cache-url/FSD_CACHE_URL or --cache-tar/FSD_CACHE_TARBALL" >&2
+  exit 2
+fi
 
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
@@ -26,6 +73,23 @@ python3 -m venv "${VENV_DIR}"
 # A conservative C locale avoids macOS failures when LC_ALL=C.UTF-8 is not
 # supported by the local Perl/makeinfo toolchain.
 LC_ALL=C LANG=C "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+
+if [[ -n "${CACHE_URL}" ]]; then
+  mkdir -p "${ROOT_DIR}/.deps"
+  CACHE_TARBALL="${ROOT_DIR}/.deps/FSD_cache.tar.gz"
+  if command -v curl >/dev/null 2>&1; then
+    curl -L "${CACHE_URL}" -o "${CACHE_TARBALL}"
+  else
+    "${VENV_DIR}/bin/python" - <<PY
+from urllib.request import urlretrieve
+urlretrieve(${CACHE_URL@Q}, ${CACHE_TARBALL@Q})
+PY
+  fi
+fi
+
+if [[ -n "${CACHE_TARBALL}" ]]; then
+  install_cache_archive "${CACHE_TARBALL}"
+fi
 
 # Prefer a user-supplied checkout.  The clone option is only a convenience and
 # puts the external repository under ignored .deps/.

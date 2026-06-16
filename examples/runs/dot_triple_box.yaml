@@ -11,8 +11,13 @@ ibp-reduce-to-log-endpoint: true
 # compound projector path.
 direct-projector-cache-term-threshold: 0
 symbolic-derivatives: true
-chain-rule-formula-signature-limit: 256
-max-eps-order: -1
+chain-rule-formula-signature-limit: 4096
+# Reuse every heavy universal chain-rule formula currently in the distributed
+# cache and skip only colder signatures with larger output vectors.  Those
+# sectors still run in strict prepared mode through the Python composition
+# fallback, so no formula generation occurs during integration.
+chain-rule-formula-output-length-limit: 288
+max-eps-order: 0
 samples-per-iter: 500
 batch-size: 1
 max-iter: -1

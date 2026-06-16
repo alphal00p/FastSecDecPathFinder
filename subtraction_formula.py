@@ -18,6 +18,7 @@ series, epsilon/log expansion, or Laurent coefficient convolution itself.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from functools import lru_cache
@@ -27,14 +28,12 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from symbolica import E, Replacement, S
+from cache_utils import formula_cache_dir, formula_cache_read_roots, mirror_cache_entry_to_primary
+from symbolica import E, Evaluator, Replacement, S
 
 
 ENDPOINT_PROJECTOR_CACHE_VERSION = 1
 REGULAR_TAYLOR_CACHE_VERSION = 3
-DEFAULT_ENDPOINT_PROJECTOR_CACHE_DIR = (
-    Path(__file__).resolve().parent / "assets" / "subtraction_formulae"
-)
 
 
 def build_subtraction_formula_symbolica(
@@ -87,6 +86,7 @@ def build_endpoint_projector_formula_symbolica(
         formula_class,
     )
     if cached is not None:
+        _increment_topology_counter(topology, "endpoint_projector_formulas_from_cache")
         return cached
 
     ctx = _EndpointProjectorContext(
@@ -113,6 +113,7 @@ def build_endpoint_projector_formula_symbolica(
         ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
     )
     _write_endpoint_projector_formula_to_cache(formula)
+    _increment_topology_counter(topology, "endpoint_projector_formulas_generated")
     return formula
 
 
@@ -136,12 +137,14 @@ def build_regular_taylor_formula_symbolica(
         formula_class,
     )
     if cached is not None:
+        _increment_topology_counter(topology, "regular_taylor_formulas_from_cache")
         return cached
 
     ctx = _RegularTaylorContext(topology, sector, signature)
     if ctx.uses_residual_inputs:
         formula = _build_regular_taylor_dualized_formula(topology, ctx, signature, formula_class)
         _write_regular_taylor_formula_to_cache(formula)
+        _increment_topology_counter(topology, "regular_taylor_formulas_generated")
         return formula
 
     outputs = ctx.build_outputs()
@@ -161,7 +164,14 @@ def build_regular_taylor_formula_symbolica(
         zero_positions=ctx.zero_positions,
     )
     _write_regular_taylor_formula_to_cache(formula)
+    _increment_topology_counter(topology, "regular_taylor_formulas_generated")
     return formula
+
+
+def _increment_topology_counter(topology: Any, name: str) -> None:
+    """Increment an optional build/cache counter on ``TopologyDefinition``."""
+    if hasattr(topology, name):
+        setattr(topology, name, int(getattr(topology, name, 0)) + 1)
 
 
 def _build_regular_taylor_dualized_formula(
@@ -211,7 +221,7 @@ def _endpoint_projector_cache_dir() -> Path:
     configured = os.environ.get("FSD_SUBTRACTION_FORMULA_CACHE_DIR")
     if configured:
         return Path(configured).expanduser()
-    return DEFAULT_ENDPOINT_PROJECTOR_CACHE_DIR
+    return formula_cache_dir()
 
 
 def _signature_payload(signature: tuple[Any, ...]) -> dict[str, Any]:
@@ -232,12 +242,15 @@ def _endpoint_projector_cache_path(signature: tuple[Any, ...]) -> Path:
 
 def _cache_read_paths(path: Path) -> list[Path]:
     """Return generated and curated cache locations for one formula filename."""
-    root = _endpoint_projector_cache_dir()
-    curated = root / "curated" / path.name
-    # Curated assets are treated as part of the FSD source distribution.  They
-    # should take precedence over exploratory generated cache files with the
-    # same signature, which may have been produced by older local experiments.
-    return [curated, path] if curated != path else [path]
+    paths: list[Path] = []
+    # Curated assets are treated as part of the FSD source/distribution cache.
+    # They should take precedence over exploratory generated cache files with
+    # the same signature, which may have been produced by older local runs.
+    for root in formula_cache_read_roots():
+        for candidate in (root / "curated" / path.name, root / path.name):
+            if candidate not in paths:
+                paths.append(candidate)
+    return paths
 
 
 def regular_taylor_formula_has_curated_cache(signature: tuple[Any, ...]) -> bool:
@@ -335,6 +348,7 @@ def _load_endpoint_projector_formula_from_cache(
             data = json.loads(candidate.read_text(encoding="utf-8"))
             if data.get("signature_payload") != _signature_payload(signature):
                 continue
+            mirror_cache_entry_to_primary(candidate, data)
             input_names = [str(name) for name in data["input_names"]]
             input_symbols = [S(name) for name in input_names]
             outputs = [E(text) for text in data["output_expressions"]]
@@ -406,6 +420,11 @@ def _load_regular_taylor_formula_from_cache(
             data = json.loads(candidate.read_text(encoding="utf-8"))
             if data.get("signature_payload") != _regular_taylor_signature_payload(signature):
                 continue
+            mirror_cache_entry_to_primary(
+                candidate,
+                data,
+                sidecar_fields=("evaluator_cache_files",),
+            )
             mode = str(data.get("mode", "explicit"))
             input_names = [str(name) for name in data["input_names"]]
             input_symbols = [S(name) for name in input_names]
@@ -417,20 +436,30 @@ def _load_regular_taylor_formula_from_cache(
                     tuple(int(value) for value in item)
                     for item in data["evaluator_dual_shape"]
                 ]
-                evaluator = outputs[0].evaluator(
-                    evaluator_input_symbols,
-                    jit_compile=topology.jit_compile_evaluators,
-                )
-                evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
-                evaluators = [evaluator]
+                cached_evaluators = _load_regular_evaluator_sidecars(candidate, data)
+                if cached_evaluators is not None:
+                    evaluators = cached_evaluators
+                else:
+                    evaluator = outputs[0].evaluator(
+                        evaluator_input_symbols,
+                        jit_compile=topology.jit_compile_evaluators,
+                    )
+                    evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
+                    evaluators = [evaluator]
+                    _upgrade_regular_cache_with_evaluator_sidecars(candidate, data, evaluators)
             else:
                 outputs = [E(text) for text in data["output_expressions"]]
                 evaluator_input_symbols = []
                 evaluator_dual_shape = []
-                evaluators = [
-                    expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
-                    for expr in outputs
-                ]
+                cached_evaluators = _load_regular_evaluator_sidecars(candidate, data)
+                if cached_evaluators is not None:
+                    evaluators = cached_evaluators
+                else:
+                    evaluators = [
+                        expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
+                        for expr in outputs
+                    ]
+                    _upgrade_regular_cache_with_evaluator_sidecars(candidate, data, evaluators)
             return formula_class(
                 signature=signature,
                 input_names=input_names,
@@ -456,14 +485,107 @@ def _load_regular_taylor_formula_from_cache(
     return None
 
 
+def _regular_evaluator_sidecar_name(path: Path, index: int) -> str:
+    """Return the generated evaluator-cache filename for one regular output."""
+    return f"{path.stem}.eval_{int(index)}.bin.gz"
+
+
+def _load_regular_evaluator_sidecars(path: Path, data: dict[str, Any]) -> list[Any] | None:
+    """Load serialized regular-Taylor evaluators next to a cache JSON file."""
+    names = [str(name) for name in data.get("evaluator_cache_files", [])]
+    if not names:
+        return None
+    evaluators: list[Any] = []
+    for name in names:
+        candidate = path.parent / name
+        if not candidate.is_file() and candidate.suffix != ".gz":
+            compressed = candidate.with_name(candidate.name + ".gz")
+            if compressed.is_file():
+                candidate = compressed
+        if not candidate.is_file():
+            return None
+        try:
+            raw = candidate.read_bytes()
+            evaluators.append(
+                Evaluator.load(gzip.decompress(raw) if candidate.suffix == ".gz" else raw)
+            )
+        except Exception:
+            return None
+    return evaluators
+
+
+def _write_regular_evaluator_sidecars(path: Path, evaluators: list[Any]) -> list[str]:
+    """Atomically store serialized regular-Taylor evaluator bytes.
+
+    These sidecars are generated-cache artifacts, not curated source assets.
+    They allow interrupted triple-box cache-warming runs to resume without
+    paying the expensive Symbolica evaluator lowering cost again.
+    """
+    names: list[str] = []
+    for index, evaluator in enumerate(evaluators):
+        name = _regular_evaluator_sidecar_name(path, index)
+        destination = path.parent / name
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(gzip.compress(evaluator.save(), compresslevel=6))
+            os.replace(tmp_name, destination)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+        names.append(name)
+    return names
+
+
+def _regular_cache_candidate_is_curated(path: Path) -> bool:
+    """Return whether a cache path is part of the curated source assets."""
+    return "curated" in {part.lower() for part in path.parts}
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write one JSON cache payload."""
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def _upgrade_regular_cache_with_evaluator_sidecars(
+    path: Path,
+    data: dict[str, Any],
+    evaluators: list[Any],
+) -> None:
+    """Persist evaluator bytes for an existing generated expression cache."""
+    if data.get("evaluator_cache_files") or _regular_cache_candidate_is_curated(path):
+        return
+    try:
+        data["evaluator_cache_files"] = _write_regular_evaluator_sidecars(path, evaluators)
+        _write_json_atomic(path, data)
+    except Exception:
+        # The expression JSON remains a valid fallback cache even if evaluator
+        # byte serialization is unavailable for this Symbolica build.
+        data.pop("evaluator_cache_files", None)
+
+
 def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
     """Atomically store parseable expression strings for a regular formula."""
     path = _regular_taylor_cache_path(formula.signature)
     path.parent.mkdir(parents=True, exist_ok=True)
+    evaluator_cache_files = _write_regular_evaluator_sidecars(path, list(formula.evaluators))
     data = {
         "signature_payload": _regular_taylor_signature_payload(formula.signature),
         "mode": "dualized" if getattr(formula, "evaluator_dual_shape", None) else "explicit",
         "input_names": list(formula.input_names),
+        "evaluator_cache_files": evaluator_cache_files,
         "output_layout": [
             _regular_output_layout_to_json(item) for item in formula.output_layout
         ],
@@ -485,15 +607,7 @@ def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
         data["dual_variable_count"] = int(formula.dual_variable_count)
     else:
         data["output_expressions"] = [str(expr) for expr in formula.output_expressions]
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(tmp_name, path)
-    finally:
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
+    _write_json_atomic(path, data)
 
 
 def _regular_output_layout_to_json(key: tuple[tuple[int, ...], int]) -> dict[str, Any]:

@@ -128,6 +128,7 @@ class SectorDefinition:
     measure_monomial_powers: list[float] | None = None
     numerator_monomial_powers: list[float] | None = None
     endpoint_taylor_orders: list[int] | None = None
+    strict_prepared_bundle: bool = False
     f_monomial_expr: Any = field(init=False)
     u_monomial_expr: Any = field(init=False)
     dual_shape: list[tuple[int, ...]] = field(init=False)
@@ -199,6 +200,27 @@ class SectorDefinition:
         self._map_monomials = [_monomial_data(expr, self.variable_names) for expr in self.map_exprs]
         self._jacobian_monomial = _monomial_data(self.regular_jacobian_expr, self.variable_names)
 
+    def structurally_active_map_indices(self) -> tuple[int, ...] | None:
+        """Return varying Feynman-parameter indices for monomial maps.
+
+        pySecDec-generated sector maps are monomials in the sector variables.
+        For those sectors the chain-rule formula signature only needs to know
+        which original parameters have a non-constant map; this can be read
+        directly from the monomial powers without materialising large dual
+        Taylor jets.  ``None`` asks callers to use the generic evaluator-based
+        fallback for non-monomial maps.
+        """
+        if not self._map_monomials or any(monomial is None for monomial in self._map_monomials):
+            return None
+        active: list[int] = []
+        for index, monomial in enumerate(self._map_monomials):
+            if monomial is None:
+                return None
+            _coefficient, powers = monomial
+            if any(int(power) != 0 for power in powers):
+                active.append(int(index))
+        return tuple(active)
+
     def prepare_evaluators(self, include_dual: bool = True) -> None:
         """Build map/Jacobian Symbolica callbacks for this sector.
 
@@ -230,6 +252,8 @@ class SectorDefinition:
     def _ensure_evaluators(self) -> None:
         """Prepare callbacks for direct unit-test construction paths."""
         if not self._evaluators_prepared:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(f"{self.name}: missing prepared sector evaluators")
             self.prepare_evaluators()
 
     def _timed_evaluate(self, evaluator: Any, rows: np.ndarray, timing: HotPathTiming | None) -> Any:
@@ -529,6 +553,8 @@ class SectorDefinition:
         existing = self._map_dual_evaluators_by_shape.get(key)
         if existing is not None:
             return existing
+        if self.strict_prepared_bundle:
+            raise RuntimeError(f"{self.name}: missing prepared map dual evaluators for shape {key}")
         params = _symbols(self.variable_names)
         evaluators: list[Any] = []
         for expr in self.map_exprs:
@@ -551,6 +577,8 @@ class SectorDefinition:
         existing = self._jacobian_dual_evaluators_by_shape.get(key)
         if existing is not None:
             return existing
+        if self.strict_prepared_bundle:
+            raise RuntimeError(f"{self.name}: missing prepared Jacobian dual evaluator for shape {key}")
         params = _symbols(self.variable_names)
         evaluator = self.regular_jacobian_expr.evaluator(
             params,
@@ -832,7 +860,7 @@ class SectorDefinition:
         nonzero_flat = np.flatnonzero(coefficients.reshape(flat_width) != 0.0)
         for axis in range(self.integration_dim):
             axis_powers = powers_out[:, :, axis]
-            if not np.any(axis_powers):
+            if not axis_powers.any():
                 continue
             for power in np.unique(axis_powers):
                 power_int = int(power)
