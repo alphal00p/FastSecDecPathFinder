@@ -25,7 +25,7 @@ import time
 from typing import Any
 
 import numpy as np
-from symbolica import E, Evaluator, Expression, S
+from symbolica import E, Evaluator, Expression, Replacement, S
 
 from cache_utils import formula_cache_dir, formula_cache_read_roots, mirror_cache_entry_to_primary
 from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
@@ -53,6 +53,7 @@ ComplexPreciseRow = list[ComplexPrecise]
 # topology.
 CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS = 4
 CHAIN_RULE_FORMULA_CACHE_VERSION = 4
+TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION = 1
 
 
 class _SerializedEvaluatorRef:
@@ -108,6 +109,42 @@ def _decimal_real(value: Any, precision_digits: int) -> Decimal:
 def _decimal_complex(value: Any, precision_digits: int) -> tuple[Decimal, Decimal]:
     """Return Symbolica's ``(real, imag)`` multiprecision complex input shape."""
     return decimal_complex_with_precision(value, precision_digits)
+
+
+def _as_expression(expr: Any) -> Any:
+    """Return a Symbolica expression from an expression object or stored text."""
+    if hasattr(expr, "replace_multiple"):
+        return expr
+    return E(str(expr))
+
+
+def _replace_many(expr: Any, replacements: list[tuple[str, Any]]) -> Any:
+    """Apply simultaneous Symbolica replacements."""
+    return _as_expression(expr).replace_multiple(
+        [Replacement(S(name), rhs) for name, rhs in replacements]
+    )
+
+
+def _expression_int_power(expr: Any, power: int) -> Any:
+    """Raise a Symbolica expression to an integer power."""
+    exponent = int(power)
+    if exponent == 0:
+        return E("1")
+    base = _as_expression(expr)
+    if exponent > 0:
+        return base ** exponent
+    return E("1") / (base ** abs(exponent))
+
+
+def _monomial_expr(variable_names: list[str], powers: list[int | float]) -> Any:
+    """Build a monomial from integer powers."""
+    out = E("1")
+    for name, power in zip(variable_names, powers):
+        rounded = round(float(power))
+        if abs(float(power) - rounded) > 1.0e-12:
+            raise ValueError(f"non-integer monomial power {power!r}")
+        out = out * _expression_int_power(S(name), int(rounded))
+    return out
 
 
 @dataclass
@@ -185,6 +222,9 @@ class TopologyDefinition:
     _chain_rule_formulas: dict[
         tuple[Any, ...], "ChainRuleFormulaDefinition"
     ] = field(default_factory=dict, init=False, repr=False)
+    _two_stage_sector_formulas: dict[
+        str, "TwoStageSectorFormulaDefinition"
+    ] = field(default_factory=dict, init=False, repr=False)
     _chain_rule_formula_lookup_cache: dict[
         tuple[str, str, tuple[tuple[int, ...], ...]], "ChainRuleFormulaDefinition"
     ] = field(default_factory=dict, init=False, repr=False)
@@ -224,6 +264,8 @@ class TopologyDefinition:
     chain_rule_formulas_skipped: int = field(default=0, init=False)
     chain_rule_formulas_from_cache: int = field(default=0, init=False)
     chain_rule_formulas_generated: int = field(default=0, init=False)
+    two_stage_sector_formula_build_seconds: float = field(default=0.0, init=False)
+    two_stage_sector_formulas_generated: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Build the scalar U and F evaluators in the declared row order."""
@@ -1578,6 +1620,67 @@ class TopologyDefinition:
                         )
                     ),
                 )
+
+    def prepare_two_stage_sector_formulas(
+        self,
+        sectors: list[SectorDefinition],
+        progress: Any | None = None,
+    ) -> None:
+        """Build source+assembler evaluator pairs for singular sectors."""
+        pending = [
+            sector
+            for sector in sectors
+            if sector.singular_axes and sector.name not in self._two_stage_sector_formulas
+        ]
+        if not pending:
+            return
+        if progress is not None:
+            progress.start_stage(
+                "Symbolica two-stage sector build",
+                detail=f"{len(pending)} singular sector evaluator pair(s)",
+                total=len(pending),
+            )
+        start_all = time.perf_counter()
+        try:
+            for index, sector in enumerate(pending, start=1):
+                if progress is not None:
+                    progress.update(
+                        index - 1,
+                        total=len(pending),
+                        detail=f"{sector.name} two-stage {index}/{len(pending)}",
+                    )
+                start = time.perf_counter()
+                formula = build_two_stage_sector_formula(
+                    self,
+                    sector,
+                    progress=progress,
+                    progress_index=index,
+                    progress_total=len(pending),
+                )
+                elapsed = time.perf_counter() - start
+                self._two_stage_sector_formulas[sector.name] = formula
+                self.two_stage_sector_formulas_generated += 1
+                self.two_stage_sector_formula_build_seconds += elapsed
+                if progress is not None:
+                    progress.update(
+                        index,
+                        total=len(pending),
+                        detail=f"{sector.name} two-stage done in {elapsed:.3g}s",
+                    )
+        finally:
+            if progress is not None:
+                progress.finish_stage(
+                    "Symbolica two-stage sector build",
+                    time.perf_counter() - start_all,
+                    detail=f"{len(pending)} sector evaluator pair(s)",
+                )
+
+    def two_stage_sector_formula_for(
+        self,
+        sector: SectorDefinition,
+    ) -> "TwoStageSectorFormulaDefinition | None":
+        """Return a prepared source+assembler evaluator pair for a sector."""
+        return self._two_stage_sector_formulas.get(sector.name)
 
     def regular_taylor_signatures_for_sector(
         self,
@@ -4587,6 +4690,89 @@ class ChainRuleFormulaDefinition:
         return values
 
 
+@dataclass
+class TwoStageSectorFormulaDefinition:
+    """Prepared source+assembler evaluator pair for one singular sector.
+
+    The source evaluator maps sector coordinates to regular Taylor/source
+    coefficients.  The assembler evaluator consumes those coefficients plus the
+    coordinates and returns Laurent coefficients.  This is deliberately an
+    artifact boundary: later implementations can replace the explicit source
+    evaluator by a black-box derivative/source evaluator without changing the
+    runtime call shape.
+    """
+
+    sector_name: str
+    source_input_names: list[str]
+    assembler_input_names: list[str]
+    coefficient_keys: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]]
+    laurent_orders: list[int]
+    source_evaluator: Any
+    assembler_evaluator: Any
+    source_keys: list[Any] = field(default_factory=list)
+    source_expression_build_seconds: float = 0.0
+    source_evaluator_build_seconds: float = 0.0
+    assembler_expression_build_seconds: float = 0.0
+    assembler_evaluator_build_seconds: float = 0.0
+    source_expression_bytes: int = 0
+    assembler_expression_bytes: int = 0
+    source_evaluator_bytes: int = 0
+    assembler_evaluator_bytes: int = 0
+    source_kind: str = "explicit-sector-expression"
+    cache_json_path: str | None = None
+    source_cache_evaluator_file: str | None = None
+    assembler_cache_evaluator_file: str | None = None
+
+    def evaluate_complex_batch(
+        self,
+        rows: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate all Laurent coefficients for a double-precision batch."""
+        sample_rows = np.asarray(rows, dtype=np.complex128)
+        start = time.perf_counter()
+        source_values = np.asarray(
+            self.source_evaluator.evaluate_complex(sample_rows),
+            dtype=np.complex128,
+        )
+        assembler_rows = np.zeros(
+            (sample_rows.shape[0], len(self.assembler_input_names)),
+            dtype=np.complex128,
+        )
+        width = sample_rows.shape[1]
+        assembler_rows[:, :width] = sample_rows
+        assembler_rows[:, width:] = source_values
+        values = np.asarray(
+            self.assembler_evaluator.evaluate_complex(assembler_rows),
+            dtype=np.complex128,
+        )
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return values
+
+    def evaluate_complex_prec(
+        self,
+        row: np.ndarray,
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[complex]:
+        """Evaluate one row with Symbolica arbitrary-precision complex inputs."""
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(row, dtype=float)]
+        start = time.perf_counter()
+        source_values = self.source_evaluator.evaluate_complex_with_prec(
+            coords,
+            precision_digits,
+        )
+        assembler_row: ComplexPreciseRow = [*coords, *source_values]
+        values = self.assembler_evaluator.evaluate_complex_with_prec(
+            assembler_row,
+            precision_digits,
+        )
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return [complex(float(value[0]), float(value[1])) for value in values]
+
+
 def _chain_rule_formula_cache_dir() -> Path:
     """Return the local generated cache directory for universal chain formulas."""
     configured = os.environ.get("FSD_SUBTRACTION_FORMULA_CACHE_DIR")
@@ -4789,6 +4975,945 @@ def _load_chain_rule_formula_from_cache(
         except Exception:
             continue
     return None
+
+
+def _replace_sector_vars(sector: SectorDefinition, expr: Any, values: list[Any]) -> Any:
+    """Replace sector variables in ``expr`` by the provided Symbolica values."""
+    return _replace_many(expr, list(zip(sector.variable_names, values)))
+
+
+def _endpoint_coordinate_exprs(
+    sector: SectorDefinition,
+    boundary: tuple[int, ...],
+    zero: tuple[int, ...],
+    y_symbols: list[Any],
+) -> list[Any]:
+    """Return sector-coordinate expressions at one endpoint projector."""
+    singular_position = {axis: position for position, axis in enumerate(sector.singular_axes)}
+    boundary_set = {int(value) for value in boundary}
+    zero_set = {int(value) for value in zero}
+    out: list[Any] = []
+    for axis, symbol in enumerate(y_symbols):
+        position = singular_position.get(axis)
+        if position is not None and position in boundary_set:
+            out.append(E("1"))
+        elif position is not None and position in zero_set:
+            out.append(E("0"))
+        else:
+            out.append(symbol)
+    return out
+
+
+def _expr_derivative_coefficient(
+    expr: Any,
+    symbols: list[Any],
+    multi_index: tuple[int, ...],
+) -> Any:
+    """Return the formal Taylor coefficient of ``expr`` for one multi-index."""
+    out = _as_expression(expr)
+    denominator = 1
+    for symbol, count in zip(symbols, multi_index):
+        for _ in range(int(count)):
+            out = out.derivative(symbol)
+        denominator *= math.factorial(int(count))
+    if denominator != 1:
+        out = out / E(str(denominator))
+    return out
+
+
+def _monomial_taylor_series_expr(
+    sector: SectorDefinition,
+    monomial_powers: list[int],
+    zero_positions: set[int],
+    boundary_positions: set[int],
+    max_orders: list[int],
+    y_symbols: list[Any],
+) -> ExprSeries:
+    """Expression analogue of the extracted-monomial Taylor denominator."""
+    axes = list(sector.singular_axes)
+    axis_position = {axis: position for position, axis in enumerate(axes)}
+    series = _expr_series_constant(E("1"), max_orders)
+    for axis, power_value in enumerate(monomial_powers):
+        power = int(power_value)
+        if power == 0:
+            continue
+        position = axis_position.get(axis)
+        if position is not None and position in zero_positions:
+            continue
+        factor: ExprSeries = {}
+        if position is None:
+            factor = _expr_series_constant(y_symbols[axis] ** power, max_orders)
+        else:
+            base = E("1") if position in boundary_positions else y_symbols[axis]
+            for order in range(min(power, int(max_orders[position])) + 1):
+                multi = [0 for _ in max_orders]
+                multi[position] = order
+                factor[tuple(multi)] = (
+                    E(str(math.comb(power, order))) * base ** (power - order)
+                )
+        series = _expr_series_mul(series, factor, max_orders)
+    return series
+
+
+def _regular_monomial_base_log_expr(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    y_symbols: list[Any],
+) -> tuple[Any, Any]:
+    """Return the regular non-singular monomial base and epsilon log."""
+    singular = set(sector.singular_axes)
+    base_value = E("1")
+    eps_log = E("0")
+    for axis in range(sector.integration_dim):
+        if axis in singular:
+            continue
+        endpoint_power = topology.endpoint_power(sector, axis)
+        coord = y_symbols[axis]
+        if abs(endpoint_power.base) > 1.0e-15:
+            rounded = round(endpoint_power.base)
+            if abs(endpoint_power.base - rounded) > 1.0e-12:
+                raise ValueError(
+                    f"{sector.name}: non-integer regular base power {endpoint_power.base}"
+                )
+            base_value = base_value * _expression_int_power(coord, int(rounded))
+        if abs(endpoint_power.eps_coeff) > 1.0e-15:
+            eps_log = eps_log + E(repr(float(endpoint_power.eps_coeff))) * coord.log()
+    return base_value, eps_log
+
+
+def _residual_source_shape_expr(
+    sector: SectorDefinition,
+    zero_positions: set[int],
+    residual_multis: set[tuple[int, ...]],
+    monomial_powers: list[int],
+) -> set[tuple[int, ...]]:
+    """Return ancestor-closed raw polynomial support for a residual series."""
+    axes = list(sector.singular_axes)
+    axis_position = {axis: position for position, axis in enumerate(axes)}
+    source: set[tuple[int, ...]] = {tuple(0 for _ in axes)}
+    for residual_multi in residual_multis:
+        shifted = list(int(value) for value in residual_multi)
+        for axis, power in enumerate(monomial_powers):
+            position = axis_position.get(axis)
+            if position is not None and position in zero_positions:
+                shifted[position] += int(power)
+        source.add(tuple(shifted))
+    return _ancestor_closed_multi_set(source, len(axes))
+
+
+def _compose_polynomial_from_derivatives_expr(
+    derivative_symbols: dict[tuple[int, ...], Any],
+    h_series: list[ExprSeries],
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Compose original-parameter derivatives with sector-map Taylor jets."""
+    if not allowed_multis:
+        return {}
+    rank = len(next(iter(allowed_multis)))
+    power_cache: dict[tuple[int, int], ExprSeries] = {}
+
+    def h_power(active_index: int, power: int) -> ExprSeries:
+        key = (int(active_index), int(power))
+        cached = power_cache.get(key)
+        if cached is not None:
+            return cached
+        if power == 0:
+            cached = _expr_series_constant(E("1"), [0 for _ in range(rank)])
+        elif power == 1:
+            cached = {
+                multi: value
+                for multi, value in h_series[active_index].items()
+                if multi in allowed_multis
+            }
+        else:
+            cached = _expr_series_mul_allowed(
+                h_power(active_index, power - 1),
+                h_series[active_index],
+                allowed_multis,
+            )
+        power_cache[key] = cached
+        return cached
+
+    product_cache: dict[tuple[int, ...], ExprSeries] = {}
+
+    def chain_product(alpha: tuple[int, ...]) -> ExprSeries:
+        cached = product_cache.get(alpha)
+        if cached is not None:
+            return cached
+        term = _expr_series_constant(E("1"), [0 for _ in range(rank)])
+        factorial = 1
+        for active_index, power in enumerate(alpha):
+            power_int = int(power)
+            if power_int == 0:
+                continue
+            factorial *= math.factorial(power_int)
+            term = _expr_series_mul_allowed(term, h_power(active_index, power_int), allowed_multis)
+            if not term:
+                break
+        if term and factorial != 1:
+            term = _expr_series_scale(term, E("1") / E(str(factorial)))
+        product_cache[alpha] = term
+        return term
+
+    out: ExprSeries = {}
+    for alpha, symbol in derivative_symbols.items():
+        product_series = chain_product(tuple(int(value) for value in alpha))
+        if not product_series:
+            continue
+        out = _expr_series_add(out, _expr_series_scale(product_series, symbol))
+    return out
+
+
+def _expr_series_to_polynomial(series: ExprSeries, local_symbols: list[Any]) -> Any:
+    """Convert a sparse Taylor series into a formal Symbolica polynomial."""
+    out = E("0")
+    for multi, coeff in series.items():
+        term = coeff
+        for symbol, power in zip(local_symbols, multi):
+            if int(power):
+                term = term * (symbol ** int(power))
+        out = out + term
+    return out
+
+
+def _local_taylor_coefficient_expr(
+    expr: Any,
+    local_symbols: list[Any],
+    multi_index: tuple[int, ...],
+) -> Any:
+    """Extract one formal Taylor coefficient by differentiating local symbols."""
+    out = _as_expression(expr)
+    denominator = 1
+    for symbol, count in zip(local_symbols, multi_index):
+        for _ in range(int(count)):
+            out = out.derivative(symbol)
+        denominator *= math.factorial(int(count))
+    if denominator != 1:
+        out = out / E(str(denominator))
+    if local_symbols:
+        out = _replace_many(out, [(str(symbol), E("0")) for symbol in local_symbols])
+    return out
+
+
+def _g_coefficients_by_symbolic_diff(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    u_residual: ExprSeries,
+    f_residual: ExprSeries,
+    j_series: ExprSeries,
+    monomial_pref: Any,
+    monomial_log: Any,
+    requested_pairs: set[tuple[tuple[int, ...], int]],
+    max_orders: list[int],
+) -> list[ExprSeries]:
+    """Build requested regular coefficients by differentiating local polynomials."""
+    local_symbols = [S(f"loc{index}") for index in range(len(max_orders))]
+    u_poly = _expr_series_to_polynomial(u_residual, local_symbols)
+    f_poly = _expr_series_to_polynomial(f_residual, local_symbols)
+    j_poly = _expr_series_to_polynomial(j_series, local_symbols)
+    u_power = int(round(float(topology.u_power_base)))
+    f_power = int(round(float(topology.f_power_base)))
+    if abs(float(topology.u_power_base) - u_power) > 1.0e-12:
+        raise ValueError(f"{sector.name}: two-stage path requires integer U power")
+    if abs(float(topology.f_power_base) - f_power) > 1.0e-12:
+        raise ValueError(f"{sector.name}: two-stage path requires integer F power")
+    prefactor = (
+        monomial_pref
+        * j_poly
+        * _expression_int_power(u_poly, u_power)
+        * _expression_int_power(f_poly, -f_power)
+    )
+    eps_log = (
+        monomial_log
+        + E(repr(float(topology.eps_log_u_coeff))) * u_poly.log()
+        + E(repr(float(topology.eps_log_f_coeff))) * f_poly.log()
+    )
+    out: list[ExprSeries] = [{} for _ in range(topology.coefficient_count)]
+    for regular_order in range(topology.coefficient_count):
+        pairs = [
+            tuple(multi)
+            for multi, order in requested_pairs
+            if int(order) == int(regular_order)
+        ]
+        if not pairs:
+            continue
+        g_expr = (
+            prefactor
+            if regular_order == 0
+            else prefactor
+            * (eps_log ** int(regular_order))
+            / E(str(math.factorial(int(regular_order))))
+        )
+        for multi in pairs:
+            out[int(regular_order)][tuple(multi)] = _local_taylor_coefficient_expr(
+                g_expr,
+                local_symbols,
+                tuple(multi),
+            )
+    return out
+
+
+def _endpoint_projector_expression_formula(
+    topology: TopologyDefinition,
+    signature: tuple[Any, ...],
+) -> EndpointProjectorFormulaDefinition:
+    """Rebuild a reference endpoint-projector expression for assembler generation."""
+    return build_endpoint_projector_formula_symbolica(
+        topology,
+        None,
+        signature,
+        EndpointProjectorFormulaDefinition,
+        ibp_reduce_to_log_endpoint=False,
+    )
+
+
+def _two_stage_assembler_expressions(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> tuple[
+    list[Any],
+    list[str],
+    list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+]:
+    """Build the topology-independent assembler expressions for one sector.
+
+    The expressions consume sector coordinates plus regular Taylor
+    coefficients ``c_i`` and return the requested Laurent coefficients.  In IBP
+    mode the parent formula is kept as metadata while each logarithmic child
+    projector is rebuilt as a reference expression and substituted into the
+    parent sum.
+    """
+    formula = topology.endpoint_projector_formula_for(sector)
+    y_input_names = [f"y{index}" for index in range(sector.integration_dim)]
+    y_symbols = [S(name) for name in y_input_names]
+    coefficient_names: dict[
+        tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int],
+        str,
+    ] = {}
+    coefficient_keys: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]] = []
+
+    def coefficient_symbol(
+        key: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int],
+    ) -> Any:
+        normalized = (
+            tuple(int(value) for value in key[0]),
+            tuple(int(value) for value in key[1]),
+            tuple(int(value) for value in key[2]),
+            int(key[3]),
+        )
+        name = coefficient_names.get(normalized)
+        if name is None:
+            name = f"c{len(coefficient_keys)}"
+            coefficient_names[normalized] = name
+            coefficient_keys.append(normalized)
+        return S(name)
+
+    if not formula.ibp_reduce_to_log_endpoint:
+        reference = _endpoint_projector_expression_formula(topology, formula.signature)
+        replacements: list[tuple[str, Any]] = []
+        for position, axis in enumerate(sector.singular_axes):
+            replacements.append((reference.input_names[position], y_symbols[int(axis)]))
+        offset = len(sector.singular_axes)
+        for column, key in enumerate(reference.coefficient_layout):
+            replacements.append((reference.input_names[offset + column], coefficient_symbol(key)))
+        order_index = {int(order): index for index, order in enumerate(reference.laurent_orders)}
+        outputs = [
+            _replace_many(reference.output_expressions[order_index[int(order)]], replacements)
+            for order in topology.laurent_orders
+        ]
+    else:
+        child_formulas = {
+            signature: _endpoint_projector_expression_formula(topology, signature)
+            for signature in formula.child_formulas
+        }
+        active_order_to_child_index: dict[tuple[Any, ...], list[int]] = {}
+        for child_signature, child in child_formulas.items():
+            index_by_order = {int(order): index for index, order in enumerate(child.laurent_orders)}
+            active_order_to_child_index[child_signature] = [
+                index_by_order.get(int(order), -1) for order in topology.laurent_orders
+            ]
+        outputs = [E("0") for _ in topology.laurent_orders]
+        for term in formula.ibp_terms:
+            child = child_formulas[term.child_signature]
+            active_positions = tuple(int(position) for position in term.active_positions)
+            replacements = []
+            for local_position, original_position in enumerate(active_positions):
+                axis = sector.singular_axes[int(original_position)]
+                replacements.append((child.input_names[local_position], y_symbols[int(axis)]))
+            offset = len(active_positions)
+            for column, (_child_boundary, child_zero, child_multi, regular_order) in enumerate(
+                child.coefficient_layout
+            ):
+                if int(regular_order) >= topology.coefficient_count:
+                    replacements.append((child.input_names[offset + column], E("0")))
+                    continue
+                original_zero = tuple(active_positions[int(position)] for position in child_zero)
+                original_multi = list(int(value) for value in term.derivative_multi)
+                for child_position, value in enumerate(child_multi):
+                    original_multi[active_positions[int(child_position)]] += int(value)
+                key = (
+                    tuple(int(position) for position in term.boundary_positions),
+                    tuple(sorted(int(position) for position in original_zero)),
+                    tuple(int(value) for value in original_multi),
+                    int(regular_order),
+                )
+                replacements.append((child.input_names[offset + column], coefficient_symbol(key)))
+
+            active_child_exprs = [
+                E("0") if index < 0 else _as_expression(child.output_expressions[index])
+                for index in active_order_to_child_index[term.child_signature]
+            ]
+            for value_index, child_expr in enumerate(active_child_exprs):
+                substituted = _replace_many(child_expr, replacements)
+                for pref_index, prefactor in enumerate(term.prefactor_coeffs):
+                    out_index = value_index + pref_index
+                    if out_index >= len(outputs):
+                        break
+                    pref = complex(prefactor)
+                    if abs(pref.imag) > 1.0e-15:
+                        raise ValueError(
+                            f"{sector.name}: complex IBP prefactors are not supported "
+                            "by the two-stage assembler"
+                        )
+                    if abs(pref.real) <= 0.0:
+                        continue
+                    outputs[out_index] = outputs[out_index] + E(repr(float(pref.real))) * substituted
+    input_names = [*y_input_names, *[coefficient_names[key] for key in coefficient_keys]]
+    return outputs, input_names, coefficient_keys
+
+
+def _two_stage_derivative_fused_components(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    coefficient_assembler_outputs: list[Any],
+    coefficient_keys: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+    progress: Any | None = None,
+    progress_index: int = 0,
+    progress_total: int = 0,
+) -> tuple[
+    list[Any],
+    list[str],
+    list[tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...]]],
+    list[Any],
+]:
+    """Build derivative-fused assembler outputs and source derivative slots.
+
+    Evaluator A computes U/F derivative slots at endpoint sector maps.
+    Evaluator B consumes those slots and performs all regular-coefficient and
+    endpoint-projector algebra.  This keeps the expensive algebra inside a
+    Symbolica evaluator while keeping the source stage compact and explicit.
+    """
+    y_symbols = [S(f"y{axis}") for axis in range(sector.integration_dim)]
+    singular_symbols = [y_symbols[axis] for axis in sector.singular_axes]
+    map_exprs_y = [
+        _replace_sector_vars(sector, _as_expression(expr), y_symbols)
+        for expr in sector.map_exprs
+    ]
+    grouped_pairs: dict[
+        tuple[tuple[int, ...], tuple[int, ...]],
+        set[tuple[tuple[int, ...], int]],
+    ] = {}
+    for boundary, zero, multi_index, regular_order in coefficient_keys:
+        grouped_pairs.setdefault((tuple(boundary), tuple(zero)), set()).add(
+            (tuple(multi_index), int(regular_order))
+        )
+    derivative_slot_names: dict[
+        tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...]],
+        str,
+    ] = {}
+    derivative_slots: list[tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...]]] = []
+
+    def derivative_symbol(
+        boundary: tuple[int, ...],
+        zero: tuple[int, ...],
+        polynomial: str,
+        full_multi: tuple[int, ...],
+    ) -> Any:
+        key = (tuple(boundary), tuple(zero), str(polynomial), tuple(full_multi))
+        name = derivative_slot_names.get(key)
+        if name is None:
+            name = f"d{len(derivative_slots)}"
+            derivative_slot_names[key] = name
+            derivative_slots.append(key)
+        return S(name)
+
+    derivative_candidates = {
+        "u": set(
+            topology._candidate_derivative_multi_indices(
+                topology.u_expr,
+                CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
+            )
+        ),
+        "f": set(
+            topology._candidate_derivative_multi_indices(
+                topology.f_expr,
+                CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
+            )
+        ),
+    }
+    g_expr_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[ExprSeries]] = {}
+    sorted_groups = sorted(grouped_pairs, key=lambda item: (len(item[0]), item[0], item[1]))
+    for group_index, (boundary, zero) in enumerate(sorted_groups, start=1):
+        if progress is not None:
+            progress.update(
+                max(int(progress_index) - 1, 0),
+                total=int(progress_total) if progress_total else 1,
+                detail=(
+                    f"{sector.name} source expression group "
+                    f"{group_index}/{len(sorted_groups)}"
+                ),
+            )
+        pairs = grouped_pairs[(boundary, zero)]
+        requested_residual_multis = {tuple(multi) for multi, _order in pairs}
+        residual_multis = _ancestor_closed_multi_set(
+            requested_residual_multis,
+            len(sector.singular_axes),
+        )
+        max_orders = [
+            max(int(multi[position]) for multi in residual_multis)
+            for position in range(len(sector.singular_axes))
+        ]
+        zero_set = {int(value) for value in zero}
+        boundary_set = {int(value) for value in boundary}
+        endpoint_values = _endpoint_coordinate_exprs(sector, boundary, zero, y_symbols)
+        endpoint_y_replacements = [
+            (f"y{axis}", endpoint_values[axis])
+            for axis in range(sector.integration_dim)
+        ]
+
+        u_source_shape = _residual_source_shape_expr(
+            sector,
+            zero_set,
+            residual_multis,
+            sector.u_monomial_powers,
+        )
+        f_source_shape = _residual_source_shape_expr(
+            sector,
+            zero_set,
+            residual_multis,
+            sector.f_monomial_powers,
+        )
+        allowed_multis = set(u_source_shape) | set(f_source_shape) | {
+            tuple(0 for _ in sector.singular_axes)
+        }
+
+        h_series_full: list[ExprSeries] = []
+        active_x_indices: list[int] = []
+        for x_index, expr in enumerate(map_exprs_y):
+            series: ExprSeries = {}
+            for multi in allowed_multis:
+                if not any(multi):
+                    continue
+                coeff = _expr_derivative_coefficient(expr, singular_symbols, tuple(multi))
+                coeff = _replace_many(coeff, endpoint_y_replacements)
+                if str(coeff) != "0":
+                    series[tuple(multi)] = coeff
+            h_series_full.append(series)
+            if series:
+                active_x_indices.append(int(x_index))
+
+        h_series = [h_series_full[index] for index in active_x_indices]
+        polynomial_series_by_kind: dict[str, ExprSeries] = {}
+        for polynomial in ("u", "f"):
+            derivative_symbols: dict[tuple[int, ...], Any] = {}
+            max_total = min(
+                CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
+                max((sum(multi) for multi in allowed_multis), default=0),
+            )
+            for compressed in _dense_total_degree_multi_indices(len(active_x_indices), max_total):
+                full = [0 for _ in topology.x_names]
+                for active_position, x_index in enumerate(active_x_indices):
+                    full[x_index] = int(compressed[active_position])
+                full_multi = tuple(full)
+                if full_multi not in derivative_candidates[polynomial]:
+                    continue
+                derivative_symbols[tuple(compressed)] = derivative_symbol(
+                    boundary,
+                    zero,
+                    polynomial,
+                    full_multi,
+                )
+            polynomial_series_by_kind[polynomial] = _compose_polynomial_from_derivatives_expr(
+                derivative_symbols,
+                h_series,
+                allowed_multis,
+            )
+
+        def residual_series(polynomial: str, monomial_powers: list[int]) -> ExprSeries:
+            polynomial_series = polynomial_series_by_kind[polynomial]
+            shifted_series: ExprSeries = {}
+            axis_position = {axis: position for position, axis in enumerate(sector.singular_axes)}
+            for residual_multi in residual_multis:
+                shifted = list(int(value) for value in residual_multi)
+                for axis, power in enumerate(monomial_powers):
+                    position = axis_position.get(axis)
+                    if position is not None and position in zero_set:
+                        shifted[position] += int(power)
+                shifted_series[tuple(residual_multi)] = polynomial_series.get(tuple(shifted), E("0"))
+            denominator = _monomial_taylor_series_expr(
+                sector,
+                monomial_powers,
+                zero_set,
+                boundary_set,
+                max_orders,
+                y_symbols,
+            )
+            if set(denominator) <= {tuple(0 for _ in max_orders)}:
+                denom0 = denominator.get(tuple(0 for _ in max_orders), E("1"))
+                return {multi: value / denom0 for multi, value in shifted_series.items()}
+            return _expr_series_mul(
+                shifted_series,
+                _expr_series_pow_real(denominator, -1.0, max_orders),
+                max_orders,
+            )
+
+        u_residual = residual_series("u", sector.u_monomial_powers)
+        f_residual = residual_series("f", sector.f_monomial_powers)
+        jacobian_expr_y = _replace_sector_vars(
+            sector,
+            _as_expression(sector.regular_jacobian_expr),
+            y_symbols,
+        )
+        j_series: ExprSeries = {}
+        for multi in residual_multis:
+            coeff = _expr_derivative_coefficient(
+                jacobian_expr_y,
+                singular_symbols,
+                tuple(multi),
+            )
+            coeff = _replace_many(coeff, endpoint_y_replacements)
+            if str(coeff) != "0":
+                j_series[tuple(multi)] = coeff
+        if not j_series:
+            j_series = _expr_series_constant(E("0"), max_orders)
+        monomial_pref, monomial_log = _regular_monomial_base_log_expr(topology, sector, y_symbols)
+        g_expr_cache[(tuple(boundary), tuple(zero))] = _g_coefficients_by_symbolic_diff(
+            topology,
+            sector,
+            u_residual,
+            f_residual,
+            j_series,
+            monomial_pref,
+            monomial_log,
+            pairs,
+            max_orders,
+        )
+
+    coefficient_replacements: list[tuple[str, Any]] = []
+    for index, key in enumerate(coefficient_keys):
+        boundary, zero, multi_index, regular_order = key
+        group = g_expr_cache.get((tuple(boundary), tuple(zero)))
+        expr = (
+            E("0")
+            if group is None
+            else group[int(regular_order)].get(tuple(multi_index), E("0"))
+        )
+        coefficient_replacements.append((f"c{index}", expr))
+
+    assembler_outputs = [
+        _replace_many(_as_expression(expr), coefficient_replacements)
+        for expr in coefficient_assembler_outputs
+    ]
+    assembler_input_names = [
+        *[f"y{axis}" for axis in range(sector.integration_dim)],
+        *[f"d{index}" for index in range(len(derivative_slots))],
+    ]
+
+    source_outputs: list[Any] = []
+    x_replacements_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[tuple[str, Any]]] = {}
+    derivative_expr_cache: dict[tuple[str, tuple[int, ...]], Any] = {}
+    params_replacements = [
+        (name, E(repr(float(value))))
+        for name, value in zip(topology.parameter_names, topology.parameter_values)
+    ]
+    for _slot_index, (boundary, zero, polynomial, multi_index) in enumerate(derivative_slots):
+        endpoint_values = _endpoint_coordinate_exprs(sector, boundary, zero, y_symbols)
+        endpoint_y_replacements = [
+            (f"y{axis}", endpoint_values[axis])
+            for axis in range(sector.integration_dim)
+        ]
+        endpoint_key = (tuple(boundary), tuple(zero))
+        x_replacements = x_replacements_cache.get(endpoint_key)
+        if x_replacements is None:
+            endpoint_map_exprs = [
+                _replace_many(expr, endpoint_y_replacements)
+                for expr in map_exprs_y
+            ]
+            x_replacements = list(zip(topology.x_names, endpoint_map_exprs))
+            x_replacements_cache[endpoint_key] = x_replacements
+        deriv_key = (str(polynomial), tuple(multi_index))
+        deriv_expr = derivative_expr_cache.get(deriv_key)
+        if deriv_expr is None:
+            base_expr = topology.u_expr if polynomial == "u" else topology.f_expr
+            deriv_expr = topology._differentiate_expr(base_expr, tuple(multi_index))
+            derivative_expr_cache[deriv_key] = deriv_expr
+        expr = _replace_many(deriv_expr, x_replacements)
+        if params_replacements:
+            expr = _replace_many(expr, params_replacements)
+        source_outputs.append(expr)
+    return assembler_outputs, assembler_input_names, derivative_slots, source_outputs
+
+
+def _two_stage_sector_cache_dir() -> Path:
+    """Return the persistent cache directory for prepared two-stage sectors."""
+    configured = os.environ.get("FSD_TWO_STAGE_SECTOR_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return formula_cache_dir() / "two_stage_sector"
+
+
+def _expr_signature_text(expr: Any) -> str:
+    """Return stable-enough expression text for local cache signatures."""
+    try:
+        return _as_expression(expr).format_plain()
+    except Exception:
+        return str(expr)
+
+
+def _two_stage_sector_signature(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> tuple[Any, ...]:
+    """Return a cache key for one fully prepared source+assembler sector pair."""
+    return (
+        "two-stage-sector",
+        TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION,
+        tuple(topology.laurent_orders),
+        bool(topology.ibp_reduce_to_log_endpoint),
+        float(topology.u_power_base),
+        float(topology.f_power_base),
+        float(topology.eps_log_u_coeff),
+        float(topology.eps_log_f_coeff),
+        tuple(topology.x_names),
+        tuple(topology.parameter_names),
+        tuple(float(value) for value in topology.parameter_values),
+        _expr_signature_text(topology.u_expr),
+        _expr_signature_text(topology.f_expr),
+        int(sector.integration_dim),
+        tuple(sector.variable_names),
+        tuple(_expr_signature_text(expr) for expr in sector.map_exprs),
+        _expr_signature_text(sector.regular_jacobian_expr),
+        tuple(int(value) for value in sector.u_monomial_powers),
+        tuple(int(value) for value in sector.f_monomial_powers),
+        tuple(int(value) for value in sector.jacobian_monomial_powers),
+        tuple(float(value) for value in sector.measure_monomial_powers),
+        tuple(float(value) for value in sector.numerator_monomial_powers),
+        tuple(int(value) for value in sector.endpoint_taylor_orders),
+        tuple(int(value) for value in sector.singular_axes),
+    )
+
+
+def _two_stage_sector_cache_path(signature: tuple[Any, ...]) -> Path:
+    """Return the JSON cache path for one two-stage sector signature."""
+    payload = json.dumps(
+        _chain_rule_jsonable(signature),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    return _two_stage_sector_cache_dir() / f"two_stage_sector_{digest}.json"
+
+
+def _two_stage_sector_cache_sidecar(path: Path, label: str) -> Path:
+    """Return a sidecar evaluator path for one cached two-stage formula."""
+    return path.with_name(f"{path.stem}.{label}.bin.gz")
+
+
+def _load_two_stage_sector_formula_from_cache(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> TwoStageSectorFormulaDefinition | None:
+    """Load a cached two-stage sector evaluator pair if all artifacts exist."""
+    signature = _two_stage_sector_signature(topology, sector)
+    path = _two_stage_sector_cache_path(signature)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if tuple(_chain_rule_tupled(data.get("signature"))) != signature:
+            return None
+        source_path = path.parent / str(data["source_evaluator_file"])
+        assembler_path = path.parent / str(data["assembler_evaluator_file"])
+        if not source_path.is_file() or not assembler_path.is_file():
+            return None
+        return TwoStageSectorFormulaDefinition(
+            sector_name=sector.name,
+            source_input_names=[str(name) for name in data["source_input_names"]],
+            assembler_input_names=[str(name) for name in data["assembler_input_names"]],
+            coefficient_keys=[
+                (
+                    tuple(int(item) for item in key[0]),
+                    tuple(int(item) for item in key[1]),
+                    tuple(int(item) for item in key[2]),
+                    int(key[3]),
+                )
+                for key in _chain_rule_tupled(data.get("coefficient_keys", []))
+            ],
+            laurent_orders=[int(order) for order in data["laurent_orders"]],
+            source_evaluator=_SerializedEvaluatorRef(source_path),
+            assembler_evaluator=_SerializedEvaluatorRef(assembler_path),
+            source_keys=list(_chain_rule_tupled(data.get("source_keys", []))),
+            source_expression_build_seconds=float(data.get("source_expression_build_seconds", 0.0)),
+            source_evaluator_build_seconds=float(data.get("source_evaluator_build_seconds", 0.0)),
+            assembler_expression_build_seconds=float(data.get("assembler_expression_build_seconds", 0.0)),
+            assembler_evaluator_build_seconds=float(data.get("assembler_evaluator_build_seconds", 0.0)),
+            source_expression_bytes=int(data.get("source_expression_bytes", 0)),
+            assembler_expression_bytes=int(data.get("assembler_expression_bytes", 0)),
+            source_evaluator_bytes=int(data.get("source_evaluator_bytes", source_path.stat().st_size)),
+            assembler_evaluator_bytes=int(data.get("assembler_evaluator_bytes", assembler_path.stat().st_size)),
+            source_kind=str(data.get("source_kind", "symbolic-derivative-source")) + "+cache",
+            cache_json_path=str(path),
+            source_cache_evaluator_file=str(source_path),
+            assembler_cache_evaluator_file=str(assembler_path),
+        )
+    except Exception:
+        return None
+
+
+def _write_two_stage_sector_formula_to_cache(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    formula: TwoStageSectorFormulaDefinition,
+) -> None:
+    """Persist a generated two-stage sector evaluator pair for later reuse."""
+    signature = _two_stage_sector_signature(topology, sector)
+    path = _two_stage_sector_cache_path(signature)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        source_path = _two_stage_sector_cache_sidecar(path, "source")
+        assembler_path = _two_stage_sector_cache_sidecar(path, "assembler")
+        source_path.write_bytes(gzip.compress(formula.source_evaluator.save(), compresslevel=6))
+        assembler_path.write_bytes(gzip.compress(formula.assembler_evaluator.save(), compresslevel=6))
+        payload = {
+            "signature": _chain_rule_jsonable(signature),
+            "sector_name": sector.name,
+            "source_input_names": formula.source_input_names,
+            "assembler_input_names": formula.assembler_input_names,
+            "coefficient_keys": _chain_rule_jsonable(tuple(formula.coefficient_keys)),
+            "source_keys": _chain_rule_jsonable(tuple(formula.source_keys)),
+            "laurent_orders": [int(order) for order in formula.laurent_orders],
+            "source_evaluator_file": source_path.name,
+            "assembler_evaluator_file": assembler_path.name,
+            "source_expression_build_seconds": formula.source_expression_build_seconds,
+            "source_evaluator_build_seconds": formula.source_evaluator_build_seconds,
+            "assembler_expression_build_seconds": formula.assembler_expression_build_seconds,
+            "assembler_evaluator_build_seconds": formula.assembler_evaluator_build_seconds,
+            "source_expression_bytes": formula.source_expression_bytes,
+            "assembler_expression_bytes": formula.assembler_expression_bytes,
+            "source_evaluator_bytes": formula.source_evaluator_bytes,
+            "assembler_evaluator_bytes": formula.assembler_evaluator_bytes,
+            "source_kind": formula.source_kind,
+        }
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        formula.cache_json_path = str(path)
+        formula.source_cache_evaluator_file = str(source_path)
+        formula.assembler_cache_evaluator_file = str(assembler_path)
+    except Exception:
+        return
+
+
+def build_two_stage_sector_formula(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    progress: Any | None = None,
+    progress_index: int = 0,
+    progress_total: int = 0,
+) -> TwoStageSectorFormulaDefinition:
+    """Build a two-evaluator source+assembler runtime artifact for one sector."""
+    cached = _load_two_stage_sector_formula_from_cache(topology, sector)
+    if cached is not None:
+        return cached
+    assembler_expr_start = time.perf_counter()
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} coefficient assembler expressions",
+        )
+    coefficient_assembler_outputs, _coefficient_input_names, coefficient_keys = _two_stage_assembler_expressions(
+        topology,
+        sector,
+    )
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} derivative-fused assembler expressions",
+        )
+    (
+        assembler_outputs,
+        assembler_input_names,
+        derivative_slots,
+        source_outputs,
+    ) = _two_stage_derivative_fused_components(
+        topology,
+        sector,
+        coefficient_assembler_outputs,
+        coefficient_keys,
+        progress=progress,
+        progress_index=progress_index,
+        progress_total=progress_total,
+    )
+    assembler_expr_seconds = time.perf_counter() - assembler_expr_start
+
+    assembler_eval_start = time.perf_counter()
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} assembler evaluator",
+        )
+    assembler_evaluator = Expression.evaluator_multiple(
+        assembler_outputs,
+        [S(name) for name in assembler_input_names],
+        jit_compile=topology.jit_compile_evaluators,
+    )
+    assembler_eval_seconds = time.perf_counter() - assembler_eval_start
+
+    source_expr_start = time.perf_counter()
+    source_expr_seconds = time.perf_counter() - source_expr_start
+    source_eval_start = time.perf_counter()
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} source evaluator",
+        )
+    source_evaluator = Expression.evaluator_multiple(
+        source_outputs,
+        [S(f"y{axis}") for axis in range(sector.integration_dim)],
+        jit_compile=topology.jit_compile_evaluators,
+    )
+    source_eval_seconds = time.perf_counter() - source_eval_start
+    source_bytes = source_evaluator.save()
+    assembler_bytes = assembler_evaluator.save()
+    formula = TwoStageSectorFormulaDefinition(
+        sector_name=sector.name,
+        source_input_names=[f"y{axis}" for axis in range(sector.integration_dim)],
+        assembler_input_names=assembler_input_names,
+        coefficient_keys=coefficient_keys,
+        laurent_orders=list(topology.laurent_orders),
+        source_evaluator=source_evaluator,
+        assembler_evaluator=assembler_evaluator,
+        source_keys=list(derivative_slots),
+        source_expression_build_seconds=float(source_expr_seconds),
+        source_evaluator_build_seconds=float(source_eval_seconds),
+        assembler_expression_build_seconds=float(assembler_expr_seconds),
+        assembler_evaluator_build_seconds=float(assembler_eval_seconds),
+        source_expression_bytes=int(
+            sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in source_outputs)
+        ),
+        assembler_expression_bytes=int(
+            sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in assembler_outputs)
+        ),
+        source_evaluator_bytes=len(source_bytes),
+        assembler_evaluator_bytes=len(assembler_bytes),
+        source_kind="symbolic-derivative-source",
+    )
+    _write_two_stage_sector_formula_to_cache(topology, sector, formula)
+    return formula
 
 
 def _subset_mask(subset: tuple[int, ...]) -> int:
@@ -6253,6 +7378,44 @@ class SectorProcessor:
             ) from exc
         return values[:, columns]
 
+    def _evaluate_active_formula_complex_batch(
+        self,
+        formula: Any,
+        rows: np.ndarray,
+        label: str,
+        timing: HotPathTiming,
+    ) -> np.ndarray:
+        """Evaluate only the prepared formula outputs requested by this run.
+
+        Prepared bundles may contain endpoint-projector evaluators through
+        ``eps^0`` while a later integration requests only leading poles.  The
+        formula objects store one Symbolica evaluator per Laurent output, so we
+        can avoid evaluating inactive columns without regenerating the bundle.
+        """
+        active_orders = self.topology.laurent_orders
+        if list(formula.laurent_orders) == active_orders:
+            return formula.evaluate_complex_batch(rows, timing)
+        index_by_order = {
+            int(order): index
+            for index, order in enumerate(formula.laurent_orders)
+        }
+        try:
+            indices = [index_by_order[int(order)] for order in active_orders]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"{label}: prepared formula does not contain Laurent order eps^{exc.args[0]}"
+            ) from exc
+        start = time.perf_counter()
+        columns = [
+            np.asarray(
+                formula.evaluators[index].evaluate_complex(rows),
+                dtype=np.complex128,
+            )[:, 0]
+            for index in indices
+        ]
+        timing.add_eval(time.perf_counter() - start)
+        return np.stack(columns, axis=1)
+
     def _select_active_laurent_list(
         self,
         values: list[complex],
@@ -6345,10 +7508,11 @@ class SectorProcessor:
         precision_digits = timing.precision_digits
         if precision_digits is None:
             input_matrix = self._subtraction_formula_input_matrix(sector, rows, formula, timing)
-            coeffs = self._select_active_laurent_columns(
-                formula.evaluate_complex_batch(input_matrix, timing),
-                formula.laurent_orders,
+            coeffs = self._evaluate_active_formula_complex_batch(
+                formula,
+                input_matrix,
                 sector.name,
+                timing,
             )
         else:
             coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
@@ -6673,6 +7837,14 @@ class SectorProcessor:
         timing: HotPathTiming,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Evaluate a singular sector through a reusable endpoint projector."""
+        two_stage = self.topology.two_stage_sector_formula_for(sector)
+        if two_stage is not None:
+            return self._two_stage_sector_subtraction_batch(
+                sector,
+                y_values,
+                two_stage,
+                timing,
+            )
         formula = self.topology.endpoint_projector_formula_for(sector)
         if formula.ibp_reduce_to_log_endpoint:
             return self._ibp_endpoint_projector_subtraction_batch(
@@ -6690,10 +7862,11 @@ class SectorProcessor:
                 formula,
                 timing,
             )
-            coeffs = self._select_active_laurent_columns(
-                formula.evaluate_complex_batch(input_matrix, timing),
-                formula.laurent_orders,
+            coeffs = self._evaluate_active_formula_complex_batch(
+                formula,
+                input_matrix,
                 sector.name,
+                timing,
             )
         else:
             coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
@@ -6708,6 +7881,37 @@ class SectorProcessor:
                 coeffs[row_index, :] = self._select_active_laurent_list(
                     formula.evaluate_complex_prec(
                         input_row,
+                        int(precision_digits),
+                        timing,
+                    ),
+                    formula.laurent_orders,
+                    sector.name,
+                )
+        return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
+
+    def _two_stage_sector_subtraction_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        formula: TwoStageSectorFormulaDefinition,
+        timing: HotPathTiming,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate a singular sector through its prepared two-stage evaluators."""
+        rows = np.asarray(y_values, dtype=float)
+        precision_digits = timing.precision_digits
+        if precision_digits is None:
+            values = formula.evaluate_complex_batch(rows, timing)
+            coeffs = self._select_active_laurent_columns(
+                np.asarray(values, dtype=np.complex128),
+                formula.laurent_orders,
+                sector.name,
+            )
+        else:
+            coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+            for row_index, row in enumerate(rows):
+                coeffs[row_index, :] = self._select_active_laurent_list(
+                    formula.evaluate_complex_prec(
+                        row,
                         int(precision_digits),
                         timing,
                     ),
@@ -6794,7 +7998,8 @@ class SectorProcessor:
                 tuple(child_multi),
             )
             expanded_entries.append(entry)
-            groups.setdefault((entry[0], entry[1]), []).append(entry)
+            if int(regular_order) < self.topology.coefficient_count:
+                groups.setdefault((entry[0], entry[1]), []).append(entry)
 
         g_cache: dict[tuple[tuple[int, ...], tuple[int, ...]], list[MultiSeries]] = {}
         for group_key, entries in groups.items():
@@ -6837,6 +8042,13 @@ class SectorProcessor:
             g_cache[group_key] = cached
 
         for boundary, zero, multi_index, regular_order, _child_multi in expanded_entries:
+            if int(regular_order) >= self.topology.coefficient_count:
+                # The prepared child evaluator may contain higher Laurent
+                # outputs than the active integration requested.  Those inputs
+                # cannot influence the selected outputs, so leave the prepared
+                # input column at zero and advance to the next column.
+                offset += 1
+                continue
             cached = g_cache[(boundary, zero)]
             input_matrix[:, offset] = _series_coefficient(
                 cached[regular_order],
@@ -6940,7 +8152,15 @@ class SectorProcessor:
         multi-index box contains every smaller box, so this envelope is the
         natural cache key for the runtime coefficient assembly.
         """
-        return _ibp_shared_max_orders_for_formula(sector, formula)
+        output_pairs = self._ibp_shared_output_pairs(sector, formula)
+        return {
+            key: tuple(
+                max((int(multi[position]) for multi, _regular_order in pairs), default=0)
+                for position in range(len(sector.singular_axes))
+            )
+            for key, pairs in output_pairs.items()
+            if pairs
+        }
 
     def _ibp_shared_output_pairs(
         self,
@@ -6948,7 +8168,16 @@ class SectorProcessor:
         formula: EndpointProjectorFormulaDefinition,
     ) -> dict[tuple[tuple[int, ...], tuple[int, ...]], tuple[tuple[tuple[int, ...], int], ...]]:
         """Return sparse regular coefficients consumed by each IBP envelope."""
-        return _ibp_shared_output_pairs_for_formula(sector, formula)
+        coefficient_count = int(self.topology.coefficient_count)
+        return {
+            key: tuple(
+                pair
+                for pair in pairs
+                if int(pair[1]) < coefficient_count
+            )
+            for key, pairs in _ibp_shared_output_pairs_for_formula(sector, formula).items()
+            if any(int(pair[1]) < coefficient_count for pair in pairs)
+        }
 
     def _precompute_ibp_shared_batch_g_cache(
         self,
@@ -7139,10 +8368,11 @@ class SectorProcessor:
             for child_signature, entries in terms_by_child.items():
                 child = formula.child_formulas[child_signature]
                 stacked_inputs = np.vstack([inputs for _term, inputs in entries])
-                stacked_values = self._select_active_laurent_columns(
-                    child.evaluate_complex_batch(stacked_inputs, timing),
-                    child.laurent_orders,
+                stacked_values = self._evaluate_active_formula_complex_batch(
+                    child,
+                    stacked_inputs,
                     sector.name,
+                    timing,
                 )
                 offset = 0
                 for term, child_inputs in entries:

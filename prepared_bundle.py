@@ -31,6 +31,7 @@ from integrand import (
     RegularTaylorFormulaDefinition,
     SubtractionFormulaDefinition,
     TopologyDefinition,
+    TwoStageSectorFormulaDefinition,
 )
 from sectors_generator import SectorDefinition
 
@@ -767,6 +768,80 @@ def _load_chain_formula(data: dict[str, Any], store: PreparedEvaluatorStore) -> 
     )
 
 
+def _two_stage_formula_json(
+    writer: _BundleWriter,
+    formula: TwoStageSectorFormulaDefinition,
+) -> dict[str, Any]:
+    """Serialize one sector-specific two-stage evaluator pair."""
+    return {
+        "sector_name": formula.sector_name,
+        "source_input_names": formula.source_input_names,
+        "assembler_input_names": formula.assembler_input_names,
+        "coefficient_keys": _encode(tuple(formula.coefficient_keys)),
+        "source_keys": _encode(tuple(formula.source_keys)),
+        "laurent_orders": [int(order) for order in formula.laurent_orders],
+        "source_evaluator": writer.save_evaluator(
+            formula.source_evaluator,
+            "two_stage_source",
+            formula.sector_name,
+        ),
+        "assembler_evaluator": writer.save_evaluator(
+            formula.assembler_evaluator,
+            "two_stage_assembler",
+            formula.sector_name,
+        ),
+        "source_expression_build_seconds": formula.source_expression_build_seconds,
+        "source_evaluator_build_seconds": formula.source_evaluator_build_seconds,
+        "assembler_expression_build_seconds": formula.assembler_expression_build_seconds,
+        "assembler_evaluator_build_seconds": formula.assembler_evaluator_build_seconds,
+        "source_expression_bytes": formula.source_expression_bytes,
+        "assembler_expression_bytes": formula.assembler_expression_bytes,
+        "source_evaluator_bytes": formula.source_evaluator_bytes,
+        "assembler_evaluator_bytes": formula.assembler_evaluator_bytes,
+        "source_kind": formula.source_kind,
+    }
+
+
+def _two_stage_key_from_json(value: Any) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]:
+    """Decode one two-stage coefficient-layout key."""
+    decoded = _decode(value)
+    return (
+        tuple(int(item) for item in decoded[0]),
+        tuple(int(item) for item in decoded[1]),
+        tuple(int(item) for item in decoded[2]),
+        int(decoded[3]),
+    )
+
+
+def _load_two_stage_formula(
+    data: dict[str, Any],
+    store: PreparedEvaluatorStore,
+) -> TwoStageSectorFormulaDefinition:
+    """Hydrate a lazy two-stage evaluator pair from a prepared bundle."""
+    return TwoStageSectorFormulaDefinition(
+        sector_name=str(data["sector_name"]),
+        source_input_names=[str(name) for name in data["source_input_names"]],
+        assembler_input_names=[str(name) for name in data["assembler_input_names"]],
+        coefficient_keys=[
+            _two_stage_key_from_json(item)
+            for item in _decode(data.get("coefficient_keys", []))
+        ],
+        source_keys=list(_decode(data.get("source_keys", []))),
+        laurent_orders=[int(order) for order in data["laurent_orders"]],
+        source_evaluator=_ref(store, data["source_evaluator"]),
+        assembler_evaluator=_ref(store, data["assembler_evaluator"]),
+        source_expression_build_seconds=float(data.get("source_expression_build_seconds", 0.0)),
+        source_evaluator_build_seconds=float(data.get("source_evaluator_build_seconds", 0.0)),
+        assembler_expression_build_seconds=float(data.get("assembler_expression_build_seconds", 0.0)),
+        assembler_evaluator_build_seconds=float(data.get("assembler_evaluator_build_seconds", 0.0)),
+        source_expression_bytes=int(data.get("source_expression_bytes", 0)),
+        assembler_expression_bytes=int(data.get("assembler_expression_bytes", 0)),
+        source_evaluator_bytes=int(data.get("source_evaluator_bytes", 0)),
+        assembler_evaluator_bytes=int(data.get("assembler_evaluator_bytes", 0)),
+        source_kind=str(data.get("source_kind", "symbolic-derivative-source")),
+    )
+
+
 def _formula_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[str, Any]:
     """Serialize all prepared formula families."""
     return {
@@ -785,6 +860,10 @@ def _formula_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[s
         "chain_rule": [
             _chain_formula_json(writer, formula)
             for formula in topology._chain_rule_formulas.values()
+        ],
+        "two_stage_sector": [
+            _two_stage_formula_json(writer, formula)
+            for formula in getattr(topology, "_two_stage_sector_formulas", {}).values()
         ],
     }
 
@@ -814,6 +893,13 @@ def _load_formulas(data: dict[str, Any], topology: TopologyDefinition, store: Pr
     topology._chain_rule_formulas = {
         formula.signature: formula
         for formula in (_load_chain_formula(item, store) for item in data.get("chain_rule", []))
+    }
+    topology._two_stage_sector_formulas = {
+        formula.sector_name: formula
+        for formula in (
+            _load_two_stage_formula(item, store)
+            for item in data.get("two_stage_sector", [])
+        )
     }
 
 
@@ -855,6 +941,7 @@ def save_prepared_bundle(
             "sector_method": request.sector_method,
             "dual_evaluator_mode": request.dual_evaluator_mode,
             "subtraction_backend": request.subtraction_backend,
+            "sector_evaluator_backend": request.sector_evaluator_backend,
             "ibp_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,
             "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
             "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
@@ -881,6 +968,7 @@ def save_prepared_bundle(
             "endpoint_projector_formulas": len(topology._endpoint_projector_formulas),
             "regular_taylor_formulas": len(topology._regular_taylor_formulas),
             "chain_rule_formulas": len(topology._chain_rule_formulas),
+            "two_stage_sector_formulas": len(getattr(topology, "_two_stage_sector_formulas", {})),
             "evaluator_files": len(list((root / "evaluators").glob("*.bin")))
             + len(list((root / "evaluators").glob("*.bin.gz"))),
         },

@@ -167,6 +167,65 @@ def prepare_generated_evaluators(
         raise ValueError(f"unsupported test subtraction backend {subtraction_backend!r}")
 
 
+def test_two_stage_sector_backend_matches_projector_box(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two-evaluator sector path must reproduce the existing projector algebra."""
+    monkeypatch.setenv("FSD_TWO_STAGE_SECTOR_CACHE_DIR", str(tmp_path / "two_stage_cache"))
+    request = make_request(
+        integral="box",
+        mode="massless",
+        s12=-1.0,
+        s23=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        ibp_reduce_to_log_endpoint=True,
+        sector_evaluator_backend="two-stage-explicit",
+    )
+    two_stage_topology = build_topology(request)
+    two_stage_sectors = generate_sectors(request)
+    two_stage_topology.prepare_endpoint_projector_formulas(two_stage_sectors)
+    two_stage_topology.prepare_two_stage_sector_formulas(two_stage_sectors)
+
+    projector_request = replace(request, sector_evaluator_backend="projector")
+    projector_topology = build_topology(projector_request)
+    projector_sectors = generate_sectors(projector_request)
+    prepare_generated_evaluators(
+        projector_topology,
+        projector_sectors,
+        mode="pregenerate",
+        subtraction_backend="projector-formula",
+    )
+
+    two_stage_processor = SectorProcessor(
+        two_stage_topology,
+        subtraction_backend="projector-formula",
+    )
+    projector_processor = SectorProcessor(
+        projector_topology,
+        subtraction_backend="projector-formula",
+    )
+    max_diff = 0.0
+    checked = 0
+    for two_stage_sector, projector_sector in zip(two_stage_sectors, projector_sectors):
+        if not two_stage_sector.singular_axes:
+            continue
+        point = np.full((1, two_stage_sector.integration_dim), 0.41)
+        two_stage_coeffs, _training, _timing = two_stage_processor.evaluate_batch(
+            two_stage_sector,
+            point,
+        )
+        projector_coeffs, _training, _timing = projector_processor.evaluate_batch(
+            projector_sector,
+            point,
+        )
+        max_diff = max(max_diff, float(np.max(np.abs(two_stage_coeffs - projector_coeffs))))
+        checked += 1
+    assert checked == 12
+    assert max_diff < 1.0e-12
+
+
 def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI flags select exactly one dual evaluator generation mode."""
     monkeypatch.setattr(sys, "argv", ["FSD.py"])
@@ -239,6 +298,28 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     custom_result = PROJECT_ROOT / "custom-result.json"
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--result-path", str(custom_result)])
     assert build_request(parse_args()).result_path == str(custom_result)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "FSD.py",
+            "cache",
+            "--cache-loop-counts",
+            "1",
+            "2",
+            "--cache-verify-samples-per-sector",
+            "3",
+            "--cache-report-path",
+            "docs/cache-test.json",
+        ],
+    )
+    cache_request = build_request(parse_args())
+    assert cache_request.command == "cache"
+    assert cache_request.cache_loop_counts == (1, 2)
+    assert cache_request.cache_verify_samples_per_sector == 3
+    assert cache_request.cache_report_path == "docs/cache-test.json"
+    validate_request(cache_request)
 
     monkeypatch.setattr(
         sys,

@@ -547,12 +547,28 @@ def _load_endpoint_projector_formula_from_cache(
 ) -> Any | None:
     """Load a cached endpoint-projector expression, if available."""
     path = _endpoint_projector_cache_path(signature)
+    expected_orders: list[int] | None = None
+    if (
+        isinstance(signature, tuple)
+        and len(signature) >= 7
+        and signature[0] == "endpoint-projector"
+    ):
+        expected_orders = [int(order) for order in signature[6]]
     for candidate in _cache_read_paths(path):
         if not candidate.is_file():
             continue
         try:
             data = json.loads(candidate.read_text(encoding="utf-8"))
             if data.get("signature_payload") != _signature_payload(signature):
+                continue
+            laurent_orders = [int(order) for order in data["laurent_orders"]]
+            if expected_orders is not None and laurent_orders != expected_orders:
+                # Older exploratory cache files could carry the right signature
+                # payload but only a truncated Laurent output range.  Accepting
+                # those files makes high-order coefficients silently wrong, so
+                # treat them as stale and continue to curated/generated hits.
+                continue
+            if len(data.get("output_expressions", [])) != len(laurent_orders):
                 continue
             mirror_cache_entry_to_primary(candidate, data)
             input_names = [str(name) for name in data["input_names"]]
@@ -572,7 +588,7 @@ def _load_endpoint_projector_formula_from_cache(
                 input_symbols=input_symbols,
                 output_expressions=outputs,
                 evaluators=evaluators,
-                laurent_orders=[int(order) for order in data["laurent_orders"]],
+                laurent_orders=laurent_orders,
                 zero_subsets=[tuple(int(x) for x in subset) for subset in data["zero_subsets"]],
                 taylor_orders=[int(order) for order in data["taylor_orders"]],
                 coefficient_layout=coefficient_layout,

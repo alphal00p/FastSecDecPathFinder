@@ -1,0 +1,1105 @@
+{
+  "cache_root": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/cache/subtraction_formulae",
+  "cases": [
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 0,
+        "chain_rule_json": 0,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 0,
+        "regular_taylor_evaluator": 0,
+        "regular_taylor_json": 0
+      },
+      "case": "triangle",
+      "dot_file": "examples/graphs/triangle.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.15309945799526758
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0009659170027589425
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.018940416994155385
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.002268707990879193
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.0005244999920250848
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.00027795799542218447
+          },
+          {
+            "detail": "3 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.00032808398827910423
+          },
+          {
+            "detail": "3 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 5.8249992434866726e-05
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 0.00015199999324977398
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.1752744999830611
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.0006060419837012887
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.0007347499777097255
+          }
+        ],
+        "total": 0.17661529194447212
+      },
+      "kinematics_file": "examples/graphs/triangle_kinematics.yaml",
+      "loop_count": 1,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "1": 2,
+          "2": 1
+        },
+        "distinct_declarative_endpoint_inputs": 3,
+        "max_integration_dim": 2,
+        "max_singular_axes": 2,
+        "sector_count": 3
+      },
+      "status": "ok",
+      "total_seconds": 0.34758150001289323,
+      "universal_cache_seconds": 0.005987416006973945,
+      "verification": {
+        "elapsed_seconds": 0.012220958000398241,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 38.79124778904952,
+          "eval_seconds": 0.00015516499115619808,
+          "max_abs_by_order": [
+            1.0,
+            1.756238054289307,
+            1.5922754218778294
+          ],
+          "max_abs_weight": 1.756238054289307,
+          "name": "PSD1",
+          "profile": {
+            "evaluator_fraction": 0.17071433548309586,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.8292856645169041
+          },
+          "python_seconds": 0.0007537510100519285,
+          "samples": 4,
+          "sector_id": 1
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 71.75025893957354,
+          "eval_seconds": 0.00028700103575829417,
+          "max_abs_by_order": [
+            0.0,
+            0.8740039316918636,
+            0.9045051654476244
+          ],
+          "max_abs_weight": 0.9045051654476244,
+          "name": "PSD0",
+          "profile": {
+            "evaluator_fraction": 0.06223538643175392,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.937764613568246
+          },
+          "python_seconds": 0.004324539957451634,
+          "samples": 4,
+          "sector_id": 0
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 7.1660106186755,
+          "eval_seconds": 2.8664042474702e-05,
+          "max_abs_by_order": [
+            0.0,
+            0.8875534161475663,
+            0.9354023007347902
+          ],
+          "max_abs_weight": 0.9354023007347902,
+          "name": "PSD2",
+          "profile": {
+            "evaluator_fraction": 0.07710569740275221,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9228943025972478
+          },
+          "python_seconds": 0.0003430859505897388,
+          "samples": 4,
+          "sector_id": 2
+        },
+        "samples": 12,
+        "sector_timing_count": 3
+      }
+    },
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 0,
+        "chain_rule_json": 0,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 0,
+        "regular_taylor_evaluator": 0,
+        "regular_taylor_json": 0
+      },
+      "case": "box",
+      "dot_file": "examples/graphs/box.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.012258292001206428
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0010597910004435107
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.011050417000660673
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.003283458005171269
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.0004042920045321807
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.0012555830035125837
+          },
+          {
+            "detail": "12 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.0009583329956512898
+          },
+          {
+            "detail": "12 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 0.00014412500604521483
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 0.00012683399836532772
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.02765195800748188
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.0022139159991638735
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.0006752510089427233
+          }
+        ],
+        "total": 0.030541125015588477
+      },
+      "kinematics_file": "examples/graphs/box_kinematics.yaml",
+      "loop_count": 1,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "1": 4,
+          "2": 8
+        },
+        "distinct_declarative_endpoint_inputs": 6,
+        "max_integration_dim": 3,
+        "max_singular_axes": 2,
+        "sector_count": 12
+      },
+      "status": "ok",
+      "total_seconds": 0.05067520900047384,
+      "universal_cache_seconds": 0.007300792000023648,
+      "verification": {
+        "elapsed_seconds": 0.0091433329944266,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 13.135995686752722,
+          "eval_seconds": 5.254398274701089e-05,
+          "max_abs_by_order": [
+            0.6759809486353819,
+            0.18022150366214107,
+            2.60854013568013
+          ],
+          "max_abs_weight": 2.60854013568013,
+          "name": "PSD10",
+          "profile": {
+            "evaluator_fraction": 0.07344956476577107,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.926550435234229
+          },
+          "python_seconds": 0.0006628310220548883,
+          "samples": 4,
+          "sector_id": 10
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 68.54175808257423,
+          "eval_seconds": 0.00027416703233029693,
+          "max_abs_by_order": [
+            0.7638828726128358,
+            0.18240269640281714,
+            1.4332057002236744
+          ],
+          "max_abs_weight": 1.4332057002236744,
+          "name": "PSD0",
+          "profile": {
+            "evaluator_fraction": 0.2102911077289527,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.7897088922710472
+          },
+          "python_seconds": 0.0010295829706592485,
+          "samples": 4,
+          "sector_id": 0
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 7.0624955696985126,
+          "eval_seconds": 2.824998227879405e-05,
+          "max_abs_by_order": [
+            0.0,
+            0.901132755163395,
+            1.0952458960507174
+          ],
+          "max_abs_weight": 1.0952458960507174,
+          "name": "PSD6",
+          "profile": {
+            "evaluator_fraction": 0.0723894479542226,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9276105520457774
+          },
+          "python_seconds": 0.00036200002068653703,
+          "samples": 4,
+          "sector_id": 6
+        },
+        "samples": 48,
+        "sector_timing_count": 12
+      }
+    },
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 0,
+        "chain_rule_json": 0,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 0,
+        "regular_taylor_evaluator": 0,
+        "regular_taylor_json": 0
+      },
+      "case": "kite_2loop",
+      "dot_file": "examples/graphs/kite_2loop.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.01014879198919516
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0005457080114865676
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.0036590410018106923
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.0017058749945135787
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.0006339160026982427
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.0014196249976521358
+          },
+          {
+            "detail": "16 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.001618916998268105
+          },
+          {
+            "detail": "16 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 0.00026737499865703285
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 2.8340000426396728e-06
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.016059415997006
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.003038541995920241
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.0009041250013979152
+          }
+        ],
+        "total": 0.020002082994324155
+      },
+      "kinematics_file": "examples/graphs/kite_2loop_kinematics.yaml",
+      "loop_count": 2,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "0": 16
+        },
+        "distinct_declarative_endpoint_inputs": 4,
+        "max_integration_dim": 4,
+        "max_singular_axes": 0,
+        "sector_count": 16
+      },
+      "status": "ok",
+      "total_seconds": 0.13412887499725912,
+      "universal_cache_seconds": 1.8624996300786734e-05,
+      "verification": {
+        "elapsed_seconds": 0.0023564169969176874,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 1.3855024008080363,
+          "eval_seconds": 5.542009603232145e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.156496580660442
+          ],
+          "max_abs_weight": 0.156496580660442,
+          "name": "PSD8",
+          "profile": {
+            "evaluator_fraction": 0.08302636240264659,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9169736375973534
+          },
+          "python_seconds": 6.120798934716731e-05,
+          "samples": 4,
+          "sector_id": 8
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 6.750004104105756,
+          "eval_seconds": 2.7000016416423023e-05,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.04694140021564553
+          ],
+          "max_abs_weight": 0.04694140021564553,
+          "name": "PSD0",
+          "profile": {
+            "evaluator_fraction": 0.09033882359860738,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9096611764013927
+          },
+          "python_seconds": 0.00027187498926650733,
+          "samples": 4,
+          "sector_id": 0
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 1.2804994184989482,
+          "eval_seconds": 5.121997673995793e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.03910797398798665
+          ],
+          "max_abs_weight": 0.03910797398798665,
+          "name": "PSD9",
+          "profile": {
+            "evaluator_fraction": 0.07668695349425972,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9233130465057403
+          },
+          "python_seconds": 6.166899402160197e-05,
+          "samples": 4,
+          "sector_id": 9
+        },
+        "samples": 64,
+        "sector_timing_count": 16
+      }
+    },
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 0,
+        "chain_rule_json": 0,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 0,
+        "regular_taylor_evaluator": 0,
+        "regular_taylor_json": 0
+      },
+      "case": "three_point_2loop",
+      "dot_file": "examples/graphs/three_point_2loop.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.033406500006094575
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0009915830014506355
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.007735584003967233
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.002169041006709449
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.00025166600244119763
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.0019101669895462692
+          },
+          {
+            "detail": "16 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.0015854579978622496
+          },
+          {
+            "detail": "16 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 0.00025533400184940547
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 2.6659981813281775e-06
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.04430270801822189
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.003495624987408519
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.0005096660024719313
+          }
+        ],
+        "total": 0.04830799900810234
+      },
+      "kinematics_file": "examples/graphs/three_point_2loop_kinematics.yaml",
+      "loop_count": 2,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "0": 16
+        },
+        "distinct_declarative_endpoint_inputs": 4,
+        "max_integration_dim": 4,
+        "max_singular_axes": 0,
+        "sector_count": 16
+      },
+      "status": "ok",
+      "total_seconds": 0.056462708991602995,
+      "universal_cache_seconds": 1.3167009456083179e-05,
+      "verification": {
+        "elapsed_seconds": 0.0021028750052209944,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 1.4270081010181457,
+          "eval_seconds": 5.708032404072583e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.11678906526012509
+          ],
+          "max_abs_weight": 0.11678906526012509,
+          "name": "PSD2",
+          "profile": {
+            "evaluator_fraction": 0.07909586405899327,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9209041359410067
+          },
+          "python_seconds": 6.645797111559659e-05,
+          "samples": 4,
+          "sector_id": 2
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 4.094501491636038,
+          "eval_seconds": 1.637800596654415e-05,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.03927307995341146
+          ],
+          "max_abs_weight": 0.03927307995341146,
+          "name": "PSD0",
+          "profile": {
+            "evaluator_fraction": 0.1024957783218981,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.897504221678102
+          },
+          "python_seconds": 0.00014341399946715683,
+          "samples": 4,
+          "sector_id": 0
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 1.3232456694822758,
+          "eval_seconds": 5.292982677929103e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0957271985365771
+          ],
+          "max_abs_weight": 0.0957271985365771,
+          "name": "PSD5",
+          "profile": {
+            "evaluator_fraction": 0.07822103073929886,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9217789692607011
+          },
+          "python_seconds": 6.237401976250112e-05,
+          "samples": 4,
+          "sector_id": 5
+        },
+        "samples": 64,
+        "sector_timing_count": 16
+      }
+    },
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 0,
+        "chain_rule_json": 0,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 0,
+        "regular_taylor_evaluator": 0,
+        "regular_taylor_json": 0
+      },
+      "case": "three_point_2loop_6line",
+      "dot_file": "examples/graphs/three_point_2loop_6line.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.013681999989785254
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0010468750115251169
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.008143750004819594
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.0021998330048518255
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.0005688340024789795
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.0026714170089690015
+          },
+          {
+            "detail": "22 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.0035082919930573553
+          },
+          {
+            "detail": "22 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 0.0004179159877821803
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 3.4999975468963385e-06
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.02507245801098179
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.006179709002026357
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.0009902499878080562
+          }
+        ],
+        "total": 0.032242417000816204
+      },
+      "kinematics_file": "examples/graphs/three_point_2loop_6line_kinematics.yaml",
+      "loop_count": 2,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "0": 22
+        },
+        "distinct_declarative_endpoint_inputs": 5,
+        "max_integration_dim": 5,
+        "max_singular_axes": 0,
+        "sector_count": 22
+      },
+      "status": "ok",
+      "total_seconds": 0.04380083299474791,
+      "universal_cache_seconds": 1.6833000699989498e-05,
+      "verification": {
+        "elapsed_seconds": 0.0030549160001100972,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 1.7187594494316727,
+          "eval_seconds": 6.875037797726691e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.030470838418319136
+          ],
+          "max_abs_weight": 0.030470838418319136,
+          "name": "PSD19",
+          "profile": {
+            "evaluator_fraction": 0.0985075280385816,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9014924719614185
+          },
+          "python_seconds": 6.291696627158672e-05,
+          "samples": 4,
+          "sector_id": 19
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 7.312490197364241,
+          "eval_seconds": 2.9249960789456964e-05,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.004765151233029041
+          ],
+          "max_abs_weight": 0.004765151233029041,
+          "name": "PSD0",
+          "profile": {
+            "evaluator_fraction": 0.11790393013100436,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.8820960698689956
+          },
+          "python_seconds": 0.00021883303998038173,
+          "samples": 4,
+          "sector_id": 0
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 1.6039994079619646,
+          "eval_seconds": 6.4159976318478584e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.011400639253192638
+          ],
+          "max_abs_weight": 0.011400639253192638,
+          "name": "PSD18",
+          "profile": {
+            "evaluator_fraction": 0.09360816389963529,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9063918361003647
+          },
+          "python_seconds": 6.212500738911331e-05,
+          "samples": 4,
+          "sector_id": 18
+        },
+        "samples": 88,
+        "sector_timing_count": 22
+      }
+    },
+    {
+      "cache_after": {
+        "chain_rule_evaluator": 273,
+        "chain_rule_json": 273,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 200,
+        "regular_taylor_evaluator": 3689,
+        "regular_taylor_json": 574
+      },
+      "cache_before": {
+        "chain_rule_evaluator": 244,
+        "chain_rule_json": 244,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 186,
+        "regular_taylor_evaluator": 3679,
+        "regular_taylor_json": 564
+      },
+      "cache_delta": {
+        "chain_rule_evaluator": 29,
+        "chain_rule_json": 29,
+        "endpoint_projector_evaluator": 0,
+        "endpoint_projector_json": 14,
+        "regular_taylor_evaluator": 10,
+        "regular_taylor_json": 10
+      },
+      "case": "double_box",
+      "dot_file": "examples/graphs/double_box.dot",
+      "generation_timings": {
+        "details": [
+          {
+            "detail": "",
+            "name": "DOT parse",
+            "seconds": 0.01739195799746085
+          },
+          {
+            "detail": "",
+            "name": "kinematics load/evaluation",
+            "seconds": 0.0011829580034827814
+          },
+          {
+            "detail": "",
+            "name": "pySecDec LoopIntegralFromGraph",
+            "seconds": 0.011940291995415464
+          },
+          {
+            "detail": "",
+            "name": "U/F extraction",
+            "seconds": 0.004279708009562455
+          },
+          {
+            "detail": "",
+            "name": "Symbolica scalar evaluator build",
+            "seconds": 0.0006997500022407621
+          },
+          {
+            "detail": "iterative",
+            "name": "pySecDec sector decomposition",
+            "seconds": 0.02213879200280644
+          },
+          {
+            "detail": "140 sectors",
+            "name": "FSD SectorDefinition conversion",
+            "seconds": 0.02276391700434033
+          },
+          {
+            "detail": "140 sectors",
+            "name": "Symbolica sector evaluator build",
+            "seconds": 0.002984417005791329
+          },
+          {
+            "detail": "symbolic-derivatives",
+            "name": "Symbolica Taylor evaluator build",
+            "seconds": 0.0010900000052060932
+          }
+        ],
+        "headline": [
+          {
+            "name": "Generation U and F polynomial",
+            "seconds": 0.03479491600592155
+          },
+          {
+            "name": "Generating sectors",
+            "seconds": 0.04490270900714677
+          },
+          {
+            "name": "Generating Symbolica evaluators",
+            "seconds": 0.004774167013238184
+          }
+        ],
+        "total": 0.0844717920263065
+      },
+      "kinematics_file": "examples/graphs/double_box_kinematics.yaml",
+      "loop_count": 2,
+      "sector_stats": {
+        "axis_count_histogram": {
+          "0": 7,
+          "1": 28,
+          "2": 49,
+          "3": 36,
+          "4": 20
+        },
+        "distinct_declarative_endpoint_inputs": 113,
+        "max_integration_dim": 6,
+        "max_singular_axes": 4,
+        "sector_count": 140
+      },
+      "status": "ok",
+      "total_seconds": 12.7721288340108,
+      "universal_cache_seconds": 8.940851833991474,
+      "verification": {
+        "elapsed_seconds": 3.7357304170000134,
+        "interrupted": false,
+        "max_abs_weight_sector": {
+          "avg_eval_us_per_sample": 18240.25001769769,
+          "eval_seconds": 0.07296100007079076,
+          "max_abs_by_order": [
+            0.015787399489393103,
+            0.09183169288088222,
+            1.0244472829702809,
+            7.308341399004438,
+            30.053319938982924
+          ],
+          "max_abs_weight": 30.053319938982924,
+          "name": "PSD65",
+          "profile": {
+            "evaluator_fraction": 0.3545780820169713,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.6454219179830287
+          },
+          "python_seconds": 0.1328074999328237,
+          "samples": 4,
+          "sector_id": 65
+        },
+        "max_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 19847.363269946072,
+          "eval_seconds": 0.07938945307978429,
+          "max_abs_by_order": [
+            0.020214161118817586,
+            0.1854369460594672,
+            0.10057358248244108,
+            0.43402431051945944,
+            2.100221554396821
+          ],
+          "max_abs_weight": 2.100221554396821,
+          "name": "PSD69",
+          "profile": {
+            "evaluator_fraction": 0.3712969871989695,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.6287030128010305
+          },
+          "python_seconds": 0.13442712991673034,
+          "samples": 4,
+          "sector_id": 69
+        },
+        "min_avg_eval_us_per_sample_sector": {
+          "avg_eval_us_per_sample": 1.7809979908633977,
+          "eval_seconds": 7.123991963453591e-06,
+          "max_abs_by_order": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.41531808546075827
+          ],
+          "max_abs_weight": 0.41531808546075827,
+          "name": "PSD138",
+          "profile": {
+            "evaluator_fraction": 0.09627016693997394,
+            "havana_fraction": 0.0,
+            "python_fraction": 0.9037298330600261
+          },
+          "python_seconds": 6.687600398436189e-05,
+          "samples": 4,
+          "sector_id": 138
+        },
+        "samples": 560,
+        "sector_timing_count": 140
+      }
+    }
+  ],
+  "created_utc": "2026-06-17T20:38:01.688961+00:00",
+  "max_eps_order": 0,
+  "schema_version": 1,
+  "selected_cases": [
+    "triangle",
+    "box",
+    "kite_2loop",
+    "three_point_2loop",
+    "three_point_2loop_6line",
+    "double_box"
+  ],
+  "selected_loop_counts": [
+    1,
+    2
+  ],
+  "three_loop_estimate": {
+    "basis": "Uses the slowest measured 2L universal-cache seconds per newly written JSON formula as an optimistic lower bound, plus hard six-axis calibration timings from the triple-box PSD2 studies.",
+    "calibrated_serial_hours": {
+      "small_3l_examples": {
+        "823s_direct_formula_seconds": 57.15277777777778,
+        "90s_group_lower_bound_seconds": 6.25
+      },
+      "triple_box_hard_six_axis_family": {
+        "823s_direct_formula_seconds": 457.22222222222223,
+        "90s_group_lower_bound_seconds": 50.0
+      }
+    },
+    "calibrated_serial_seconds": {
+      "small_3l_examples": {
+        "823s_direct_formula_seconds": 205750.0,
+        "90s_group_lower_bound_seconds": 22500.0
+      },
+      "triple_box_hard_six_axis_family": {
+        "823s_direct_formula_seconds": 1646000.0,
+        "90s_group_lower_bound_seconds": 180000.0
+      }
+    },
+    "cluster_note": "If the hard family is embarrassingly parallel and disk artifacts are written one signature at a time, divide the calibrated serial hours approximately by the number of independent workers, subject to RAM limits per worker.",
+    "hard_signature_calibration_seconds": {
+      "observed_direct_six_axis_regular_formula_seconds": 823.0,
+      "observed_psd2_source_group_lower_bound_seconds": 90.0
+    },
+    "max_2l_seconds_per_new_formula": 0.16869531762248063,
+    "measured_2l_new_formula_count": 53,
+    "optimistic_lower_bound_hours": {
+      "small_3l_examples": 0.011714952612672268,
+      "triple_box_hard_six_axis_family": 0.09371962090137814
+    },
+    "optimistic_lower_bound_seconds": {
+      "small_3l_examples": 42.17382940562016,
+      "triple_box_hard_six_axis_family": 337.3906352449613
+    },
+    "status": "rough_extrapolation"
+  },
+  "verification_samples_per_sector": 4,
+  "workdir": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/.cache_warm_ibp"
+}

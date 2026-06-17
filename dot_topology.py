@@ -172,6 +172,17 @@ class GammaLoopDotTopologyBuilder:
 _DOT_BUNDLE_CACHE: dict[tuple[object, ...], DotBuildBundle] = {}
 
 
+def clear_dot_bundle_cache() -> None:
+    """Drop in-process DOT build bundles.
+
+    Normal CLI execution benefits from reusing a bundle between topology and
+    sector construction.  Batch cache-warming uses this hook between cases so
+    per-case timings are not accidentally hidden by a previous in-memory hit.
+    """
+
+    _DOT_BUNDLE_CACHE.clear()
+
+
 def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
     """Return a stable cache key for pySecDec DOT generation."""
     return (

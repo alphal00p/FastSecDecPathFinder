@@ -459,12 +459,19 @@ def build_dot_bundle(
         progress=progress,
     ):
         prepare_sector_evaluators(sectors, progress=progress, include_dual=False)
-    with timings.measure(
-        "Symbolica Taylor evaluator build",
-        request.dual_evaluator_mode,
-        progress=progress,
-    ):
-        topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode, progress=progress)
+    if request.sector_evaluator_backend != "two-stage-explicit":
+        with timings.measure(
+            "Symbolica Taylor evaluator build",
+            request.dual_evaluator_mode,
+            progress=progress,
+        ):
+            topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode, progress=progress)
+    else:
+        timings.add(
+            "Symbolica Taylor evaluator build",
+            0.0,
+            detail="skipped: two-stage-explicit sector evaluator backend uses source+assembler evaluators",
+        )
     return DotBuildBundle(
         topology=topology,
         sectors=sectors,

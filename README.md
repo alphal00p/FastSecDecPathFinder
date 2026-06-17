@@ -37,6 +37,10 @@ The derivation and implementation notes are kept in `docs/`:
   built-in examples, DOT examples, and the double/triple box ladder probes.
 - `docs/validation.md`: current target comparisons and endpoint-stability
   probes.
+- `docs/universal_cache.md`: formula-cache warmup command, 1L/2L verification
+  timings, and the current 3L cache-generation estimate.
+- `cache_generation_project.md`: cluster handoff for generating and packaging
+  the distributable universal formula cache.
 
 ## Setup
 
@@ -80,6 +84,20 @@ The same inputs may be supplied with `FSD_CACHE_TARBALL` or `FSD_CACHE_URL`.
 Archives may contain either `cache/` or `subtraction_formulae/`; both are
 installed under the top-level `cache/` directory.  Cold generation falls back to
 building any missing formula and writes it into `cache/subtraction_formulae`.
+
+To explicitly warm and verify the topology-independent projector cache on the
+shipped DOT examples, use the `cache` subcommand:
+
+```sh
+.venv/bin/python FSD.py cache \
+  --cache-loop-counts 1 2 \
+  --cache-verify-samples-per-sector 8 \
+  --cache-report-path docs/universal_cache_report.json
+```
+
+This covers endpoint-projector, regular Taylor, and chain-rule formula assets,
+then runs a low-stat democratic check over each selected topology.  The detailed
+report is documented in `docs/universal_cache.md`.
 
 ## Tests
 

@@ -117,10 +117,17 @@ class IntegralRequest:
     mu: float | None
     onshell_threshold: float | None
     command: str = "run"
+    sector_evaluator_backend: str = "projector"
     output: str | None = None
     evaluator_lru_size: int = 128
     dot_global_prefactor_coeffs: tuple[complex, ...] | None = None
     max_eps_order_explicit: bool = False
+    cache_loop_counts: tuple[int, ...] = (1, 2)
+    cache_cases: tuple[str, ...] | None = None
+    cache_report_path: str = "docs/universal_cache_report.json"
+    cache_workdir: str = ".cache_warm"
+    cache_verify_samples_per_sector: int = 16
+    cache_estimate_3l: bool = True
 
 
 @dataclass(frozen=True)

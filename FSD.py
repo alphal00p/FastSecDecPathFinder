@@ -23,6 +23,7 @@ from colorama import Fore, Style, init as colorama_init
 import yaml
 
 from benchmark import check_oneloop_bridge, compute_benchmark
+from cache_warm import run_universal_cache_mode
 from definitions import IntegralRequest, TargetDefinition
 from formatting import (
     apply_global_convention,
@@ -60,8 +61,16 @@ def resolve_mode(m: float, requested: str) -> str:
 
 def validate_request(request: IntegralRequest) -> None:
     """Reject unsupported kinematics before building sectors or benchmarks."""
-    if request.command not in {"run", "generate", "integrate"}:
+    if request.command not in {"run", "generate", "integrate", "cache"}:
         raise ValueError(f"unsupported command {request.command!r}")
+    if request.command == "cache":
+        if not request.cache_loop_counts:
+            raise ValueError("cache mode requires at least one --cache-loop-counts entry")
+        if any(loop <= 0 for loop in request.cache_loop_counts):
+            raise ValueError("--cache-loop-counts entries must be positive")
+        if request.cache_verify_samples_per_sector <= 0:
+            raise ValueError("--cache-verify-samples-per-sector must be positive")
+        return
     if request.evaluator_lru_size < 0:
         raise ValueError("--evaluator-lru-size must be >= 0")
     if request.command in {"generate", "integrate"} and request.output is None:
@@ -299,12 +308,13 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["run", "generate", "integrate"],
+        choices=["run", "generate", "integrate", "cache"],
         default=defaults.get("command", "run"),
         help=(
             "Two-stage DOT workflow command. Omit for the legacy single-shot "
             "generate+integrate path; use 'generate' to prepare a bundle and "
-            "'integrate' to run strictly from a prepared bundle."
+            "'integrate' to run strictly from a prepared bundle. Use 'cache' "
+            "to warm topology-independent formula caches on example DOT cases."
         ),
     )
     parser.add_argument(
@@ -496,6 +506,18 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--sector-evaluator-backend",
+        choices=["projector", "two-stage-explicit"],
+        default="projector",
+        help=(
+            "Singular-sector runtime evaluator layout. 'projector' keeps the "
+            "current endpoint-projector path. 'two-stage-explicit' prepares "
+            "one source-coefficient evaluator and one assembler evaluator per "
+            "singular sector; this is an experimental PSD2-derived path for "
+            "prepared DOT bundles."
+        ),
+    )
+    parser.add_argument(
         "--regular-taylor-signature-limit",
         type=int,
         default=256,
@@ -612,6 +634,47 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--cache-loop-counts",
+        nargs="+",
+        type=int,
+        default=defaults.get("cache_loop_counts", (1, 2)),
+        help="Loop counts to cover in 'cache' mode. Default: 1 2.",
+    )
+    parser.add_argument(
+        "--cache-cases",
+        nargs="+",
+        default=defaults.get("cache_cases"),
+        help=(
+            "Named example DOT cases to warm instead of selecting by loop count. "
+            "Known examples include triangle, box, kite_2loop, "
+            "three_point_2loop, three_point_2loop_6line, double_box, and the "
+            "available 3L examples."
+        ),
+    )
+    parser.add_argument(
+        "--cache-report-path",
+        default=defaults.get("cache_report_path", "docs/universal_cache_report.json"),
+        help="JSON report written by 'cache' mode.",
+    )
+    parser.add_argument(
+        "--cache-workdir",
+        default=defaults.get("cache_workdir", ".cache_warm"),
+        help="Scratch directory for cache-mode low-stat verification outputs.",
+    )
+    parser.add_argument(
+        "--cache-verify-samples-per-sector",
+        type=int,
+        default=int(defaults.get("cache_verify_samples_per_sector", 16)),
+        help="Democratic samples per sector used to verify warmed cache assets.",
+    )
+    parser.add_argument(
+        "--no-cache-estimate-3l",
+        dest="cache_estimate_3l",
+        action="store_false",
+        help="Skip the rough 3L cache-generation estimate in 'cache' mode.",
+    )
+    parser.set_defaults(cache_estimate_3l=defaults.get("cache_estimate_3l", True))
+    parser.add_argument(
         "--max-eps-order",
         type=int,
         default=0,
@@ -701,7 +764,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     kinematics_file = str(Path(args.kinematics).expanduser()) if args.kinematics is not None else None
     prefactor_convention = args.prefactor_convention
     if prefactor_convention is None:
-        prefactor_convention = "pysecdec" if dot_file is not None or command in {"generate", "integrate"} else "raw"
+        prefactor_convention = "pysecdec" if dot_file is not None or command in {"generate", "integrate", "cache"} else "raw"
     output = str(Path(args.output).expanduser()) if args.output is not None else None
     if args.result_path is not None:
         result_path = str(Path(args.result_path).expanduser())
@@ -775,6 +838,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         jit_compile_evaluators=args.jit_compile_evaluators,
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
+        sector_evaluator_backend=args.sector_evaluator_backend,
         ibp_reduce_to_log_endpoint=args.ibp_reduce_to_log_endpoint,
         direct_projector_cache_term_threshold=args.direct_projector_cache_term_threshold,
         force_regular_taylor_formulas=force_regular_taylor_formulas,
@@ -797,6 +861,12 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         output=output,
         evaluator_lru_size=int(args.evaluator_lru_size),
         max_eps_order_explicit=bool(getattr(args, "max_eps_order_explicit", False)),
+        cache_loop_counts=tuple(int(loop) for loop in args.cache_loop_counts),
+        cache_cases=tuple(str(case) for case in args.cache_cases) if args.cache_cases is not None else None,
+        cache_report_path=str(Path(args.cache_report_path).expanduser()),
+        cache_workdir=str(Path(args.cache_workdir).expanduser()),
+        cache_verify_samples_per_sector=int(args.cache_verify_samples_per_sector),
+        cache_estimate_3l=bool(args.cache_estimate_3l),
     )
 
 
@@ -1150,8 +1220,12 @@ def _prepare_sector_runtime_artifacts(
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
     bridge_already_prepared_dot_duals = (
         request.command == "generate" and request.integral == "dot"
+        and request.sector_evaluator_backend != "two-stage-explicit"
     )
-    if not bridge_already_prepared_dot_duals:
+    if (
+        request.sector_evaluator_backend != "two-stage-explicit"
+        and not bridge_already_prepared_dot_duals
+    ):
         topology.prepare_dual_evaluators(
             active_sectors,
             request.dual_evaluator_mode,
@@ -1162,8 +1236,11 @@ def _prepare_sector_runtime_artifacts(
         topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
     elif request.subtraction_backend == "projector-formula":
         topology.prepare_endpoint_projector_formulas(active_sectors, progress=generation_progress)
-        topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
-        topology.prepare_chain_rule_formulas(active_sectors, progress=generation_progress)
+        if request.sector_evaluator_backend == "two-stage-explicit":
+            topology.prepare_two_stage_sector_formulas(active_sectors, progress=generation_progress)
+        else:
+            topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
+            topology.prepare_chain_rule_formulas(active_sectors, progress=generation_progress)
     return extra_dual_build_before
 
 
@@ -1238,6 +1315,15 @@ def _record_generation_artifact_timings(
             0.0,
             detail=f"skipped {topology.chain_rule_formulas_skipped} mapped derivative formula(s)",
         )
+    if getattr(topology, "two_stage_sector_formula_build_seconds", 0.0) > 0.0:
+        get_dot_bundle(request).timings.add(
+            "Symbolica two-stage sector build",
+            topology.two_stage_sector_formula_build_seconds,
+            detail=(
+                f"{getattr(topology, 'two_stage_sector_formulas_generated', 0)} "
+                "source+assembler sector evaluator pair(s)"
+            ),
+        )
 
 
 def main() -> int:
@@ -1259,6 +1345,9 @@ def main() -> int:
 
     try:
         validate_request(request)
+        if request.command == "cache":
+            run_universal_cache_mode(request, logger)
+            return 0
         if request.command == "integrate":
             topology, sectors, prepared_manifest = load_prepared_bundle(
                 request.output or "",
@@ -1287,6 +1376,12 @@ def main() -> int:
                 ibp_reduce_to_log_endpoint=topology.ibp_reduce_to_log_endpoint,
                 subtraction_backend=str(
                     generation_options.get("subtraction_backend", request.subtraction_backend)
+                ),
+                sector_evaluator_backend=str(
+                    generation_options.get(
+                        "sector_evaluator_backend",
+                        request.sector_evaluator_backend,
+                    )
                 ),
                 direct_projector_cache_term_threshold=int(
                     generation_options.get(
