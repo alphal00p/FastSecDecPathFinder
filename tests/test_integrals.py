@@ -1252,11 +1252,11 @@ def test_regular_taylor_v2_uses_dualized_evaluator(
     assert cached.evaluator_dual_shape == formula.evaluator_dual_shape
 
 
-def test_regular_taylor_v3_uses_sparse_ancestor_closed_outputs(
+def test_regular_taylor_v3_uses_sparse_requested_outputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sparse v3 regular formulas close requested outputs before dualizing."""
+    """Sparse v3 regular formulas close inputs but keep requested outputs sparse."""
     monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(tmp_path))
     topology = TopologyDefinition(
         family="toy",
@@ -1323,16 +1323,9 @@ def test_regular_taylor_v3_uses_sparse_ancestor_closed_outputs(
     values = formula.evaluate_complex_batch(row)
 
     assert formula.evaluator_dual_shape
-    assert formula.output_layout == [
-        ((0, 0), 0),
-        ((1, 0), 0),
-        ((0, 0), 1),
-        ((1, 0), 1),
-    ]
-    zero_dual = tuple(0 for _ in formula.evaluator_input_symbols)
-    assert zero_dual in formula.evaluator_dual_shape
-    assert (0, 1, 0, *tuple(0 for _ in formula.input_symbols)) in formula.evaluator_dual_shape
-    np.testing.assert_allclose(values[0], np.asarray([2.0, 8.0, 6.0, 24.0]))
+    assert formula.output_layout == [((1, 0), 1)]
+    assert len(formula.evaluators) == 1
+    np.testing.assert_allclose(values[0], np.asarray([24.0]))
 
 
 def test_sparse_regular_taylor_fallback_matches_dense_path() -> None:

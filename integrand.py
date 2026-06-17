@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import cmath
 from functools import lru_cache
+import gc
 import gzip
 import hashlib
 from itertools import product
@@ -34,6 +35,7 @@ from subtraction_formula import (
     build_regular_taylor_formula_symbolica,
     build_subtraction_formula_symbolica,
     endpoint_projector_formula_has_curated_cache,
+    regular_taylor_formula_has_cache,
     regular_taylor_formula_has_curated_cache,
 )
 from utils import decimal_complex_with_precision, decimal_with_precision
@@ -51,6 +53,51 @@ ComplexPreciseRow = list[ComplexPrecise]
 # topology.
 CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS = 4
 CHAIN_RULE_FORMULA_CACHE_VERSION = 4
+
+
+class _SerializedEvaluatorRef:
+    """Lazy reference to an evaluator already serialized during generation.
+
+    Prepared DOT generation can create many large topology-level dual
+    evaluators.  Keeping every live Symbolica evaluator in memory until the
+    bundle writer runs is exactly the wrong ownership boundary for the 3L
+    triple-box path.  This proxy lets generation save one evaluator as soon as
+    it is built, drop the live object, and still expose the same evaluator API
+    to any later code that needs to inspect or copy the artifact.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.cache_evaluator_file = str(path)
+        self._loaded: Any | None = None
+
+    def _raw_bytes(self) -> bytes:
+        path = Path(self.cache_evaluator_file)
+        raw = path.read_bytes()
+        return gzip.decompress(raw) if path.suffix == ".gz" else raw
+
+    def save(self) -> bytes:
+        """Return the raw Symbolica evaluator bytes expected by bundle writers."""
+        return self._raw_bytes()
+
+    def _evaluator(self) -> Any:
+        if self._loaded is None:
+            self._loaded = Evaluator.load(self._raw_bytes())
+        return self._loaded
+
+    def evaluate(self, *args: Any, **kwargs: Any) -> Any:
+        return self._evaluator().evaluate(*args, **kwargs)
+
+    def evaluate_with_prec(self, *args: Any, **kwargs: Any) -> Any:
+        return self._evaluator().evaluate_with_prec(*args, **kwargs)
+
+    def evaluate_complex(self, *args: Any, **kwargs: Any) -> Any:
+        return self._evaluator().evaluate_complex(*args, **kwargs)
+
+    def evaluate_complex_with_prec(self, *args: Any, **kwargs: Any) -> Any:
+        return self._evaluator().evaluate_complex_with_prec(*args, **kwargs)
+
+    def get_instructions(self, *args: Any, **kwargs: Any) -> Any:
+        return self._evaluator().get_instructions(*args, **kwargs)
 
 
 def _decimal_real(value: Any, precision_digits: int) -> Decimal:
@@ -87,6 +134,7 @@ class TopologyDefinition:
     strict_prepared_bundle: bool = False
     chain_rule_metadata_only: bool = False
     parametric_representation: ParametricRepresentation | None = None
+    streaming_evaluator_cache_dir: str | None = None
     _u_evaluator: Any = field(init=False, repr=False)
     _f_evaluator: Any = field(init=False, repr=False)
     _u_dual_evaluators: dict[tuple[tuple[int, ...], ...], Any] = field(
@@ -405,6 +453,7 @@ class TopologyDefinition:
         cache: dict[tuple[tuple[int, ...], ...], Any],
         scalar_evaluator: Any,
         dual_shape: list[tuple[int, ...]],
+        label: str,
     ) -> Any:
         """Return a cached clone of a scalar evaluator dualized to ``dual_shape``."""
         key = tuple(dual_shape)
@@ -414,23 +463,63 @@ class TopologyDefinition:
                 raise RuntimeError(
                     f"{self.family}: missing prepared dual evaluator for shape {key}"
                 )
+            if self.streaming_evaluator_cache_dir:
+                path = self._stream_dual_evaluator_path(label, key)
+                if path.is_file():
+                    evaluator = _SerializedEvaluatorRef(path)
+                    cache[key] = evaluator
+                    return evaluator
             start = time.perf_counter()
             evaluator = copy.copy(scalar_evaluator)
             evaluator.dualize([list(mi) for mi in dual_shape])
+            if self.streaming_evaluator_cache_dir:
+                path = self._stream_dual_evaluator(evaluator, label, key)
+                evaluator = _SerializedEvaluatorRef(path)
+                gc.collect()
             cache[key] = evaluator
             self.dual_evaluator_build_seconds += time.perf_counter() - start
         return evaluator
 
     def u_dual_evaluator(self, dual_shape: list[tuple[int, ...]]) -> Any:
         """Return a cached dualized U evaluator for the requested jet shape."""
-        return self._cached_dual_evaluator(self._u_dual_evaluators, self._u_evaluator, dual_shape)
+        return self._cached_dual_evaluator(self._u_dual_evaluators, self._u_evaluator, dual_shape, "u")
 
     def f_dual_evaluator(self, dual_shape: list[tuple[int, ...]]) -> Any:
         """Return a cached dualized F evaluator for the requested jet shape."""
         # The heavy expression-to-evaluator lowering was already done in
         # __post_init__.  Symbolica evaluators support shallow copying, so we
         # clone the boot-time scalar evaluator and dualize the clone.
-        return self._cached_dual_evaluator(self._f_dual_evaluators, self._f_evaluator, dual_shape)
+        return self._cached_dual_evaluator(self._f_dual_evaluators, self._f_evaluator, dual_shape, "f")
+
+    def _stream_dual_evaluator(
+        self,
+        evaluator: Any,
+        label: str,
+        dual_shape: tuple[tuple[int, ...], ...],
+    ) -> Path:
+        """Persist one generated dual evaluator and return its sidecar path."""
+        path = self._stream_dual_evaluator_path(label, dual_shape)
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(gzip.compress(evaluator.save(), compresslevel=6))
+        return path
+
+    def _stream_dual_evaluator_path(
+        self,
+        label: str,
+        dual_shape: tuple[tuple[int, ...], ...],
+    ) -> Path:
+        """Return the deterministic streaming sidecar path for one dual shape."""
+        root = Path(str(self.streaming_evaluator_cache_dir)).expanduser()
+        payload = {
+            "family": self.family,
+            "label": str(label),
+            "shape": [list(multi) for multi in dual_shape],
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return root / f"topology_{label}_dual_{digest}.bin.gz"
 
     @staticmethod
     def _pad_multi_index(multi_index: tuple[int, ...], rank: int) -> tuple[int, ...]:
@@ -940,10 +1029,15 @@ class TopologyDefinition:
             for _sector, signature in pending_all
             if regular_taylor_formula_has_curated_cache(signature)
         }
+        cached_signatures = set(curated_signatures) | {
+            signature
+            for _sector, signature in pending_all
+            if regular_taylor_formula_has_cache(signature)
+        }
         cold_pending = [
             (sector, signature)
             for sector, signature in pending_all
-            if signature not in curated_signatures
+            if signature not in cached_signatures
             and (
                 _regular_taylor_signature_volume(signature)
                 <= self.regular_taylor_formula_volume_limit
@@ -951,14 +1045,14 @@ class TopologyDefinition:
                 <= self.regular_taylor_formula_axis_limit
             )
         ]
-        curated_pending = [
+        cached_pending = [
             (sector, signature)
             for sector, signature in pending_all
-            if signature in curated_signatures
+            if signature in cached_signatures
         ]
         if len(cold_pending) > self.regular_taylor_formula_signature_limit:
             cold_pending = cold_pending[: self.regular_taylor_formula_signature_limit]
-        pending = curated_pending + cold_pending
+        pending = cached_pending + cold_pending
         prepared_signatures = {signature for _sector, signature in pending}
         skipped_pending = [
             (sector, signature)
@@ -968,6 +1062,12 @@ class TopologyDefinition:
         prepared_source_request_specs = [
             spec for spec in source_request_specs if spec[1] in prepared_signatures
         ]
+        if self.dual_evaluator_mode not in {"symbolic-derivatives", "lazy"}:
+            # Skipped regular-Taylor formula signatures still use the same
+            # black-box U/F Taylor coefficients in the fallback path.  Strict
+            # prepared bundles therefore need their source dual evaluators too;
+            # otherwise integration would have to generate them lazily.
+            prepared_source_request_specs = list(source_request_specs)
         self.regular_taylor_formulas_skipped = len(skipped_pending)
         self.regular_taylor_formulas_from_curated_cache = len(
             prepared_signatures & curated_signatures
@@ -1049,12 +1149,16 @@ class TopologyDefinition:
             if prepare_source_duals:
                 for sector, signature, zero_positions, max_orders in prepared_source_request_specs:
                     formula = self._regular_taylor_formulas.get(signature)
-                    if formula is None:
-                        continue
                     formula_version = int(signature[1]) if len(signature) > 1 else 1
-                    if formula_version <= 1:
+                    sector_shapes: list[list[tuple[int, ...]]] = []
+                    topology_u_shapes: list[list[tuple[int, ...]]] = []
+                    topology_f_shapes: list[list[tuple[int, ...]]] = []
+                    if formula is not None and formula_version <= 1:
                         source_shape = list(formula.dual_shape)
-                    elif formula_version >= 3:
+                        sector_shapes.append(source_shape)
+                        topology_u_shapes.append(source_shape)
+                        topology_f_shapes.append(source_shape)
+                    elif formula is not None and formula_version >= 3:
                         canonical_positions = _regular_taylor_canonical_positions(max_orders)
                         residual_multis = {
                             _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
@@ -1072,23 +1176,70 @@ class TopologyDefinition:
                             residual_multis,
                             jacobian_multis,
                         )
+                        sector_shapes.append(source_shape)
+                        topology_u_shapes.append(source_shape)
+                        topology_f_shapes.append(source_shape)
+                    elif formula is None and formula_version >= 3:
+                        # Hard six-axis signatures can deliberately skip the
+                        # regular formula evaluator and use the generic sparse
+                        # fallback at runtime.  Strict prepared bundles still
+                        # need every source evaluator used by that fallback.
+                        canonical_positions = _regular_taylor_canonical_positions(max_orders)
+                        requested_multis = {
+                            _regular_taylor_canonical_to_original(tuple(multi), canonical_positions)
+                            for multi, _regular_order in signature[3]
+                        }
+                        residual_multis = _ancestor_closed_multi_set(
+                            requested_multis,
+                            len(max_orders),
+                        )
+                        jacobian_shape = _ordered_multi_shape(set(residual_multis), len(max_orders))
+                        u_source_shape = self.sparse_regular_source_shape_for_monomial_powers(
+                            sector,
+                            zero_positions,
+                            residual_multis,
+                            sector.u_monomial_powers,
+                        )
+                        f_source_shape = self.sparse_regular_source_shape_for_monomial_powers(
+                            sector,
+                            zero_positions,
+                            residual_multis,
+                            sector.f_monomial_powers,
+                        )
+                        sector_shapes.extend([jacobian_shape, u_source_shape, f_source_shape])
+                        topology_u_shapes.append(u_source_shape)
+                        topology_f_shapes.append(f_source_shape)
                     else:
                         source_shape = self.regular_taylor_source_shape(
                             sector,
                             zero_positions,
                             max_orders,
                         )
+                        sector_shapes.append(source_shape)
+                        topology_u_shapes.append(source_shape)
+                        topology_f_shapes.append(source_shape)
                     analytic_sector_taylor = _sector_has_analytic_taylor_for_shape(sector)
-                    if self.dual_evaluator_mode != "symbolic-derivatives" and not analytic_sector_taylor:
-                        sector.prepare_dual_evaluators_for_shape(source_shape)
-                    elif dual_fast_path and not analytic_sector_taylor:
-                        sector.prepare_dual_evaluators_for_shape(source_shape)
+                    if (
+                        self.dual_evaluator_mode != "symbolic-derivatives"
+                        or dual_fast_path
+                    ) and not analytic_sector_taylor:
+                        seen_sector_shapes: set[tuple[tuple[int, ...], ...]] = set()
+                        for shape in sector_shapes:
+                            shape_key = tuple(shape)
+                            if shape_key in seen_sector_shapes:
+                                continue
+                            seen_sector_shapes.add(shape_key)
+                            sector.prepare_dual_evaluators_for_shape(shape)
                     if self.dual_evaluator_mode not in {"lazy", "symbolic-derivatives"}:
-                        self.u_dual_evaluator(source_shape)
-                        self.f_dual_evaluator(source_shape)
+                        for shape in topology_u_shapes:
+                            self.u_dual_evaluator(shape)
+                        for shape in topology_f_shapes:
+                            self.f_dual_evaluator(shape)
                     elif dual_fast_path:
-                        self.u_dual_evaluator(source_shape)
-                        self.f_dual_evaluator(source_shape)
+                        for shape in topology_u_shapes:
+                            self.u_dual_evaluator(shape)
+                        for shape in topology_f_shapes:
+                            self.f_dual_evaluator(shape)
                         self._regular_taylor_dual_signatures.add(signature)
         finally:
             if progress is not None:
@@ -4333,7 +4484,9 @@ class RegularTaylorFormulaDefinition:
     dual_shape: list[tuple[int, ...]] = field(default_factory=list)
     evaluator_input_symbols: list[Any] = field(default_factory=list)
     evaluator_dual_shape: list[tuple[int, ...]] = field(default_factory=list)
+    evaluator_output_indices: list[int] = field(default_factory=list)
     dual_variable_count: int = 0
+    cache_evaluator_files: list[str] = field(default_factory=list)
     build_seconds: float = 0.0
 
     def evaluate_complex_batch(self, rows: np.ndarray, timing: HotPathTiming | None = None) -> np.ndarray:
@@ -4344,6 +4497,8 @@ class RegularTaylorFormulaDefinition:
                 self.evaluators[0].evaluate_complex(self._dualized_input_matrix(rows)),
                 dtype=np.complex128,
             )
+            if self.evaluator_output_indices:
+                values = values[:, self.evaluator_output_indices]
             if timing is not None:
                 timing.add_eval(time.perf_counter() - start)
             return values

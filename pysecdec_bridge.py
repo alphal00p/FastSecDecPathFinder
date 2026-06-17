@@ -447,6 +447,12 @@ def build_dot_bundle(
         li.Gamma_factor,
         topology.coefficient_count - 1,
     )
+    if request.command == "generate":
+        topology.chain_rule_metadata_only = True
+        if request.output is not None:
+            topology.streaming_evaluator_cache_dir = str(
+                Path(request.output).expanduser().resolve() / ".stream_evaluator_cache"
+            )
     with timings.measure(
         "Symbolica sector evaluator build",
         f"{len(sectors)} sectors",

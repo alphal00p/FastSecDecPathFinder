@@ -1,26 +1,28 @@
 # Validation Notes
 
-This document records the current validation state of FSD on 2026-06-16.
-Detailed commands and full metadata are stored in the generated `result.json`
-files; this note keeps only the main agreement and stability conclusions.
+This document records the current validation state of FSD as of 2026-06-17.
+Detailed commands and full metadata live in generated `result.json` files; this
+note keeps the main agreement, stability, and current limitation conclusions.
 
 All values below use the displayed prefactor convention of the run.  Errors are
 one-sigma Monte Carlo errors.
 
 ## Static Checks
 
-The current intended checks are:
+The intended checks are:
 
 ```sh
 .venv/bin/python -m pytest -q
 rg "import (sympy|scipy)|from (sympy|scipy)" . -g'*.py'
 ```
 
-Current result: `103 passed, 2 skipped`.
+The last full recorded result was `103 passed, 2 skipped`.  The current
+development branch also passes the focused regular-Taylor tests covering the
+dualized and sparse formula builders.
 
 ## Overview
 
-The triangle and box rows use DOT inputs, not the built-in shortcuts, so the
+The triangle and box rows use DOT inputs, not built-in shortcuts, so the
 generation comparison with pySecDec is meaningful.
 
 | topology | input | sectors | coefficients | target | FSD generation [s] | pySecDec generation [s] | runtime summary |
@@ -28,7 +30,7 @@ generation comparison with pySecDec is meaningful.
 | triangle | DOT | 3 | `eps^-2..eps^0` | pySecDec generated integrator | 0.223 | 9.095 | avg 2.35 us/smpl/wkr |
 | box | DOT | 12 | `eps^-2..eps^0` | pySecDec generated integrator | 0.240 | 9.075 | avg 7.00 us/smpl/wkr |
 | double box | DOT | 140 | `eps^-4..eps^0` | stored pySecDec-convention target | 0.615 | 272.81 | avg 18.23 us/smpl/wkr |
-| triple box | DOT iterative | 1972 | `eps^-6..eps^0` | no pySecDec target completed | 290.23 + 457.19 serialization | not completed | one-point sector scan, no precision rescue in completed sectors |
+| triple box | DOT iterative | 1972 | `eps^-6..eps^0` | no pySecDec target completed | 38.46 recorded generation + 30.61 serialization | not completed | prepared bundle builds; performance study ongoing |
 
 ## DOT One-Loop Agreement
 
@@ -48,7 +50,7 @@ Massless box, pySecDec convention:
 | `eps^-1` | -2.304872 | 0.004860 | -2.308863 | 0.173% |
 | `eps^0` | -12.494261 | 0.011108 | -12.493117 | 0.00916% |
 
-Both DOT one-loop examples reproduce the generated pySecDec targets at
+Both DOT one-loop examples reproduce generated pySecDec targets at
 sub-percent level.
 
 ## DOT Double Box Agreement
@@ -72,73 +74,52 @@ percent-level central-value claims.
 ## Triple Box Status
 
 The full triple-box prepared bundle now builds all 1972 sectors through
-`eps^0` under the 30 GiB guard.  The latest prepared bundle contains:
+`eps^0` under the 30 GiB guard.  The latest completed compressed bundle
+contains:
 
-| artifact | count |
+| artifact | count / size |
 |---|---:|
+| sectors | 1972 |
 | endpoint-projector formula signatures | 360 |
-| regular-Taylor formula signatures | 160 |
-| universal chain-rule formula signatures | 181 |
-| serialized evaluator files | 22996 |
+| regular-Taylor formula signatures | 166 |
+| serialized evaluator files | 30572 |
+| prepared bundle size | 27 GiB |
 
-Generation timing:
+Older notes used the word "skipped" for guarded formula cold-builds, not for
+missing sectors.  The current prepared bundle includes all sector ids.  Strict
+`integrate --output ...` loads the bundle without pySecDec or evaluator
+generation.
 
-| component | time |
-|---|---:|
-| Generation U and F polynomial | 0.198 s |
-| Generating sectors | 1.191 s |
-| Generating Symbolica evaluators | 288.842 s |
-| evaluator serialization | 457.193 s |
+The completed one-point sector scans did not show endpoint precision rescue
+events in the evaluated points.  This supports the statement that the current
+problem is not an obvious endpoint-subtraction instability.  It does not prove
+triple-box convergence: several hard sectors remain too slow for a meaningful
+democratic high-statistics scan.
 
-The word "skipped" in older notes referred to guarded formula cold-builds, not
-to missing sectors.  The latest bundle includes all 1972 sectors.  It still
-does not prepare every possible universal chain-rule signature: signatures
-whose output expression count exceeded the current cap of 288 are left to the
-strict Python sparse Taylor fallback.
+## PSD2 Diagnostic
 
-A deterministic one-point scan attempted every sector with 10 workers and a
-30 s per-sector cap:
+`PSD2` is a representative six-axis sector.  The completed compressed bundle
+uses the sparse regular-source fallback for this sector.  A focused experiment
+then injected the 8 unique six-axis regular formulas needed by PSD2 and allowed
+missing source dual shapes to be built in memory.
 
-| metric | value |
-|---|---:|
-| completed sectors | 1746 |
-| sectors hitting 30 s cap | 226 |
-| precision rescue events | 0 |
-| completed wall min / median / p90 / p99 / max [s] | 0.0020 / 0.206 / 10.13 / 25.23 / 29.12 |
-| completed Symbolica eval min / median / p90 / p99 / max [s] | 0.0010 / 0.111 / 6.76 / 19.34 / 27.52 |
-| completed `max|coefficient|` min / median / p90 / p99 / max | `2.83e-8` / 0.155 / 3.50 / 81.9 / `2.15e3` |
+| path | warm median wall | warm median Symbolica eval | warm median Python/glue | conclusion |
+|---|---:|---:|---:|---|
+| sparse fallback in prepared bundle | 1.15 s | 0.760 s | 0.390 s | current practical path |
+| injected direct regular formulas | 10.58 s | 9.97 s | 0.612 s | lower Python, much worse total |
 
-Largest completed one-point sector weights:
+The direct formula path is algebraically valid for the sampled points, but it
+is not a performance win.  It fragments the work across many formula evaluators
+and thousands of source dual shapes.  This is a useful validation of the design
+boundary: "move more work into Symbolica" is only helpful if it is fused at the
+right granularity.
 
-| sector | max coefficient | wall [s] | Symbolica eval [s] | Python/glue [s] |
-|---|---:|---:|---:|---:|
-| `PSD350` | `2.15e3` | 28.63 | 18.28 | 10.35 |
-| `PSD2` | `5.80e2` | 13.31 | 0.011 | 13.30 |
-| `PSD671` | `5.73e2` | 9.05 | 7.86 | 1.19 |
-| `PSD201` | `5.57e2` | 8.37 | 4.68 | 3.69 |
-| `PSD106` | `3.90e2` | 12.59 | 0.010 | 12.58 |
+## Current Conclusion
 
-The completed-sector scan supports two claims:
-
-1. The prepared bundle is complete enough to load and evaluate every sector id
-   without pySecDec or evaluator generation at integration time.
-2. No completed deterministic point showed endpoint precision failure; all
-   completed points remained in ordinary double precision.
-
-It does not yet prove triple-box convergence.  The 226 capped sectors and the
-large one-point coefficients mean that a full precision run still needs
-substantial optimization.  The main remaining technical risk is the high-axis
-chain-rule/source assembly path, especially sectors where Symbolica evaluation
-is cheap but the Python sparse Taylor fallback is tens of seconds per point.
-The latest `PSD649` diagnostic makes this concrete: the strict prepared bundle
-uses a Python sparse fallback for missing six-axis regular/source signatures
-and takes about 53 s per one-point repeat; direct U/F dual evaluators reduce
-Python overhead but are still too slow in vectorized batches.  A cold build of
-the first missing regular-Taylor formula was stopped after about 170 s, so the
-fully fused hard-sector path remains the next implementation target.
-
-The next validation target is therefore not more blind statistics.  It is to
-move the remaining large universal chain-rule/source signatures into
-reusable Symbolica evaluators or native sparse-series operations, then repeat
-the democratic sector scan and only then launch a long all-coefficient
-Monte Carlo run.
+FSD is validated on DOT triangle, DOT box, and DOT double box against pySecDec
+targets at the current precision.  The triple box can be generated as a strict
+prepared bundle and loaded without pySecDec at runtime.  The remaining
+triple-box work is performance/convergence engineering: build a fused
+Symbolica-side regular-source path or native sparse-series primitive, then
+repeat the democratic all-sector scan and only then launch a long Monte Carlo
+run for all seven Laurent coefficients.

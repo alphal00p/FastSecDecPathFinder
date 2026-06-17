@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -239,6 +240,9 @@ class _BundleWriter:
 
     def save_evaluator(self, evaluator: Any, group: str, key: Any) -> str:
         """Serialize one evaluator and return a path relative to the bundle."""
+        cached_path = getattr(evaluator, "cache_evaluator_file", None)
+        if cached_path:
+            return self.copy_evaluator_file(cached_path, group, key)
         self._counter += 1
         safe_group = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in group)
         digest = _signature_key((group, key, self._counter))
@@ -256,14 +260,16 @@ class _BundleWriter:
         self._counter += 1
         safe_group = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in group)
         digest = _signature_key((group, key, self._counter, source_path.name))
-        rel = Path("evaluators") / f"{safe_group}_{digest}.bin.gz"
+        suffix = ".bin.gz" if source_path.suffix == ".gz" else ".bin"
+        rel = Path("evaluators") / f"{safe_group}_{digest}{suffix}"
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        raw = source_path.read_bytes()
-        if source_path.suffix == ".gz":
-            path.write_bytes(raw)
-        else:
-            path.write_bytes(gzip.compress(raw, compresslevel=6))
+        try:
+            if path.exists():
+                path.unlink()
+            os.link(source_path, path)
+        except OSError:
+            shutil.copy2(source_path, path)
         return str(rel)
 
     def evaluator_refs(self, evaluators: list[Any], group: str, key: Any) -> list[str]:
@@ -650,11 +656,31 @@ def _load_endpoint_formula(data: dict[str, Any], store: PreparedEvaluatorStore) 
 
 
 def _regular_formula_json(writer: _BundleWriter, formula: RegularTaylorFormulaDefinition) -> dict[str, Any]:
+    if formula.cache_evaluator_files:
+        evaluator_refs = [
+            writer.copy_evaluator_file(
+                path,
+                group=f"formula_regular_{index}",
+                key=(formula.signature, index),
+            )
+            for index, path in enumerate(formula.cache_evaluator_files)
+        ]
+    else:
+        evaluator_refs = writer.evaluator_refs(
+            formula.evaluators,
+            "formula_regular",
+            formula.signature,
+        )
     return {
         "signature": _encode(formula.signature),
         "input_names": formula.input_names,
-        "output_expressions": [_expr_text(expr) for expr in formula.output_expressions],
-        "evaluators": writer.evaluator_refs(formula.evaluators, "formula_regular", formula.signature),
+        # Regular-Taylor expressions can be very large for six-axis three-loop
+        # signatures.  Strict prepared bundles need the serialized evaluators
+        # and layouts only; the cache signature is enough to regenerate the
+        # reference expression offline if evaluator bytes are unavailable.
+        "output_expressions": [],
+        "output_expression_count": len(formula.output_expressions),
+        "evaluators": evaluator_refs,
         "output_layout": _encode(tuple(formula.output_layout)),
         "input_layout": _encode(tuple(formula.input_layout)),
         "max_orders": formula.max_orders,
@@ -662,6 +688,9 @@ def _regular_formula_json(writer: _BundleWriter, formula: RegularTaylorFormulaDe
         "dual_shape": _encode(tuple(formula.dual_shape)),
         "evaluator_input_symbols": [str(symbol) for symbol in formula.evaluator_input_symbols],
         "evaluator_dual_shape": _encode(tuple(formula.evaluator_dual_shape)),
+        "evaluator_output_indices": [
+            int(index) for index in getattr(formula, "evaluator_output_indices", [])
+        ],
         "dual_variable_count": formula.dual_variable_count,
         "build_seconds": formula.build_seconds,
     }
@@ -683,6 +712,9 @@ def _load_regular_formula(data: dict[str, Any], store: PreparedEvaluatorStore) -
         dual_shape=[tuple(item) for item in _decode(data["dual_shape"])],
         evaluator_input_symbols=[S(name) for name in evaluator_input_names],
         evaluator_dual_shape=[tuple(item) for item in _decode(data.get("evaluator_dual_shape", []))],
+        evaluator_output_indices=[
+            int(index) for index in data.get("evaluator_output_indices", [])
+        ],
         dual_variable_count=int(data.get("dual_variable_count", 0)),
         build_seconds=float(data.get("build_seconds", 0.0)),
     )
@@ -809,7 +841,11 @@ def save_prepared_bundle(
     _atomic_write_json(root / "topology.json", topology_payload)
     _atomic_write_json(root / "sectors.json", {"sectors": sectors_payload})
     _atomic_write_json(root / "expressions" / "formulas.json", formulas_payload)
-    _atomic_write_json(root / "generation_timings.json", generation_timings or {})
+    serialization_seconds = time.perf_counter() - start
+    timings_payload = _with_bundle_serialization_timing(
+        generation_timings or {}, serialization_seconds
+    )
+    _atomic_write_json(root / "generation_timings.json", timings_payload)
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -848,7 +884,7 @@ def save_prepared_bundle(
             "evaluator_files": len(list((root / "evaluators").glob("*.bin")))
             + len(list((root / "evaluators").glob("*.bin.gz"))),
         },
-        "serialization_seconds": time.perf_counter() - start,
+        "serialization_seconds": serialization_seconds,
         "files": {
             "topology": "topology.json",
             "sectors": "sectors.json",
@@ -858,6 +894,25 @@ def save_prepared_bundle(
     }
     _atomic_write_json(root / "manifest.json", manifest)
     return manifest
+
+
+def _with_bundle_serialization_timing(
+    generation_timings: dict[str, Any],
+    serialization_seconds: float,
+) -> dict[str, Any]:
+    """Return generation timings with the prepared-bundle write made explicit."""
+    payload = dict(generation_timings)
+    detail_record = {
+        "name": "Prepared bundle serialization",
+        "seconds": max(float(serialization_seconds), 0.0),
+        "detail": "metadata and serialized evaluator artifacts",
+    }
+    details = list(payload.get("details", []))
+    details = [record for record in details if record.get("name") != detail_record["name"]]
+    details.append(detail_record)
+    payload["details"] = details
+    payload["total"] = float(payload.get("total", 0.0)) + detail_record["seconds"]
+    return payload
 
 
 def _symbolica_version() -> str:

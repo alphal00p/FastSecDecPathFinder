@@ -1,14 +1,14 @@
 # FastSecDec Path Finder Summary
 
 This is the current short status of FSD after the DOT, prepared-bundle,
-universal-formula-cache, and triple-box diagnostic work.  The central
-path-finder rule is unchanged: sector integrands are built from black-box
-numerical evaluators of the Symanzik polynomials.  The integration processor
-does not substitute sector maps into `U` or `F` symbolically.
+universal-formula-cache, Symbolica-dev, and triple-box diagnostic work.  The
+core path-finder rule is unchanged: the sector processor treats `U` and `F` as
+black-box numerical evaluators.  It never substitutes sector maps into those
+polynomials symbolically during integration.
 
-## Current Workflow
+## Preferred Workflow
 
-For DOT inputs the preferred workflow is now two-stage:
+For DOT inputs the preferred workflow is two-stage:
 
 ```sh
 .venv/bin/python FSD.py generate \
@@ -18,7 +18,7 @@ For DOT inputs the preferred workflow is now two-stage:
   --sector-method iterative \
   --subtraction-backend projector-formula \
   --ibp-reduce-to-log-endpoint \
-  --symbolic-derivatives \
+  --pregenerate-dual-evaluators \
   --max-eps-order 0
 
 .venv/bin/python FSD.py integrate \
@@ -29,16 +29,12 @@ For DOT inputs the preferred workflow is now two-stage:
 ```
 
 `integrate --output ...` is strict disk-only with respect to generation: it
-loads topology metadata, sectors, expression metadata, and serialized
-Symbolica evaluator bytes from the prepared bundle.  It does not call pySecDec,
-reconstruct `U` or `F`, or build Symbolica formula/evaluator artifacts during
-integration.  A strict integrate run can still use the generic Python sparse
-Taylor fallback when a deliberately unprepared universal chain-rule signature
-is missing from the bundle.
+loads topology metadata, sectors, formula metadata, and serialized Symbolica
+evaluator bytes from the prepared bundle.  It does not call pySecDec,
+reconstruct `U`/`F`, or build Symbolica formula/evaluator artifacts during
+integration.
 
-Long exploratory runs should use the local process-tree memory guard.  It can
-be stopped by creating `stop.order` in the working directory, so no interactive
-permission or `Ctrl-C` is needed:
+Long exploratory runs should use the process-tree memory guard:
 
 ```sh
 ./run_with_memory_watch.py \
@@ -47,102 +43,81 @@ permission or `Ctrl-C` is needed:
   -- .venv/bin/python FSD.py integrate --output examples/outputs/prepared_triple_box
 ```
 
+The wrapper terminates the child process group if the memory limit is exceeded
+or if `stop.order` appears in the working directory.
+
+## Cache Model
+
+The relevant user experience is now the shipped-cache experience.  Building an
+empty universal cache locally can be very expensive and is not the intended
+default.  It is acceptable for an offline cluster job to generate the universal
+formula cache once and ship it as a downloadable archive.
+
+Current local cache sizes:
+
+| artifact | size |
+|---|---:|
+| generated top-level cache `cache/subtraction_formulae` | 22 GiB |
+| legacy/source asset cache `assets/subtraction_formulae` | 11 GiB |
+| completed compressed triple-box prepared bundle | 27 GiB |
+
+The cache entries are universal in the endpoint/projector signatures.  The
+topology-specific part remains the source evaluator preparation for the actual
+`U`, `F`, sector maps, and Jacobians.  Those belong in a prepared bundle and
+are reused by strict `integrate`.
+
 ## Current Coverage
 
 The triangle, box, and double-box rows use DOT inputs.  The pySecDec column is
-the generated-integrator/package generation timing from the validation runs.
+the generated-integrator/package generation timing from validation runs.
 
 | topology | sectors | Laurent range | FSD generation | pySecDec generation | status |
 |---|---:|---|---:|---:|---|
 | triangle | 3 | `eps^-2..eps^0` | 0.223 s | 9.095 s | agrees with pySecDec target |
 | box | 12 | `eps^-2..eps^0` | 0.240 s | 9.075 s | agrees with pySecDec target |
-| double box | 140 | `eps^-4..eps^0` | 0.615 s | 272.81 s | all target pulls below 1 sigma in current run |
-| triple box | 1972 | `eps^-6..eps^0` | 290.23 s + 457.19 s serialization | not completed | full prepared bundle builds; convergence not demonstrated |
+| double box | 140 | `eps^-4..eps^0` | 0.615 s | 272.81 s | target pulls below 1 sigma in current run |
+| triple box | 1972 | `eps^-6..eps^0` | 38.46 s recorded generation plus 30.61 s bundle serialization | not completed | prepared bundle builds; convergence not demonstrated |
 
-The latest triple-box prepared bundle was generated under a 30 GiB memory
-guard with `--chain-rule-formula-output-length-limit 288`.  It contains all
-1972 sectors, 360 endpoint-projector formula signatures, 160 regular-Taylor
-formula signatures, 181 universal chain-rule formula signatures, and 22996
-serialized evaluator files.  The bundle and the local generated cache are each
-about 4.1 GiB.
+The latest completed compressed triple-box bundle contains all 1972 sectors,
+360 endpoint-projector formula signatures, 166 regular-Taylor formula
+signatures, and 30572 serialized evaluator files.  It was generated with
+pregenerated dual evaluators, IBP endpoint lowering, and no chain-rule formula
+backend.
 
-Triple-box generation breakdown:
+## PSD2 Focused Experiment
 
-| component | time |
-|---|---:|
-| Generation U and F polynomial | 0.198 s |
-| Generating sectors | 1.191 s |
-| Generating Symbolica evaluators | 288.842 s |
-| evaluator serialization | 457.193 s |
+`PSD2` is a six-axis sector with monomial powers
+`F: [3,3,0,2,0,1,0,1,1]` and singular axes `[0,1,3,5,7,8]`.  It is useful
+because the older scan made it look Python-dominated.
 
-The expensive evaluator/formula cache is now rooted at `cache/`, which is
-ignored by git and intended to become a distributable tarball.  `install.sh`
-can already unpack a local or remote cache archive.  Generation falls back to
-rebuilding missing formulas and adds them to the cache.
+With the current completed compressed bundle, warm PSD2 repeats are no longer
+the old 13 s Python bottleneck:
 
-## Triple-Box Diagnostics
+| path | warm median wall | warm median Symbolica eval | warm median Python/glue |
+|---|---:|---:|---:|
+| sparse fallback in prepared bundle | 1.15 s | 0.760 s | 0.390 s |
+| injected direct regular formulas | 10.58 s | 9.97 s | 0.612 s |
 
-A deterministic one-point scan touched all 1972 prepared triple-box sectors
-with 10 workers, a 30 GiB process-tree memory guard, and a 30 s per-sector
-classification cap.  It is a coverage and stability diagnostic, not a Monte
-Carlo precision result.
+The direct formula experiment loaded/injected the 8 unique six-axis regular
+formula signatures for PSD2.  It reduced Python-side work, but it made total
+runtime much worse because the evaluation became fragmented across many
+Symbolica evaluator calls and thousands of U/F source dual shapes.  This is a
+concrete counterexample to blindly baking every coefficient into separate
+formula evaluators.
 
-| metric | value |
-|---|---:|
-| completed sectors | 1746 |
-| sectors hitting 30 s cap | 226 |
-| precision rescue events | 0 |
-| completed-sector wall time | 0.0020 s min, 0.206 s median, 29.12 s max |
-| completed-sector Symbolica eval time | 0.0010 s min, 0.111 s median, 27.52 s max |
-| completed-sector `max|coefficient|` | `2.83e-8` min, 0.155 median, `2.15e3` max |
+The right next optimization is not "more small formula evaluators"; it is a
+fused evaluator/source path that keeps the algebra inside Symbolica while
+reducing evaluator-call granularity.
 
-Timeouts are concentrated in the high-axis sector bands:
+## Triple-Box Status
 
-| sector-id bin | timeouts |
-|---:|---:|
-| 0..99 | 8 |
-| 100..199 | 12 |
-| 300..399 | 4 |
-| 400..499 | 6 |
-| 500..599 | 10 |
-| 600..699 | 24 |
-| 700..799 | 32 |
-| 800..899 | 45 |
-| 900..999 | 27 |
-| 1000..1099 | 38 |
-| 1100..1199 | 20 |
+The full triple-box sector list can be generated and loaded from a prepared
+bundle under the 30 GiB guard.  Earlier one-point scans found no precision
+rescue events in completed sectors.  The remaining issue is performance and
+variance, not a known endpoint-subtraction instability.
 
-The largest completed one-point coefficients were finite and stayed in
-ordinary double precision:
-
-| sector | largest coefficient | wall time | Symbolica eval time | Python/glue time |
-|---|---:|---:|---:|---:|
-| `PSD350` | `2.15e3` | 28.63 s | 18.28 s | 10.35 s |
-| `PSD2` | `5.80e2` | 13.31 s | 0.011 s | 13.30 s |
-| `PSD671` | `5.73e2` | 9.05 s | 7.86 s | 1.19 s |
-| `PSD201` | `5.57e2` | 8.37 s | 4.68 s | 3.69 s |
-| `PSD106` | `3.90e2` | 12.59 s | 0.010 s | 12.58 s |
-
-This confirms that the triple-box obstruction is not pySecDec re-entry and not
-visible endpoint numerical instability in the completed sectors.  The current
-weak point is the high-depth source assembly for unprepared universal
-chain-rule signatures.  Some hard sectors are genuinely Symbolica-evaluator
-heavy; others, such as `PSD2` and `PSD106`, are dominated by the Python sparse
-Taylor fallback.
-
-The latest hard-sector probe focused on `PSD649`, a six-axis sector with
-missing regular/source formulas.  In the existing strict prepared bundle it
-still takes about 53 s per one-point repeat, almost entirely in Python sparse
-Taylor composition.  A diagnostic direct-U/F-dual run reduces Python time to
-about 7 s for one point, but moves the work into Symbolica evaluator calls and
-does not improve 10-point batch throughput.  A cache-warming attempt for the
-first missing `PSD649` regular-Taylor formula was stopped after about 170 s
-while building/dualizing the generated regular expression.  So the remaining
-problem is not the original U/F dualization slowdown; it is the missing fused
-regular-source evaluator for hard six-axis signatures.
-
-The requested `1972 x 1000` democratic triple-box scan is therefore not yet a
-near-1000 s task with this implementation.  The next useful step is to finish
-moving the remaining large chain-rule/source assembly into reusable Symbolica
-evaluators or a native sparse-series primitive while keeping the prepared
-bundle memory bounded.
+The main weak point is still high-axis source assembly.  Some hard sectors are
+genuinely Symbolica-evaluator heavy; others still pay Python sparse-series
+composition.  The PSD2 experiment shows that replacing that Python work by
+many standalone Symbolica evaluators can be slower, so the next implementation
+step should fuse the regular-source computation more aggressively.

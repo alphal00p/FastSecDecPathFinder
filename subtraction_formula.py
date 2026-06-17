@@ -33,7 +33,43 @@ from symbolica import E, Evaluator, Replacement, S
 
 
 ENDPOINT_PROJECTOR_CACHE_VERSION = 1
-REGULAR_TAYLOR_CACHE_VERSION = 3
+REGULAR_TAYLOR_CACHE_VERSION = 9
+REGULAR_TAYLOR_COMPATIBLE_CACHE_VERSIONS = (9, 8)
+
+
+class _RegularCacheEvaluatorRef:
+    """Lazy proxy for a serialized regular-Taylor evaluator sidecar.
+
+    Warm prepared-bundle generation should not deserialize hundreds of large
+    Symbolica evaluators just to re-serialize them into the bundle.  This proxy
+    keeps direct single-shot use working, while the bundle writer can copy the
+    original sidecar bytes through ``RegularTaylorFormulaDefinition``'s
+    ``cache_evaluator_files`` field.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._evaluator: Any | None = None
+
+    def _load(self) -> Any:
+        if self._evaluator is None:
+            raw = self.path.read_bytes()
+            self._evaluator = Evaluator.load(
+                gzip.decompress(raw) if self.path.suffix == ".gz" else raw
+            )
+        return self._evaluator
+
+    def evaluate(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load().evaluate(*args, **kwargs)
+
+    def evaluate_with_prec(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load().evaluate_with_prec(*args, **kwargs)
+
+    def evaluate_complex(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load().evaluate_complex(*args, **kwargs)
+
+    def evaluate_complex_with_prec(self, *args: Any, **kwargs: Any) -> Any:
+        return self._load().evaluate_complex_with_prec(*args, **kwargs)
 
 
 def build_subtraction_formula_symbolica(
@@ -141,7 +177,19 @@ def build_regular_taylor_formula_symbolica(
         return cached
 
     ctx = _RegularTaylorContext(topology, sector, signature)
-    if ctx.uses_residual_inputs:
+    use_dualized_regular = ctx.uses_residual_inputs
+    if use_dualized_regular and _regular_taylor_should_use_sparse_expression(ctx):
+        formula = _build_regular_taylor_sparse_expression_formula(
+            topology,
+            ctx,
+            signature,
+            formula_class,
+        )
+        _write_regular_taylor_formula_to_cache(formula)
+        _increment_topology_counter(topology, "regular_taylor_formulas_generated")
+        return formula
+
+    if use_dualized_regular:
         formula = _build_regular_taylor_dualized_formula(topology, ctx, signature, formula_class)
         _write_regular_taylor_formula_to_cache(formula)
         _increment_topology_counter(topology, "regular_taylor_formulas_generated")
@@ -185,16 +233,28 @@ def _build_regular_taylor_dualized_formula(
     dual_symbols = [ctx.eps, *ctx.taus]
     evaluator_symbols = [*dual_symbols, *ctx.input_symbols]
     output_layout: list[tuple[tuple[int, ...], int]] = []
-    dual_shape: list[tuple[int, ...]] = []
+    requested_dual_shape: list[tuple[int, ...]] = []
     for multi_index, regular_order in ctx.requested_outputs:
         output_layout.append((multi_index, regular_order))
-        dual_shape.append(
+        requested_dual_shape.append(
             (
                 int(regular_order),
                 *tuple(int(value) for value in multi_index),
                 *tuple(0 for _ in ctx.input_symbols),
             )
         )
+    dual_shape_set: set[tuple[int, ...]] = set()
+    for target in requested_dual_shape:
+        for ancestor in product(*[range(value + 1) for value in target]):
+            dual_shape_set.add(tuple(int(value) for value in ancestor))
+    zero = tuple(0 for _ in evaluator_symbols)
+    dual_shape_set.add(zero)
+    dual_shape = sorted(dual_shape_set, key=lambda item: (sum(item), item))
+    if zero in dual_shape:
+        dual_shape.remove(zero)
+        dual_shape.insert(0, zero)
+    dual_index = {multi: index for index, multi in enumerate(dual_shape)}
+    output_indices = [dual_index[target] for target in requested_dual_shape]
     evaluator = expr.evaluator(
         evaluator_symbols,
         jit_compile=topology.jit_compile_evaluators,
@@ -212,7 +272,112 @@ def _build_regular_taylor_dualized_formula(
         zero_positions=ctx.zero_positions,
         evaluator_input_symbols=evaluator_symbols,
         evaluator_dual_shape=dual_shape,
+        evaluator_output_indices=output_indices,
         dual_variable_count=len(dual_symbols),
+    )
+
+
+def _regular_taylor_should_use_sparse_expression(ctx: "_RegularTaylorContext") -> bool:
+    """Return whether to build residual-input coefficients explicitly.
+
+    The dualized residual formula is compact to describe, but for high mixed
+    derivatives it asks Symbolica for every ancestor coefficient of one scalar
+    expression in ``eps`` and all Taylor variables.  Six-axis triple-box
+    signatures such as ``(2,2,2,2,1,1)`` therefore spend offline cache time on a
+    large dual box despite needing only a sparse set of output coefficients.
+    The sparse expression path builds precisely those coefficient formulas.
+    """
+    return bool(ctx.version >= 3 and ctx.n_axes >= 6)
+
+
+def _build_regular_taylor_sparse_expression_formula(
+    topology: Any,
+    ctx: "_RegularTaylorContext",
+    signature: tuple[Any, ...],
+    formula_class: type,
+) -> Any:
+    """Build sparse residual-input regular coefficients as Symbolica formulas."""
+    allowed_multis = set(ctx.coefficient_multis)
+    max_orders = list(ctx.max_orders)
+
+    def coefficient_series(kind: str) -> ExprSeries:
+        return {
+            multi: ctx._coeff(kind, multi)
+            for multi in ctx.coefficient_multis
+        }
+
+    j_series = coefficient_series("j")
+    u_series = coefficient_series("u")
+    f_series = coefficient_series("f")
+    monomial_pref, monomial_log = ctx._regular_monomial_exprs()
+    u_power, u_log = _expr_series_pow_real_and_log_allowed(
+        u_series,
+        topology.u_power_base,
+        max_orders,
+        allowed_multis,
+    )
+    f_power, f_log = _expr_series_pow_real_and_log_allowed(
+        f_series,
+        -topology.f_power_base,
+        max_orders,
+        allowed_multis,
+    )
+    pref_series = _expr_series_mul_allowed(
+        _expr_series_constant(monomial_pref, max_orders),
+        _expr_series_mul_allowed(
+            j_series,
+            _expr_series_mul_allowed(u_power, f_power, allowed_multis),
+            allowed_multis,
+        ),
+        allowed_multis,
+    )
+    log_series = _expr_series_add(
+        _expr_series_constant(monomial_log, max_orders),
+        _expr_series_add(
+            _expr_series_scale(u_log, topology.eps_log_u_coeff),
+            _expr_series_scale(f_log, topology.eps_log_f_coeff),
+        ),
+    )
+
+    by_eps_order: list[ExprSeries] = []
+    log_power = _expr_series_constant(E("1"), max_orders)
+    factorial = 1.0
+    for regular_order in range(topology.coefficient_count):
+        if regular_order > 0:
+            factorial *= float(regular_order)
+            log_power = _expr_series_mul_allowed(log_power, log_series, allowed_multis)
+        by_eps_order.append(
+            _expr_series_scale(
+                _expr_series_mul_allowed(pref_series, log_power, allowed_multis),
+                1.0 / factorial,
+            )
+        )
+
+    outputs: list[Any] = []
+    output_layout: list[tuple[tuple[int, ...], int]] = []
+    for multi_index, regular_order in ctx.requested_outputs:
+        outputs.append(
+            _expr_series_coefficient(
+                by_eps_order[int(regular_order)],
+                tuple(int(value) for value in multi_index),
+            )
+        )
+        output_layout.append((tuple(int(value) for value in multi_index), int(regular_order)))
+
+    evaluators = [
+        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
+        for expr in outputs
+    ]
+    return formula_class(
+        signature=signature,
+        input_names=ctx.input_names,
+        input_symbols=ctx.input_symbols,
+        output_expressions=outputs,
+        evaluators=evaluators,
+        output_layout=output_layout,
+        input_layout=ctx.input_layout,
+        max_orders=ctx.max_orders,
+        zero_positions=ctx.zero_positions,
     )
 
 
@@ -266,6 +431,31 @@ def regular_taylor_formula_has_curated_cache(signature: tuple[Any, ...]) -> bool
     return data.get("signature_payload") == _regular_taylor_signature_payload(signature)
 
 
+def regular_taylor_formula_has_cache(signature: tuple[Any, ...]) -> bool:
+    """Return whether any readable generated or curated regular cache exists."""
+    expected = _regular_taylor_signature_payload(signature)
+    for path in _regular_taylor_cache_paths(signature):
+        for candidate in _cache_read_paths(path):
+            if not candidate.is_file():
+                continue
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            payload = data.get("signature_payload", {})
+            if payload.get("kind") != expected["kind"] or payload.get("signature") != expected["signature"]:
+                continue
+            if (
+                int(payload.get("schema_version", 0) or 0) < REGULAR_TAYLOR_CACHE_VERSION
+                and len(signature) > 2
+                and int(signature[1]) >= 3
+                and int(signature[2]) >= 6
+            ):
+                continue
+            return True
+    return False
+
+
 def endpoint_projector_formula_has_curated_cache(signature: tuple[Any, ...]) -> bool:
     """Return whether a vetted endpoint-projector asset exists for ``signature``."""
     return _endpoint_projector_formula_has_curated_cache(
@@ -296,20 +486,36 @@ endpoint_projector_formula_has_curated_cache.cache_clear = (  # type: ignore[att
 )
 
 
-def _regular_taylor_signature_payload(signature: tuple[Any, ...]) -> dict[str, Any]:
+def _regular_taylor_signature_payload(
+    signature: tuple[Any, ...],
+    schema_version: int | None = None,
+) -> dict[str, Any]:
     """Return a JSON-stable cache signature for regular-Taylor formulae."""
     return {
-        "schema_version": REGULAR_TAYLOR_CACHE_VERSION,
+        "schema_version": int(schema_version or REGULAR_TAYLOR_CACHE_VERSION),
         "kind": "regular-taylor",
         "signature": _jsonable(signature),
     }
 
 
-def _regular_taylor_cache_path(signature: tuple[Any, ...]) -> Path:
+def _regular_taylor_cache_path(
+    signature: tuple[Any, ...],
+    schema_version: int | None = None,
+) -> Path:
     """Return the cache path for one regular-Taylor formula."""
-    payload = _regular_taylor_signature_payload(signature)
+    payload = _regular_taylor_signature_payload(signature, schema_version=schema_version)
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return _endpoint_projector_cache_dir() / f"regular_taylor_{digest}.json"
+
+
+def _regular_taylor_cache_paths(signature: tuple[Any, ...]) -> list[Path]:
+    """Return current and compatible older cache paths for one signature."""
+    paths: list[Path] = []
+    for version in REGULAR_TAYLOR_COMPATIBLE_CACHE_VERSIONS:
+        path = _regular_taylor_cache_path(signature, schema_version=version)
+        if path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _jsonable(value: Any) -> Any:
@@ -412,76 +618,130 @@ def _load_regular_taylor_formula_from_cache(
     formula_class: type,
 ) -> Any | None:
     """Load a cached regular-Taylor expression, if available."""
-    path = _regular_taylor_cache_path(signature)
-    for candidate in _cache_read_paths(path):
-        if not candidate.is_file():
-            continue
-        try:
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-            if data.get("signature_payload") != _regular_taylor_signature_payload(signature):
+    expected_signature = _regular_taylor_signature_payload(signature)["signature"]
+    expected_kind = _regular_taylor_signature_payload(signature)["kind"]
+    for path in _regular_taylor_cache_paths(signature):
+        for candidate in _cache_read_paths(path):
+            if not candidate.is_file():
                 continue
-            mirror_cache_entry_to_primary(
-                candidate,
-                data,
-                sidecar_fields=("evaluator_cache_files",),
-            )
-            mode = str(data.get("mode", "explicit"))
-            input_names = [str(name) for name in data["input_names"]]
-            input_symbols = [S(name) for name in input_names]
-            if mode == "dualized":
-                outputs = [E(str(data["scalar_expression"]))]
-                evaluator_input_names = [str(name) for name in data["evaluator_input_names"]]
-                evaluator_input_symbols = [S(name) for name in evaluator_input_names]
-                evaluator_dual_shape = [
-                    tuple(int(value) for value in item)
-                    for item in data["evaluator_dual_shape"]
-                ]
-                cached_evaluators = _load_regular_evaluator_sidecars(candidate, data)
-                if cached_evaluators is not None:
-                    evaluators = cached_evaluators
-                else:
-                    evaluator = outputs[0].evaluator(
-                        evaluator_input_symbols,
-                        jit_compile=topology.jit_compile_evaluators,
-                    )
-                    evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
-                    evaluators = [evaluator]
-                    _upgrade_regular_cache_with_evaluator_sidecars(candidate, data, evaluators)
-            else:
-                outputs = [E(text) for text in data["output_expressions"]]
-                evaluator_input_symbols = []
-                evaluator_dual_shape = []
-                cached_evaluators = _load_regular_evaluator_sidecars(candidate, data)
-                if cached_evaluators is not None:
-                    evaluators = cached_evaluators
-                else:
-                    evaluators = [
-                        expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
-                        for expr in outputs
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                payload = data.get("signature_payload", {})
+                if (
+                    payload.get("kind") != expected_kind
+                    or payload.get("signature") != expected_signature
+                ):
+                    continue
+                if (
+                    int(payload.get("schema_version", 0) or 0) < REGULAR_TAYLOR_CACHE_VERSION
+                    and len(signature) > 2
+                    and int(signature[1]) >= 3
+                    and int(signature[2]) >= 6
+                ):
+                    # v8 six-axis residual caches used the dualized sparse
+                    # expression.  v9 intentionally replaces those with
+                    # direct sparse expressions so shipped caches do not pay
+                    # the huge high-mixed-derivative dualization cost.
+                    continue
+                mirror_cache_entry_to_primary(
+                    candidate,
+                    data,
+                    sidecar_fields=("evaluator_cache_files",),
+                )
+                mode = str(data.get("mode", "explicit"))
+                input_names = [str(name) for name in data["input_names"]]
+                input_symbols = [S(name) for name in input_names]
+                cache_evaluator_files: list[str] = []
+                if mode == "dualized":
+                    evaluator_input_names = [
+                        str(name) for name in data["evaluator_input_names"]
                     ]
-                    _upgrade_regular_cache_with_evaluator_sidecars(candidate, data, evaluators)
-            return formula_class(
-                signature=signature,
-                input_names=input_names,
-                input_symbols=input_symbols,
-                output_expressions=outputs,
-                evaluators=evaluators,
-                output_layout=[
-                    _regular_output_layout_from_json(item)
-                    for item in data["output_layout"]
-                ],
-                input_layout=[
-                    _regular_input_layout_from_json(item)
-                    for item in data["input_layout"]
-                ],
-                max_orders=[int(order) for order in data["max_orders"]],
-                zero_positions=tuple(int(position) for position in data["zero_positions"]),
-                evaluator_input_symbols=evaluator_input_symbols,
-                evaluator_dual_shape=evaluator_dual_shape,
-                dual_variable_count=int(data.get("dual_variable_count", 0)),
-            )
-        except Exception:
-            continue
+                    evaluator_input_symbols = [S(name) for name in evaluator_input_names]
+                    evaluator_dual_shape = [
+                        tuple(int(value) for value in item)
+                        for item in data["evaluator_dual_shape"]
+                    ]
+                    cached_evaluator_paths = _regular_evaluator_sidecar_paths(candidate, data)
+                    if cached_evaluator_paths is not None:
+                        outputs = []
+                        evaluators = [
+                            _RegularCacheEvaluatorRef(path)
+                            for path in cached_evaluator_paths
+                        ]
+                        cache_evaluator_files = [
+                            str(path) for path in cached_evaluator_paths
+                        ]
+                    else:
+                        if "scalar_expression" not in data:
+                            raise KeyError(
+                                "regular Taylor cache has no scalar expression fallback"
+                            )
+                        outputs = [E(str(data["scalar_expression"]))]
+                        evaluator = outputs[0].evaluator(
+                            evaluator_input_symbols,
+                            jit_compile=topology.jit_compile_evaluators,
+                        )
+                        evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
+                        evaluators = [evaluator]
+                        _upgrade_regular_cache_with_evaluator_sidecars(
+                            candidate,
+                            data,
+                            evaluators,
+                        )
+                else:
+                    evaluator_input_symbols = []
+                    evaluator_dual_shape = []
+                    cached_evaluator_paths = _regular_evaluator_sidecar_paths(candidate, data)
+                    if cached_evaluator_paths is not None:
+                        outputs = []
+                        evaluators = [
+                            _RegularCacheEvaluatorRef(path)
+                            for path in cached_evaluator_paths
+                        ]
+                        cache_evaluator_files = [
+                            str(path) for path in cached_evaluator_paths
+                        ]
+                    else:
+                        output_texts = _load_regular_output_expression_strings(candidate, data)
+                        outputs = [E(text) for text in output_texts]
+                        evaluators = [
+                            expr.evaluator(
+                                input_symbols,
+                                jit_compile=topology.jit_compile_evaluators,
+                            )
+                            for expr in outputs
+                        ]
+                        _upgrade_regular_cache_with_evaluator_sidecars(
+                            candidate,
+                            data,
+                            evaluators,
+                        )
+                return formula_class(
+                    signature=signature,
+                    input_names=input_names,
+                    input_symbols=input_symbols,
+                    output_expressions=outputs,
+                    evaluators=evaluators,
+                    output_layout=[
+                        _regular_output_layout_from_json(item)
+                        for item in data["output_layout"]
+                    ],
+                    input_layout=[
+                        _regular_input_layout_from_json(item)
+                        for item in data["input_layout"]
+                    ],
+                    max_orders=[int(order) for order in data["max_orders"]],
+                    zero_positions=tuple(int(position) for position in data["zero_positions"]),
+                    evaluator_input_symbols=evaluator_input_symbols,
+                    evaluator_dual_shape=evaluator_dual_shape,
+                    evaluator_output_indices=[
+                        int(index) for index in data.get("evaluator_output_indices", [])
+                    ],
+                    dual_variable_count=int(data.get("dual_variable_count", 0)),
+                    cache_evaluator_files=cache_evaluator_files,
+                )
+            except Exception:
+                continue
     return None
 
 
@@ -490,12 +750,39 @@ def _regular_evaluator_sidecar_name(path: Path, index: int) -> str:
     return f"{path.stem}.eval_{int(index)}.bin.gz"
 
 
-def _load_regular_evaluator_sidecars(path: Path, data: dict[str, Any]) -> list[Any] | None:
-    """Load serialized regular-Taylor evaluators next to a cache JSON file."""
+def _regular_expression_sidecar_name(path: Path) -> str:
+    """Return the compressed reference-expression sidecar filename."""
+    return f"{path.stem}.expr.json.gz"
+
+
+def _load_regular_output_expression_strings(path: Path, data: dict[str, Any]) -> list[str]:
+    """Load regular-output expression strings from JSON or a sidecar.
+
+    Runtime-ready caches have serialized evaluator sidecars, so warm generation
+    should not parse these strings.  They are retained as a rebuild/debug asset
+    and loaded only when evaluator bytes are unavailable.
+    """
+    inline = data.get("output_expressions")
+    if inline is not None:
+        return [str(item) for item in inline]
+    name = data.get("output_expression_cache_file")
+    if not name:
+        raise KeyError("regular Taylor cache has no output expressions")
+    candidate = path.parent / str(name)
+    if not candidate.is_file():
+        raise FileNotFoundError(candidate)
+    raw = candidate.read_bytes()
+    payload = gzip.decompress(raw) if candidate.suffix == ".gz" else raw
+    decoded = json.loads(payload.decode("utf-8"))
+    return [str(item) for item in decoded["output_expressions"]]
+
+
+def _regular_evaluator_sidecar_paths(path: Path, data: dict[str, Any]) -> list[Path] | None:
+    """Return serialized regular-Taylor evaluator sidecar paths if complete."""
     names = [str(name) for name in data.get("evaluator_cache_files", [])]
     if not names:
         return None
-    evaluators: list[Any] = []
+    paths: list[Path] = []
     for name in names:
         candidate = path.parent / name
         if not candidate.is_file() and candidate.suffix != ".gz":
@@ -504,14 +791,8 @@ def _load_regular_evaluator_sidecars(path: Path, data: dict[str, Any]) -> list[A
                 candidate = compressed
         if not candidate.is_file():
             return None
-        try:
-            raw = candidate.read_bytes()
-            evaluators.append(
-                Evaluator.load(gzip.decompress(raw) if candidate.suffix == ".gz" else raw)
-            )
-        except Exception:
-            return None
-    return evaluators
+        paths.append(candidate)
+    return paths
 
 
 def _write_regular_evaluator_sidecars(path: Path, evaluators: list[Any]) -> list[str]:
@@ -539,6 +820,29 @@ def _write_regular_evaluator_sidecars(path: Path, evaluators: list[Any]) -> list
                 os.unlink(tmp_name)
         names.append(name)
     return names
+
+
+def _write_regular_expression_sidecar(path: Path, expressions: list[Any]) -> str:
+    """Store large reference expression strings outside the metadata JSON."""
+    name = _regular_expression_sidecar_name(path)
+    destination = path.parent / name
+    payload = json.dumps(
+        {"output_expressions": [str(expr) for expr in expressions]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(gzip.compress(payload, compresslevel=6))
+        os.replace(tmp_name, destination)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    return name
 
 
 def _regular_cache_candidate_is_curated(path: Path) -> bool:
@@ -596,7 +900,8 @@ def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
         "zero_positions": list(formula.zero_positions),
     }
     if getattr(formula, "evaluator_dual_shape", None):
-        data["scalar_expression"] = str(formula.output_expressions[0])
+        data["scalar_expression_omitted"] = True
+        data["scalar_expression_count"] = len(formula.output_expressions)
         data["evaluator_input_names"] = [
             str(symbol) for symbol in formula.evaluator_input_symbols
         ]
@@ -604,9 +909,13 @@ def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
             [int(value) for value in multi_index]
             for multi_index in formula.evaluator_dual_shape
         ]
+        data["evaluator_output_indices"] = [
+            int(index) for index in getattr(formula, "evaluator_output_indices", [])
+        ]
         data["dual_variable_count"] = int(formula.dual_variable_count)
     else:
-        data["output_expressions"] = [str(expr) for expr in formula.output_expressions]
+        data["output_expression_omitted"] = True
+        data["output_expression_count"] = len(formula.output_expressions)
     _write_json_atomic(path, data)
 
 
@@ -1363,9 +1672,9 @@ class _RegularTaylorContext:
                     requested_outputs = [
                         (tuple(0 for _ in range(self.n_axes)), 0)
                     ]
-                self.requested_outputs = _ancestor_closed_output_pairs(
-                    requested_outputs,
-                    self.n_axes,
+                self.requested_outputs = sorted(
+                    set(requested_outputs),
+                    key=lambda item: (item[1], sum(item[0]), item[0]),
                 )
                 self.coefficient_multis = _ancestor_closed_multis(
                     [multi for multi, _regular_order in self.requested_outputs],
@@ -1635,6 +1944,224 @@ def _expr_real_power(base: Any, power: float) -> Any:
     if abs(float(power) - rounded) <= 1.0e-12:
         return _expr_int_power(base, int(rounded))
     return (_expr_number(power) * base.log()).exp()
+
+
+ExprSeries = dict[tuple[int, ...], Any]
+
+
+def _zero_multi(rank: int) -> tuple[int, ...]:
+    """Return the zero multi-index for a Taylor rank."""
+    return tuple(0 for _ in range(int(rank)))
+
+
+def _expr_series_constant(value: Any, max_orders: list[int]) -> ExprSeries:
+    """Build a sparse Symbolica Taylor series with one constant term."""
+    return {_zero_multi(len(max_orders)): value if hasattr(value, "evaluator") else _expr_number(value)}
+
+
+def _expr_series_add(left: ExprSeries, right: ExprSeries) -> ExprSeries:
+    """Add two sparse Symbolica Taylor series."""
+    out = dict(left)
+    for key, value in right.items():
+        out[key] = out[key] + value if key in out else value
+    return out
+
+
+def _expr_series_scale(series: ExprSeries, factor: float | int | Any) -> ExprSeries:
+    """Scale every coefficient of a sparse Symbolica Taylor series."""
+    factor_expr = factor if hasattr(factor, "evaluator") else _expr_number(factor)
+    return {key: value * factor_expr for key, value in series.items()}
+
+
+def _expr_series_filter_allowed(
+    series: ExprSeries,
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Return a copy with coefficients outside ``allowed_multis`` removed."""
+    return {key: value for key, value in series.items() if key in allowed_multis}
+
+
+def _expr_series_mul_allowed(
+    left: ExprSeries,
+    right: ExprSeries,
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Multiply sparse series and keep only declared ancestor support."""
+    if not left or not right or not allowed_multis:
+        return {}
+    rank = len(next(iter(allowed_multis)))
+    out: ExprSeries = {}
+    for left_key, left_value in left.items():
+        for right_key, right_value in right.items():
+            key = tuple(
+                int(left_key[index]) + int(right_key[index])
+                for index in range(rank)
+            )
+            if key not in allowed_multis:
+                continue
+            term = left_value * right_value
+            out[key] = out[key] + term if key in out else term
+    return out
+
+
+def _expr_series_log_allowed(
+    series: ExprSeries,
+    max_orders: list[int],
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Compute ``log(series)`` on sparse ancestor support."""
+    zero = _zero_multi(len(max_orders))
+    constant = series[zero]
+    out = _expr_series_constant(constant.log(), max_orders)
+    h = {
+        key: value / constant
+        for key, value in series.items()
+        if key != zero and key in allowed_multis
+    }
+    if not h:
+        return _expr_series_filter_allowed(out, allowed_multis)
+    h_power = h
+    for order in range(1, sum(max_orders) + 1):
+        sign = 1.0 if order % 2 == 1 else -1.0
+        out = _expr_series_add(out, _expr_series_scale(h_power, sign / float(order)))
+        h_power = _expr_series_mul_allowed(h_power, h, allowed_multis)
+        if not h_power:
+            break
+    return _expr_series_filter_allowed(out, allowed_multis)
+
+
+def _expr_series_exp_allowed(
+    series: ExprSeries,
+    max_orders: list[int],
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Compute ``exp(series)`` on sparse ancestor support."""
+    zero = _zero_multi(len(max_orders))
+    constant = series.get(zero, E("0"))
+    h = {
+        key: value
+        for key, value in series.items()
+        if key != zero and key in allowed_multis
+    }
+    total = _expr_series_constant(E("1"), max_orders)
+    if h:
+        h_power = h
+        factorial = 1.0
+        for order in range(1, sum(max_orders) + 1):
+            factorial *= float(order)
+            total = _expr_series_add(
+                total,
+                _expr_series_scale(h_power, 1.0 / factorial),
+            )
+            h_power = _expr_series_mul_allowed(h_power, h, allowed_multis)
+            if not h_power:
+                break
+    return _expr_series_mul_allowed(
+        _expr_series_constant(constant.exp(), max_orders),
+        _expr_series_filter_allowed(total, allowed_multis),
+        allowed_multis,
+    )
+
+
+def _binomial_integer(exponent: int, order: int) -> float:
+    """Return the generalized binomial coefficient for an integer exponent."""
+    if order <= 0:
+        return 1.0
+    numerator = 1.0
+    for step in range(int(order)):
+        numerator *= float(int(exponent) - step)
+    denominator = 1.0
+    for step in range(1, int(order) + 1):
+        denominator *= float(step)
+    return numerator / denominator
+
+
+def _expr_series_integer_power_allowed(
+    series: ExprSeries,
+    exponent: int,
+    max_orders: list[int],
+    allowed_multis: set[tuple[int, ...]],
+) -> ExprSeries:
+    """Raise a sparse series to an integer power on ancestor support."""
+    zero = _zero_multi(len(max_orders))
+    constant = series[zero]
+    if exponent == 0:
+        return _expr_series_filter_allowed(
+            _expr_series_constant(E("1"), max_orders),
+            allowed_multis,
+        )
+    if exponent > 0:
+        out = _expr_series_filter_allowed(
+            _expr_series_constant(E("1"), max_orders),
+            allowed_multis,
+        )
+        base = _expr_series_filter_allowed(series, allowed_multis)
+        remaining = int(exponent)
+        while remaining:
+            if remaining & 1:
+                out = _expr_series_mul_allowed(out, base, allowed_multis)
+            remaining >>= 1
+            if remaining:
+                base = _expr_series_mul_allowed(base, base, allowed_multis)
+        return out
+
+    h = {
+        key: value / constant
+        for key, value in series.items()
+        if key != zero and key in allowed_multis
+    }
+    total = _expr_series_filter_allowed(
+        _expr_series_constant(E("1"), max_orders),
+        allowed_multis,
+    )
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            coeff = _binomial_integer(int(exponent), order)
+            if coeff:
+                total = _expr_series_add(total, _expr_series_scale(h_power, coeff))
+            h_power = _expr_series_mul_allowed(h_power, h, allowed_multis)
+            if not h_power:
+                break
+    return _expr_series_mul_allowed(
+        _expr_series_constant(_expr_int_power(constant, int(exponent)), max_orders),
+        total,
+        allowed_multis,
+    )
+
+
+def _expr_series_pow_real_and_log_allowed(
+    series: ExprSeries,
+    power: float,
+    max_orders: list[int],
+    allowed_multis: set[tuple[int, ...]],
+) -> tuple[ExprSeries, ExprSeries]:
+    """Return ``series**power`` and ``log(series)`` on sparse support."""
+    log_series = _expr_series_log_allowed(series, max_orders, allowed_multis)
+    rounded = round(float(power))
+    if abs(float(power) - rounded) <= 1.0e-12:
+        return (
+            _expr_series_integer_power_allowed(
+                series,
+                int(rounded),
+                max_orders,
+                allowed_multis,
+            ),
+            log_series,
+        )
+    return (
+        _expr_series_exp_allowed(
+            _expr_series_scale(log_series, power),
+            max_orders,
+            allowed_multis,
+        ),
+        log_series,
+    )
+
+
+def _expr_series_coefficient(series: ExprSeries, multi_index: tuple[int, ...]) -> Any:
+    """Return one sparse Symbolica coefficient, or zero if absent."""
+    return series.get(tuple(int(value) for value in multi_index), E("0"))
 
 
 def _integer_coordinate_power(value: float, label: str) -> int:

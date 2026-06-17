@@ -1148,11 +1148,15 @@ def _prepare_sector_runtime_artifacts(
     topology.chain_rule_formula_signature_limit = request.chain_rule_formula_signature_limit
     topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
-    topology.prepare_dual_evaluators(
-        active_sectors,
-        request.dual_evaluator_mode,
-        progress=generation_progress,
+    bridge_already_prepared_dot_duals = (
+        request.command == "generate" and request.integral == "dot"
     )
+    if not bridge_already_prepared_dot_duals:
+        topology.prepare_dual_evaluators(
+            active_sectors,
+            request.dual_evaluator_mode,
+            progress=generation_progress,
+        )
     extra_dual_build_before = topology.dual_evaluator_build_seconds
     if request.subtraction_backend == "formula":
         topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
@@ -1291,7 +1295,7 @@ def main() -> int:
                     )
                 ),
             )
-        elif request.integral == "dot":
+        elif request.integral == "dot" and request.command != "generate":
             generation_progress = _generation_progress(request, logger, "FSD generation")
             bundle = get_dot_bundle(request, progress=generation_progress)
             bundle.timings.log(logger)
@@ -1308,9 +1312,15 @@ def main() -> int:
         return 2
 
     if request.command != "integrate":
+        if request.command == "generate" and request.integral == "dot" and generation_progress is None:
+            generation_progress = _generation_progress(request, logger, "FSD generation")
         topology = build_topology(request)
         if request.command == "generate":
             topology.chain_rule_metadata_only = True
+            if request.output is not None:
+                topology.streaming_evaluator_cache_dir = str(
+                    Path(request.output).expanduser().resolve() / ".stream_evaluator_cache"
+                )
         sectors = generate_sectors(request)
     try:
         validate_sector_selection(request, sectors)
