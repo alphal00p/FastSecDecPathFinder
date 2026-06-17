@@ -171,23 +171,30 @@ Before launching long cache jobs:
 Use the repository watchdog for long cache jobs:
 
 ```sh
-.venv/bin/python run_with_memory_watch.py --limit-gb 30 --poll-seconds 30 -- \
+.venv/bin/python run_with_memory_watch.py --limit-gb 500 --poll-seconds 30 -- \
   .venv/bin/python FSD.py cache --help
 ```
 
-The wrapper monitors the full child process tree RSS.  It also watches
-`./stop.order`; creating that file requests a clean stop without needing an
-external `kill`:
+The wrapper monitors the full child process tree RSS.  It has no wall-time
+timeout unless `--timeout-seconds` is explicitly supplied, so the default
+cluster workflow should let the scheduler wall time control the job.
+
+The wrapper also watches `./stop.order`.  Creating that file requests a clean
+stop without needing an external `kill`; the wrapper owns the child process
+group and will interrupt/terminate it itself:
 
 ```sh
 touch stop.order
 ```
 
+At startup the wrapper removes a stale `stop.order` file if one is present, so
+it is safe to reuse the same working directory for repeated attempts.
+
 For Slurm, also request a memory limit at the scheduler level.  Example:
 
 ```sh
-srun --cpus-per-task=1 --mem=35G --time=24:00:00 \
-  .venv/bin/python run_with_memory_watch.py --limit-gb 30 --poll-seconds 30 -- \
+srun --cpus-per-task=1 --mem=550G --time=24:00:00 \
+  .venv/bin/python run_with_memory_watch.py --limit-gb 500 --poll-seconds 30 -- \
   .venv/bin/python FSD.py cache --cache-cases self_energy_3loop --cache-verify-samples-per-sector 1
 ```
 
@@ -228,7 +235,7 @@ Direct/default projector cache:
 
 ```sh
 .venv/bin/python run_with_memory_watch.py \
-  --limit-gb 30 \
+  --limit-gb 500 \
   --poll-seconds 30 \
   --log-file cluster_cache_3l_direct.watch.log \
   -- \
@@ -247,7 +254,7 @@ Triple-box direct/default projector cache:
 
 ```sh
 .venv/bin/python run_with_memory_watch.py \
-  --limit-gb 30 \
+  --limit-gb 500 \
   --poll-seconds 30 \
   --log-file cluster_cache_3l_triple_box_direct.watch.log \
   -- \
@@ -266,7 +273,7 @@ IBP endpoint-lowering 3L cache:
 
 ```sh
 .venv/bin/python run_with_memory_watch.py \
-  --limit-gb 30 \
+  --limit-gb 500 \
   --poll-seconds 30 \
   --log-file cluster_cache_3l_ibp.watch.log \
   -- \
@@ -293,7 +300,7 @@ Notes:
 - `--cache-verify-samples-per-sector 1` keeps verification cheap while proving
   that each generated asset can be loaded and used.  Increase this only after
   the cache is complete.
-- If a job hits the 30 GiB watchdog, split by `--cache-cases` and rerun the
+- If a job hits the 500 GiB watchdog, split by `--cache-cases` and rerun the
   failing topology on a larger memory node.
 
 ## Expected Runtime Scale
