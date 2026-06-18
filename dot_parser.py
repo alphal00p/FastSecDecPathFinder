@@ -66,6 +66,7 @@ class ParsedDotGraph:
 
     path: Path
     graph_name: str
+    graph_attributes: dict[str, str]
     internal_vertices: list[str]
     vertex_ids: dict[str, int]
     internal_lines: list[DotInternalLine]
@@ -98,6 +99,28 @@ class ParsedDotGraph:
             out.append([momentum, self.vertex_ids[line.vertex]])
         return out
 
+    @property
+    def numerator(self) -> str | None:
+        """Return an optional pySecDec momentum-space numerator string.
+
+        The first DOT numerator support intentionally accepts pySecDec's own
+        momentum-dot-product syntax through a graph-level ``num`` attribute.
+        Routing inference from GammaLoop graph syntax is separate future work,
+        so numerator DOT files must also provide the corresponding propagator
+        and momentum lists consumed by ``LoopIntegralFromPropagators``.
+        """
+        text = self.graph_attributes.get("num") or self.graph_attributes.get("numerator")
+        if text is None or text.strip() in {"", "1"}:
+            return None
+        return text.strip()
+
+    def graph_attr_list(self, key: str, *, separator: str = ",") -> list[str]:
+        """Return a split graph attribute list with empty entries removed."""
+        value = self.graph_attributes.get(key)
+        if value is None:
+            return []
+        return [entry.strip() for entry in value.split(separator) if entry.strip()]
+
 
 def parse_dot_file(path: str | Path, graph_name: str | None = None) -> ParsedDotGraph:
     """Parse a GammaLoop-style DOT file into the subset needed by pySecDec."""
@@ -117,6 +140,18 @@ def parse_dot_file(path: str | Path, graph_name: str | None = None) -> ParsedDot
             raise ValueError(f"{file_path}: graph {graph_name!r} not found; available graphs: {names}")
 
     graph_label = _clean(graph.get_name()) or file_path.stem
+    graph_attributes = {
+        str(key): _clean(value) or ""
+        for key, value in graph.get_attributes().items()
+    }
+    for node in graph.get_nodes():
+        if (_clean(node.get_name()) or "").lower() == "graph":
+            graph_attributes.update(
+                {
+                    str(key): _clean(value) or ""
+                    for key, value in node.get_attributes().items()
+                }
+            )
     nodes_by_name = {
         _clean(node.get_name()) or "": node
         for node in graph.get_nodes()
@@ -187,6 +222,7 @@ def parse_dot_file(path: str | Path, graph_name: str | None = None) -> ParsedDot
     return ParsedDotGraph(
         path=file_path,
         graph_name=graph_label,
+        graph_attributes=graph_attributes,
         internal_vertices=internal_vertex_names,
         vertex_ids=vertex_ids,
         internal_lines=internal_lines,

@@ -164,6 +164,7 @@ class TopologyDefinition:
     expected_laurent_orders: list[str]
     convention_note: str
     global_prefactor_coeffs: list[complex] | None = None
+    global_prefactor_min_order: int = 0
     jit_compile_evaluators: bool = False
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
@@ -249,6 +250,7 @@ class TopologyDefinition:
     regular_taylor_dual_shape_limit: int = 256
     regular_taylor_low_signature_sector_threshold: int = 0
     direct_projector_cache_term_threshold: int = 54
+    allow_fallback_for_missing_caches: bool = True
     _regular_taylor_signature_version: int = field(default=1, init=False, repr=False)
     regular_taylor_formulas_skipped: int = field(default=0, init=False)
     regular_taylor_formulas_from_curated_cache: int = field(default=0, init=False)
@@ -7203,6 +7205,11 @@ class SectorProcessor:
         u_residual = self._u_residual_batch(sector, y_values, x, u, timing)
         phi = self._phi_batch(sector, y_values, x, f, timing)
         regular_j = sector.jacobian_eval_batch(y_values, timing).astype(np.complex128)
+        numerator_eps = sector.numerator_eps_eval_batch(
+            y_values,
+            self.topology.coefficient_count,
+            timing,
+        )
         monomial_pref, monomial_log = self._regular_monomial_base_log_batch(sector, y_values)
         # The monomial powers have already been extracted, so the integrable
         # endpoint structure lives outside g_s.  Here we build only the regular
@@ -7221,13 +7228,19 @@ class SectorProcessor:
         )
         regular_order_count = self.topology.coefficient_count
         coeffs = np.empty((y_values.shape[0], regular_order_count), dtype=np.complex128)
-        coeffs[:, 0] = pref
         factorial = 1.0
         power = np.ones_like(exponent_log)
+        log_terms = [np.ones_like(exponent_log)]
         for order in range(1, regular_order_count):
             factorial *= float(order)
             power = power * exponent_log
-            coeffs[:, order] = pref * power / factorial
+            log_terms.append(power / factorial)
+        for order in range(regular_order_count):
+            value = np.zeros(y_values.shape[0], dtype=np.complex128)
+            for numerator_order in range(order + 1):
+                if numerator_order < len(numerator_eps):
+                    value += numerator_eps[numerator_order] * log_terms[order - numerator_order]
+            coeffs[:, order] = pref * value
         return coeffs
 
     def _endpoint_power_data(
@@ -8644,6 +8657,93 @@ class SectorProcessor:
             for multi in _multi_indices(max_orders)
         }
 
+    def _numerator_taylor_series_batch(
+        self,
+        sector: SectorDefinition,
+        endpoint_rows: np.ndarray,
+        max_orders: list[int],
+        timing: HotPathTiming,
+        taylor_shape: list[tuple[int, ...]] | None = None,
+        taylor_index: dict[tuple[int, ...], int] | None = None,
+        requested_multis: set[tuple[int, ...]] | None = None,
+    ) -> MultiSeries:
+        """Taylor-expand the regular sector numerator.
+
+        Momentum-space numerators enter pySecDec/FSD after pySecDec has
+        parametrized them into sector-local regular polynomials.  They are not
+        part of U/F and must therefore be multiplied into the same regular
+        Taylor source as the Jacobian.
+        """
+        rows = np.asarray(endpoint_rows, dtype=float)
+        n_rows = rows.shape[0]
+        if not sector.has_nontrivial_numerator():
+            return _series_constant(1.0 + 0.0j, max_orders, n_rows)
+        if not any(max_orders):
+            return _series_constant(
+                sector.numerator_eval_batch(rows, timing),
+                max_orders,
+                n_rows,
+            )
+        requested = (
+            sorted(requested_multis, key=lambda item: (sum(item), item))
+            if requested_multis is not None
+            else _multi_indices(max_orders)
+        )
+        shape = taylor_shape if taylor_shape is not None else sector.dual_shape
+        taylor = sector.numerator_taylor_batch_for_shape(rows, shape, timing)
+        return {
+            multi: taylor[:, (taylor_index[multi] if taylor_index is not None else sector.dual_index(multi))]
+            for multi in requested
+        }
+
+    def _numerator_taylor_eps_series_batch(
+        self,
+        sector: SectorDefinition,
+        endpoint_rows: np.ndarray,
+        max_orders: list[int],
+        timing: HotPathTiming,
+        taylor_shape: list[tuple[int, ...]] | None = None,
+        taylor_index: dict[tuple[int, ...], int] | None = None,
+        requested_multis: set[tuple[int, ...]] | None = None,
+    ) -> list[MultiSeries]:
+        """Taylor-expand all regular numerator epsilon coefficients."""
+        rows = np.asarray(endpoint_rows, dtype=float)
+        n_rows = rows.shape[0]
+        count = self.topology.coefficient_count
+        if not any(max_orders):
+            return [
+                _series_constant(values, max_orders, n_rows)
+                for values in sector.numerator_eps_eval_batch(rows, count, timing)
+            ]
+        requested = (
+            sorted(requested_multis, key=lambda item: (sum(item), item))
+            if requested_multis is not None
+            else _multi_indices(max_orders)
+        )
+        shape = taylor_shape if taylor_shape is not None else sector.dual_shape
+        taylor_by_order = sector.numerator_taylor_eps_batch_for_shape(
+            rows,
+            shape,
+            count,
+            timing,
+        )
+        out: list[MultiSeries] = []
+        for taylor in taylor_by_order:
+            out.append(
+                {
+                    multi: taylor[
+                        :,
+                        (
+                            taylor_index[multi]
+                            if taylor_index is not None
+                            else sector.dual_index(multi)
+                        ),
+                    ]
+                    for multi in requested
+                }
+            )
+        return out
+
     def _jacobian_taylor_series_prec_row(
         self,
         sector: SectorDefinition,
@@ -8658,6 +8758,65 @@ class SectorProcessor:
             multi: taylor[sector.dual_index(multi)]
             for multi in _multi_indices(max_orders)
         }
+
+    def _numerator_taylor_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        endpoint_row: np.ndarray,
+        max_orders: list[int],
+        precision_digits: int,
+        timing: HotPathTiming,
+    ) -> PrecSeries:
+        """Taylor-expand the regular numerator at one precise point."""
+        if not sector.has_nontrivial_numerator():
+            return _prec_series_constant(_pc_one(), max_orders)
+        if not any(max_orders):
+            value = sector.numerator_taylor_prec(endpoint_row, [], precision_digits, timing)[0]
+            return _prec_series_constant(value, max_orders)
+        taylor = sector.numerator_taylor_prec(endpoint_row, sector.dual_shape, precision_digits, timing)
+        return {
+            multi: taylor[sector.dual_index(multi)]
+            for multi in _multi_indices(max_orders)
+        }
+
+    def _numerator_taylor_eps_series_prec_row(
+        self,
+        sector: SectorDefinition,
+        endpoint_row: np.ndarray,
+        max_orders: list[int],
+        precision_digits: int,
+        timing: HotPathTiming,
+    ) -> list[PrecSeries]:
+        """Taylor-expand every numerator epsilon coefficient precisely."""
+        count = self.topology.coefficient_count
+        if not any(max_orders):
+            taylor_by_order = sector.numerator_taylor_eps_prec(
+                endpoint_row,
+                [],
+                count,
+                precision_digits,
+                timing,
+            )
+        else:
+            taylor_by_order = sector.numerator_taylor_eps_prec(
+                endpoint_row,
+                sector.dual_shape,
+                count,
+                precision_digits,
+                timing,
+            )
+        out: list[PrecSeries] = []
+        for taylor in taylor_by_order:
+            if not any(max_orders):
+                out.append(_prec_series_constant(taylor[0], max_orders))
+            else:
+                out.append(
+                    {
+                        multi: taylor[sector.dual_index(multi)]
+                        for multi in _multi_indices(max_orders)
+                    }
+                )
+        return out
 
     def _g_taylor_eps_series_formula_batch(
         self,
@@ -8946,7 +9105,7 @@ class SectorProcessor:
                 for index, multi_index in enumerate(sparse_f_source_shape)
             }
 
-        if self.subtraction_backend == "projector-formula":
+        if self.subtraction_backend == "projector-formula" and not sector.has_nontrivial_numerator():
             signature = self.topology.regular_taylor_signature(
                 sector,
                 zero_positions=tuple(sorted(int(position) for position in zero_positions)),
@@ -8984,6 +9143,15 @@ class SectorProcessor:
             jacobian_series = self._jacobian_taylor_series_batch(
                 sector, endpoint_rows, max_orders, timing
             )
+        numerator_eps_series = self._numerator_taylor_eps_series_batch(
+            sector,
+            endpoint_rows,
+            max_orders,
+            timing,
+            taylor_shape=sparse_jacobian_shape,
+            taylor_index=sparse_jacobian_index,
+            requested_multis=sparse_residual_multis,
+        )
         if self.topology.dual_evaluator_mode == "symbolic-derivatives":
             u_taylor, f_taylor = self.topology._symbolic_derivative_taylor_pair_batch(
                 sector,
@@ -9089,7 +9257,7 @@ class SectorProcessor:
                 n_rows,
                 allowed_multis,
             )
-            pref_series = _series_mul_allowed(
+            non_num_pref_series = _series_mul_allowed(
                 _series_filter_allowed(jacobian_series, allowed_multis),
                 _series_mul_allowed(
                     u_power_series,
@@ -9099,7 +9267,7 @@ class SectorProcessor:
                 allowed_multis,
             )
         else:
-            pref_series = _series_mul(
+            non_num_pref_series = _series_mul(
                 jacobian_series,
                 _series_mul(
                     _series_pow_real(u_series, self.topology.u_power_base, max_orders, n_rows),
@@ -9110,9 +9278,9 @@ class SectorProcessor:
             )
         monomial_pref, monomial_log = self._regular_monomial_base_log_batch(sector, endpoint_rows)
         if allowed_multis is not None:
-            pref_series = _series_mul_allowed(
+            non_num_pref_series = _series_mul_allowed(
                 _series_constant(monomial_pref, max_orders, n_rows),
-                pref_series,
+                non_num_pref_series,
                 allowed_multis,
             )
             log_series = _series_filter_allowed(
@@ -9132,9 +9300,9 @@ class SectorProcessor:
                 allowed_multis,
             )
         else:
-            pref_series = _series_mul(
+            non_num_pref_series = _series_mul(
                 _series_constant(monomial_pref, max_orders, n_rows),
-                pref_series,
+                non_num_pref_series,
                 max_orders,
             )
             log_series = _series_add(
@@ -9154,16 +9322,31 @@ class SectorProcessor:
                 )
 
         out: list[MultiSeries] = []
-        log_power = _series_constant(1.0 + 0.0j, max_orders, n_rows)
+        log_powers: list[MultiSeries] = [_series_constant(1.0 + 0.0j, max_orders, n_rows)]
         factorial = 1.0
-        for order in range(self.topology.coefficient_count):
-            if order > 0:
-                factorial *= float(order)
-                log_power = (
-                    _series_mul_allowed(log_power, log_series, allowed_multis)
-                    if allowed_multis is not None
-                    else _series_mul(log_power, log_series, max_orders)
+        factorials = [1.0]
+        for order in range(1, self.topology.coefficient_count):
+            factorial *= float(order)
+            factorials.append(factorial)
+            log_powers.append(
+                _series_mul_allowed(log_powers[-1], log_series, allowed_multis)
+                if allowed_multis is not None
+                else _series_mul(log_powers[-1], log_series, max_orders)
+            )
+        numerator_pref_by_order = [
+            (
+                _series_mul_allowed(
+                    non_num_pref_series,
+                    _series_filter_allowed(numerator_series, allowed_multis),
+                    allowed_multis,
                 )
+                if allowed_multis is not None
+                else _series_mul(non_num_pref_series, numerator_series, max_orders)
+            )
+            for numerator_series in numerator_eps_series
+        ]
+        zero_series: MultiSeries = {}
+        for order in range(self.topology.coefficient_count):
             final_allowed = (
                 requested_multis_by_order.get(order, set())
                 if requested_multis_by_order is not None
@@ -9172,17 +9355,28 @@ class SectorProcessor:
             if requested_multis_by_order is not None and not final_allowed:
                 out.append({})
                 continue
-            product_series = (
-                _series_mul_allowed(pref_series, log_power, final_allowed)
-                if final_allowed is not None
-                else _series_mul(pref_series, log_power, max_orders)
-            )
-            out.append(
-                _series_scale(
-                    product_series,
-                    1.0 / factorial,
+            product_series: MultiSeries = zero_series
+            for numerator_order in range(order + 1):
+                if numerator_order >= len(numerator_pref_by_order):
+                    continue
+                contribution = (
+                    _series_mul_allowed(
+                        numerator_pref_by_order[numerator_order],
+                        log_powers[order - numerator_order],
+                        final_allowed,
+                    )
+                    if final_allowed is not None
+                    else _series_mul(
+                        numerator_pref_by_order[numerator_order],
+                        log_powers[order - numerator_order],
+                        max_orders,
+                    )
                 )
-            )
+                product_series = _series_add(
+                    product_series,
+                    _series_scale(contribution, 1.0 / factorials[order - numerator_order]),
+                )
+            out.append(product_series)
         return out
 
     def _g_taylor_eps_series_prec_row(
@@ -9232,6 +9426,13 @@ class SectorProcessor:
             precision_digits,
             timing,
         )
+        numerator_eps_series = self._numerator_taylor_eps_series_prec_row(
+            sector,
+            endpoint_row,
+            max_orders,
+            precision_digits,
+            timing,
+        )
         u_taylor = self.topology.u_taylor_complex_prec(
             sector,
             endpoint_row,
@@ -9262,7 +9463,7 @@ class SectorProcessor:
             max_orders=max_orders,
             precision_digits=precision_digits,
         )
-        pref_series = _prec_series_mul(
+        non_numerator_pref = _prec_series_mul(
             jacobian_series,
             _prec_series_mul(
                 _prec_series_pow_real(
@@ -9286,11 +9487,15 @@ class SectorProcessor:
             endpoint_row,
             precision_digits,
         )
-        pref_series = _prec_series_mul(
+        non_numerator_pref = _prec_series_mul(
             _prec_series_constant(monomial_pref, max_orders),
-            pref_series,
+            non_numerator_pref,
             max_orders,
         )
+        numerator_pref_by_order = [
+            _prec_series_mul(non_numerator_pref, numerator_series, max_orders)
+            for numerator_series in numerator_eps_series
+        ]
         log_series = _prec_series_add(
             _prec_series_constant(monomial_log, max_orders),
             _prec_series_add(
@@ -9307,20 +9512,32 @@ class SectorProcessor:
             ),
         )
 
-        out: list[PrecSeries] = []
+        log_powers: list[PrecSeries] = []
         log_power = _prec_series_constant(_pc_one(), max_orders)
         factorial = Decimal(1)
         for order in range(self.topology.coefficient_count):
             if order > 0:
                 factorial *= Decimal(order)
                 log_power = _prec_series_mul(log_power, log_series, max_orders)
-            out.append(
-                _prec_series_scale(
-                    _prec_series_mul(pref_series, log_power, max_orders),
-                    Decimal(1) / factorial,
-                    precision_digits,
-                )
+            log_powers.append(
+                _prec_series_scale(log_power, Decimal(1) / factorial, precision_digits)
             )
+
+        out: list[PrecSeries] = []
+        for order in range(self.topology.coefficient_count):
+            coeff_series: PrecSeries = {}
+            for numerator_order in range(order + 1):
+                if numerator_order >= len(numerator_pref_by_order):
+                    continue
+                coeff_series = _prec_series_add(
+                    coeff_series,
+                    _prec_series_mul(
+                        numerator_pref_by_order[numerator_order],
+                        log_powers[order - numerator_order],
+                        max_orders,
+                    ),
+                )
+            out.append(coeff_series)
         return out
 
     def _g_coeffs_prec_row(
@@ -9333,6 +9550,13 @@ class SectorProcessor:
         """High-precision scalar regular-function coefficients for one point."""
         max_orders = [0 for _ in sector.singular_axes]
         jacobian_series = self._jacobian_taylor_series_prec_row(
+            sector,
+            np.asarray(y, dtype=float),
+            max_orders,
+            precision_digits,
+            timing,
+        )
+        numerator_eps_series = self._numerator_taylor_eps_series_prec_row(
             sector,
             np.asarray(y, dtype=float),
             max_orders,
@@ -9359,7 +9583,7 @@ class SectorProcessor:
             max_orders,
             precision_digits,
         )
-        pref_series = _prec_series_mul(
+        non_numerator_pref_series = _prec_series_mul(
             jacobian_series,
             _prec_series_mul(
                 _prec_series_pow_real(
@@ -9383,10 +9607,17 @@ class SectorProcessor:
             y,
             precision_digits,
         )
-        pref = _pc_mul(
+        non_numerator_pref = _pc_mul(
             monomial_pref,
-            _prec_series_coefficient(pref_series, _zero_multi(len(max_orders))),
+            _prec_series_coefficient(non_numerator_pref_series, _zero_multi(len(max_orders))),
         )
+        numerator_pref_by_order = [
+            _pc_mul(
+                non_numerator_pref,
+                _prec_series_coefficient(numerator_series, _zero_multi(len(max_orders))),
+            )
+            for numerator_series in numerator_eps_series
+        ]
         u_const = _prec_series_coefficient(u_series, _zero_multi(len(max_orders)))
         f_const = _prec_series_coefficient(f_series, _zero_multi(len(max_orders)))
         exponent_log = _pc_add(
@@ -9396,13 +9627,25 @@ class SectorProcessor:
                 _pc_scale(_pc_log(f_const, precision_digits), self.topology.eps_log_f_coeff, precision_digits),
             ),
         )
-        coeffs: list[ComplexPrecise] = [pref]
+        log_terms: list[ComplexPrecise] = []
         power = _pc_one()
         factorial = Decimal(1)
-        for order in range(1, self.topology.coefficient_count):
-            factorial *= Decimal(order)
-            power = _pc_mul(power, exponent_log)
-            coeffs.append(_pc_mul(pref, _pc_scale(power, Decimal(1) / factorial, precision_digits)))
+        for order in range(self.topology.coefficient_count):
+            if order > 0:
+                factorial *= Decimal(order)
+                power = _pc_mul(power, exponent_log)
+            log_terms.append(_pc_scale(power, Decimal(1) / factorial, precision_digits))
+        coeffs: list[ComplexPrecise] = []
+        for order in range(self.topology.coefficient_count):
+            value = _pc_zero()
+            for numerator_order in range(order + 1):
+                if numerator_order >= len(numerator_pref_by_order):
+                    continue
+                value = _pc_add(
+                    value,
+                    _pc_mul(numerator_pref_by_order[numerator_order], log_terms[order - numerator_order]),
+                )
+            coeffs.append(value)
         return coeffs
 
     def _recursive_taylor_subtraction_batch(

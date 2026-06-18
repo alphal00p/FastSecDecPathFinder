@@ -8,6 +8,7 @@ objects backed by Symbolica evaluators.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 import json
 import os
@@ -23,6 +24,7 @@ from dot_parser import ParsedDotGraph
 from generation_timing import GenerationProgress, GenerationTimings
 from integrand import TopologyDefinition
 from kinematics import KinematicsDefinition
+from numerator_reducer import reduce_dot_product_numerator
 from sectors_generator import SectorDefinition, prepare_sector_evaluators
 
 
@@ -44,6 +46,7 @@ class PySecDecRunResult:
 
     coeffs: list[complex]
     errors: list[complex]
+    orders: list[int]
     raw_series: Any
     timings: GenerationTimings
 
@@ -63,7 +66,11 @@ def require_pysecdec() -> dict[str, Any]:
             primary_decomposition,
         )
         from pySecDec.integral_interface import IntegralLibrary
-        from pySecDec.loop_integral import LoopIntegralFromGraph, loop_package
+        from pySecDec.loop_integral import (
+            LoopIntegralFromGraph,
+            LoopIntegralFromPropagators,
+            loop_package,
+        )
     except Exception as exc:  # pragma: no cover - depends on optional external package.
         raise RuntimeError(
             "DOT mode requires pySecDec. Install it in this venv with "
@@ -80,6 +87,7 @@ def require_pysecdec() -> dict[str, Any]:
         "primary_decomposition": primary_decomposition,
         "IntegralLibrary": IntegralLibrary,
         "LoopIntegralFromGraph": LoopIntegralFromGraph,
+        "LoopIntegralFromPropagators": LoopIntegralFromPropagators,
         "loop_package": loop_package,
     }
 
@@ -140,28 +148,24 @@ def _affine_epsilon(expr: Any) -> EpsilonExpansion:
     return EpsilonExpansion(base=base, eps_coeff=at_one - base)
 
 
-def _prefactor_series(expr: Any, order: int) -> list[complex]:
-    """Numerically Taylor-expand a regular pySecDec prefactor around eps=0."""
-    import mpmath as mp
+def _prefactor_series(expr: Any, max_order: int) -> tuple[int, list[complex]]:
+    """Laurent-expand a pySecDec global prefactor around ``eps=0``.
 
-    mp.mp.dps = 50
-    text = str(expr).replace("^", "**")
-
-    def evaluate(eps: Any) -> Any:
-        allowed = {
-            "__builtins__": {},
-            "eps": eps,
-            "gamma": mp.gamma,
-            "EulerGamma": mp.euler,
-            "pi": mp.pi,
-            "sqrt": mp.sqrt,
-            "exp": mp.exp,
-            "log": mp.log,
-        }
-        return eval(text, allowed, {})
-
-    coeffs = mp.taylor(evaluate, mp.mpf("0"), int(order))
-    return [complex(coeff) for coeff in coeffs]
+    Symbolica's lowercase ``gamma`` is meromorphic and its ``series`` method
+    exposes negative powers, so this handles prefactors such as ``gamma(eps)``
+    without falling back to numeric finite differences.  The returned list is
+    ordered from ``min_order`` through ``max_order``.
+    """
+    text = _symbolica_text(expr).replace("EulerGamma", "γ")
+    series = E(text).series(S("eps"), 0, int(max_order))
+    present_orders = [int(order) for order, _coeff in series]
+    min_order = min(present_orders) if present_orders else 0
+    coeffs: list[complex] = []
+    for order in range(min_order, int(max_order) + 1):
+        coeff_expr = series[order]
+        value = coeff_expr.evaluator([]).evaluate([[]])[0][0]
+        coeffs.append(complex(float(value), 0.0))
+    return min_order, coeffs
 
 
 def _mass_parameter_names(parsed: ParsedDotGraph) -> list[str]:
@@ -180,7 +184,34 @@ def _mass_parameter_names(parsed: ParsedDotGraph) -> list[str]:
 
 
 def _make_loop_integral(parsed: ParsedDotGraph, kin: KinematicsDefinition, request: IntegralRequest, modules: dict[str, Any]) -> Any:
-    """Build pySecDec's LoopIntegralFromGraph for the parsed DOT graph."""
+    """Build pySecDec's loop-integral object for the parsed DOT graph."""
+    if parsed.numerator is not None:
+        propagators = parsed.graph_attr_list("propagators", separator=";")
+        loop_momenta = parsed.graph_attr_list("loop_momenta")
+        external_momenta = parsed.graph_attr_list("external_momenta")
+        lorentz_indices = parsed.graph_attr_list("lorentz_indices")
+        if not propagators or not loop_momenta:
+            raise ValueError(
+                f"{parsed.path}: graph-level num/numerator requires pySecDec-style "
+                "graph attributes 'propagators' separated by ';' and 'loop_momenta'"
+            )
+        if len(propagators) != len(parsed.internal_lines):
+            raise ValueError(
+                f"{parsed.path}: numerator propagator routing has {len(propagators)} entries, "
+                f"but the graph has {len(parsed.internal_lines)} internal lines"
+            )
+        return modules["LoopIntegralFromPropagators"](
+            propagators,
+            loop_momenta=loop_momenta,
+            external_momenta=external_momenta,
+            Lorentz_indices=lorentz_indices,
+            numerator=parsed.numerator,
+            replacement_rules=kin.pysecdec_replacement_rules(),
+            Feynman_parameters="x",
+            regulators=["eps"],
+            dimensionality="4-2*eps",
+        )
+
     missing_masses = [name for name in _mass_parameter_names(parsed) if name not in kin.values]
     if missing_masses:
         raise ValueError(
@@ -222,16 +253,222 @@ def _identity_polynomials(li: Any, modules: dict[str, Any]) -> list[Any]:
     return out
 
 
+def _coerce_polynomial_symbols(poly: Any, target_symbols: list[str], modules: dict[str, Any]) -> Any:
+    """Return ``poly`` with exactly ``target_symbols`` when extra symbols are zero.
+
+    pySecDec momentum numerators may carry bookkeeping symbols such as ``U``
+    and ``F`` in their ``polysymbols`` even when every corresponding exponent
+    is zero.  Sector decomposition requires all polynomials in ``other`` to
+    have the same variable count, so drop those inert columns here and reject
+    genuinely non-parametric numerator dependence for this first implementation.
+    """
+    symbols = _poly_symbols(poly)
+    if symbols == target_symbols:
+        return poly
+    expolist = getattr(poly, "expolist", None)
+    coeffs = getattr(poly, "coeffs", None)
+    if expolist is None or coeffs is None:
+        raise ValueError(f"cannot coerce non-polynomial numerator {poly!r}")
+    symbol_index = {symbol: index for index, symbol in enumerate(symbols)}
+    missing = [symbol for symbol in target_symbols if symbol not in symbol_index]
+    if missing:
+        raise ValueError(f"numerator is missing Feynman parameters: {', '.join(missing)}")
+    extra = [index for index, symbol in enumerate(symbols) if symbol not in target_symbols]
+    exps = np.asarray(expolist, dtype=object)
+    if extra and np.any(exps[:, extra] != 0):
+        extra_symbols = ", ".join(symbols[index] for index in extra)
+        raise ValueError(
+            "momentum numerator depends on non-Feynman polynomial symbols "
+            f"({extra_symbols}); this FSD path currently supports numerators "
+            "that pySecDec parametrizes as regular x-polynomials"
+        )
+    keep = [symbol_index[symbol] for symbol in target_symbols]
+    return modules["Polynomial"](
+        exps[:, keep].tolist(),
+        list(coeffs),
+        polysymbols=target_symbols,
+    )
+
+
+def _expr_to_pysecdec_polynomial(expr: Any, symbols: list[str], modules: dict[str, Any]) -> Any:
+    """Convert a Symbolica x-polynomial to a pySecDec Polynomial."""
+    variables = [S(symbol) for symbol in symbols]
+    polynomial = expr.expand().to_polynomial(vars=variables)
+    expolist: list[list[int]] = []
+    coeffs: list[float] = []
+    for powers, coefficient in polynomial.coefficient_list(vars=variables):
+        coeff_text = str(coefficient)
+        try:
+            coeff_value = float(Fraction(coeff_text))
+        except Exception:
+            try:
+                coeff_value = float(coeff_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"custom numerator reducer produced nonnumeric coefficient {coefficient}"
+                ) from exc
+        try:
+            coeff_value = float(coeff_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"custom numerator reducer produced nonnumeric coefficient {coefficient}"
+            ) from exc
+        if abs(coeff_value) <= 1.0e-15:
+            continue
+        expolist.append([int(power) for power in powers])
+        coeffs.append(coeff_value)
+    if not expolist:
+        expolist = [[0 for _ in symbols]]
+        coeffs = [0.0]
+    return modules["Polynomial"](expolist, coeffs, polysymbols=symbols)
+
+
+def _epsilon_coefficients(expr: Any) -> list[Any]:
+    """Split a Symbolica expression into coefficients of ``eps``."""
+    expanded = expr.expand()
+    eps = S("eps")
+    polynomial = expanded.to_polynomial(vars=[eps])
+    degree = 0
+    entries = list(polynomial.coefficient_list(vars=[eps]))
+    for powers, _coefficient in entries:
+        degree = max(degree, int(powers[0]))
+    coeffs = [E("0") for _ in range(degree + 1)]
+    for powers, coefficient in entries:
+        coeffs[int(powers[0])] += coefficient if hasattr(coefficient, "expand") else E(str(coefficient))
+    return [coeff.expand() for coeff in coeffs]
+
+
+def _pysecdec_numerator_polynomials(
+    li: Any,
+    modules: dict[str, Any],
+    timings: GenerationTimings,
+    progress: GenerationProgress | None = None,
+) -> list[Any] | None:
+    """Convert pySecDec's preliminary numerator to epsilon coefficient polynomials."""
+    numerator = getattr(li, "numerator", None)
+    if numerator is None:
+        return None
+    text = _polynomial_to_symbolica_text(numerator).strip()
+    if text in {"", "1", "(1)"}:
+        return None
+    symbols = [str(symbol) for symbol in list(li.integration_variables)]
+    with timings.measure("pySecDec preliminary numerator conversion", progress=progress):
+        expr = _polynomial_to_expr(numerator)
+        # pySecDec's preliminary numerator may keep U and F as symbolic
+        # placeholders.  Substitute the already-built pySecDec Symanzik
+        # polynomials here, then split the result in eps so the sector
+        # processor sees the same epsilon-polynomial layout as for the
+        # FSD-owned reducer.
+        expr = expr.replace(S("U"), _polynomial_to_expr(li.U))
+        expr = expr.replace(S("F"), _polynomial_to_expr(li.F))
+        coeffs = _epsilon_coefficients(expr)
+        return [_expr_to_pysecdec_polynomial(coeff, symbols, modules) for coeff in coeffs]
+
+
+def _custom_numerator_polynomials(
+    li: Any,
+    parsed: ParsedDotGraph,
+    kin: KinematicsDefinition,
+    request: IntegralRequest,
+    modules: dict[str, Any],
+    timings: GenerationTimings,
+    progress: GenerationProgress | None = None,
+) -> list[Any] | None:
+    """Return FSD-reduced numerator epsilon-coefficient polynomials."""
+    if parsed.numerator is None or request.numerator_reducer != "symbolica":
+        return None
+    propagators = parsed.graph_attr_list("propagators", separator=";")
+    loop_momenta = parsed.graph_attr_list("loop_momenta")
+    external_momenta = parsed.graph_attr_list("external_momenta")
+    if not propagators or not loop_momenta:
+        raise ValueError(
+            f"{parsed.path}: --numerator-reducer symbolica requires graph attributes "
+            "'propagators' and 'loop_momenta'"
+        )
+    with timings.measure("FSD Symbolica numerator reduction", progress=progress):
+        reduced = reduce_dot_product_numerator(
+            numerator=parsed.numerator,
+            loop_momenta=loop_momenta,
+            external_momenta=external_momenta,
+            li=li,
+            kinematics=kin,
+        )
+    symbols = [str(symbol) for symbol in list(li.integration_variables)]
+    with timings.measure(
+        "FSD numerator Polynomial conversion",
+        f"{len(reduced.eps_coefficients)} eps coefficients, rank {reduced.highest_rank}",
+        progress=progress,
+    ):
+        return [
+            _expr_to_pysecdec_polynomial(expr, symbols, modules)
+            for expr in reduced.eps_coefficients
+        ]
+
+
+def _numerator_polynomials(
+    li: Any,
+    parsed: ParsedDotGraph,
+    kin: KinematicsDefinition,
+    request: IntegralRequest,
+    modules: dict[str, Any],
+    timings: GenerationTimings,
+    progress: GenerationProgress | None = None,
+) -> list[Any] | None:
+    """Return reduced numerator coefficient polynomials for the selected backend."""
+    if parsed.numerator is None:
+        return None
+    if request.numerator_reducer == "symbolica":
+        return _custom_numerator_polynomials(
+            li,
+            parsed,
+            kin,
+            request,
+            modules,
+            timings,
+            progress=progress,
+        )
+    if request.numerator_reducer == "pysecdec":
+        return _pysecdec_numerator_polynomials(li, modules, timings, progress=progress)
+    raise ValueError(f"unsupported numerator reducer {request.numerator_reducer!r}")
+
+
+def _sector_other_polynomials(
+    li: Any,
+    modules: dict[str, Any],
+    numerator_polynomials: list[Any] | None = None,
+) -> list[Any]:
+    """Return pySecDec ``other`` polynomials: maps, then optional numerator.
+
+    pySecDec's generated package carries momentum-space numerators as regular
+    ``other_polynomials`` after parametrization.  FSD mirrors that ordering:
+    the first entries recover the sector map ``x_i(y)`` and the optional last
+    entry is a regular numerator factor evaluated by the sector processor.
+    """
+    others = _identity_polynomials(li, modules)
+    if numerator_polynomials is not None:
+        others.extend(numerator_polynomials)
+        return others
+    numerator = getattr(li, "numerator", None)
+    if numerator is not None and _polynomial_to_symbolica_text(numerator).strip() not in {"", "1", "(1)"}:
+        symbols = [str(symbol) for symbol in list(li.integration_variables)]
+        others.append(_coerce_polynomial_symbols(numerator, symbols, modules))
+    return others
+
+
 def _decompose(
     li: Any,
     request: IntegralRequest,
     timings: GenerationTimings,
     modules: dict[str, Any],
     progress: GenerationProgress | None = None,
+    numerator_polynomials: list[Any] | None = None,
 ) -> list[Any]:
     """Run the selected pySecDec decomposition and return pySecDec sectors."""
     Sector = modules["Sector"]
-    initial = Sector([li.U, li.F], other=_identity_polynomials(li, modules))
+    initial = Sector(
+        [li.U, li.F],
+        other=_sector_other_polynomials(li, modules, numerator_polynomials),
+    )
     normaliz = request.normaliz_executable
     with timings.measure(
         "pySecDec sector decomposition",
@@ -320,7 +557,10 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
     u_powers, _u_residual = _split_cast_product(sec.cast[0], dimension)
     f_powers, _f_residual = _split_cast_product(sec.cast[1], dimension)
     jacobian_powers, jacobian_coeff = _split_one_term_monomial(sec.Jacobian, dimension)
-    map_exprs = [_polynomial_to_expr(poly) for poly in sec.other]
+    other_exprs = [_polynomial_to_expr(poly) for poly in sec.other]
+    map_exprs = other_exprs[: len(topology.x_names)]
+    numerator_eps_exprs = other_exprs[len(topology.x_names):] or [E("1")]
+    numerator_expr = numerator_eps_exprs[0]
     if len(map_exprs) != len(topology.x_names):
         raise ValueError(
             f"pySecDec sector {index}: expected {len(topology.x_names)} recovered maps, got {len(map_exprs)}"
@@ -362,6 +602,8 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
         variable_names=variable_names,
         map_exprs=map_exprs,
         regular_jacobian_expr=E(jacobian_coeff),
+        numerator_expr=numerator_expr,
+        numerator_eps_exprs=numerator_eps_exprs,
         u_monomial_powers=u_powers,
         f_monomial_powers=f_powers,
         jacobian_monomial_powers=jacobian_powers,
@@ -382,7 +624,8 @@ def build_dot_bundle(
     """Build topology and sectors for FSD from DOT via pySecDec."""
     modules = require_pysecdec()
     timings = GenerationTimings()
-    with timings.measure("pySecDec LoopIntegralFromGraph", progress=progress):
+    constructor_label = "pySecDec LoopIntegralFromPropagators" if parsed.numerator is not None else "pySecDec LoopIntegralFromGraph"
+    with timings.measure(constructor_label, progress=progress):
         li = _make_loop_integral(parsed, kin, request, modules)
     with timings.measure("U/F extraction", progress=progress):
         u_expr = _polynomial_to_expr(li.U)
@@ -420,7 +663,23 @@ def build_dot_bundle(
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
         )
-    pysecdec_sectors = _decompose(li, request, timings, modules, progress=progress)
+    numerator_polynomials = _numerator_polynomials(
+        li,
+        parsed,
+        kin,
+        request,
+        modules,
+        timings,
+        progress=progress,
+    )
+    pysecdec_sectors = _decompose(
+        li,
+        request,
+        timings,
+        modules,
+        progress=progress,
+        numerator_polynomials=numerator_polynomials,
+    )
     with timings.measure(
         "FSD SectorDefinition conversion",
         f"{len(pysecdec_sectors)} sectors",
@@ -438,15 +697,26 @@ def build_dot_bundle(
             f"{universal_depth}; examples: {', '.join(worst)}"
         )
     min_order = -universal_depth
-    if request.max_eps_order < min_order:
-        raise ValueError(
-            f"--max-eps-order must be >= eps^{min_order}; got eps^{request.max_eps_order}"
-        )
-    topology.set_laurent_range(min_order, request.max_eps_order)
-    topology.global_prefactor_coeffs = _prefactor_series(
+    prefactor_series_max_order = max(0, int(request.max_eps_order) - min_order)
+    prefactor_min_order, prefactor_coeffs = _prefactor_series(
         li.Gamma_factor,
-        topology.coefficient_count - 1,
+        prefactor_series_max_order,
     )
+    display_min_order = (
+        min_order + int(prefactor_min_order)
+        if request.prefactor_convention == "pysecdec"
+        else min_order
+    )
+    if request.max_eps_order < display_min_order:
+        raise ValueError(
+            f"--max-eps-order must be >= eps^{display_min_order}; got eps^{request.max_eps_order}"
+        )
+    topology.global_prefactor_min_order = int(prefactor_min_order)
+    topology.global_prefactor_coeffs = prefactor_coeffs
+    sector_max_order = int(request.max_eps_order)
+    if request.prefactor_convention == "pysecdec":
+        sector_max_order = int(request.max_eps_order) - int(prefactor_min_order)
+    topology.set_laurent_range(min_order, sector_max_order)
     if request.command == "generate":
         topology.chain_rule_metadata_only = True
         if request.output is not None:
@@ -526,11 +796,17 @@ def run_pysecdec_package(
     finally:
         os.chdir(cwd)
 
-    coeffs, errors = _parse_pysecdec_json_series(series)
-    return PySecDecRunResult(coeffs=coeffs, errors=errors, raw_series=series, timings=timings)
+    orders, coeffs, errors = _parse_pysecdec_json_series(series)
+    return PySecDecRunResult(
+        coeffs=coeffs,
+        errors=errors,
+        orders=orders,
+        raw_series=series,
+        timings=timings,
+    )
 
 
-def _parse_pysecdec_json_series(series_text: str) -> tuple[list[complex], list[complex]]:
+def _parse_pysecdec_json_series(series_text: str) -> tuple[list[int], list[complex], list[complex]]:
     """Parse pySecDec JSON series into coefficient/error arrays."""
     if isinstance(series_text, tuple):
         data = series_text[0]
@@ -572,12 +848,13 @@ def _parse_pysecdec_json_series(series_text: str) -> tuple[list[complex], list[c
         coeff_by_order[order] = _json_complex(central)
         err_by_order[order] = _json_complex(error)
     if not coeff_by_order:
-        return [], []
+        return [], [], []
     min_order = min(coeff_by_order)
     max_order = max(coeff_by_order)
+    orders = list(range(min_order, max_order + 1))
     coeffs = [coeff_by_order.get(order, 0.0 + 0.0j) for order in range(min_order, max_order + 1)]
     errors = [err_by_order.get(order, 0.0 + 0.0j) for order in range(min_order, max_order + 1)]
-    return coeffs, errors
+    return orders, coeffs, errors
 
 
 def _json_complex(value: Any) -> complex:

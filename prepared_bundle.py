@@ -304,6 +304,7 @@ def _topology_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[
         "expected_laurent_orders": topology.expected_laurent_orders,
         "convention_note": topology.convention_note,
         "global_prefactor_coeffs": _encode(topology.global_prefactor_coeffs or []),
+        "global_prefactor_min_order": int(getattr(topology, "global_prefactor_min_order", 0)),
         "jit_compile_evaluators": topology.jit_compile_evaluators,
         "dual_evaluator_mode": topology.dual_evaluator_mode,
         "ibp_reduce_to_log_endpoint": topology.ibp_reduce_to_log_endpoint,
@@ -393,6 +394,7 @@ def _load_topology(data: dict[str, Any], store: PreparedEvaluatorStore) -> Topol
         expected_laurent_orders=list(data["expected_laurent_orders"]),
         convention_note=str(data["convention_note"]),
         global_prefactor_coeffs=[complex(value) for value in _decode(data.get("global_prefactor_coeffs", []))],
+        global_prefactor_min_order=int(data.get("global_prefactor_min_order", 0)),
         jit_compile_evaluators=bool(data.get("jit_compile_evaluators", False)),
         dual_evaluator_mode=str(data.get("dual_evaluator_mode", "pregenerate")),
         ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
@@ -498,6 +500,8 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         "variable_names": sector.variable_names,
         "map_exprs": [_expr_text(expr) for expr in sector.map_exprs],
         "regular_jacobian_expr": _expr_text(sector.regular_jacobian_expr),
+        "numerator_expr": _expr_text(sector.numerator_expr),
+        "numerator_eps_exprs": [_expr_text(expr) for expr in sector.numerator_eps_exprs or []],
         "f_monomial_powers": sector.f_monomial_powers,
         "jacobian_monomial_powers": sector.jacobian_monomial_powers,
         "singular_axes": sector.singular_axes,
@@ -518,6 +522,19 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         if sector._jacobian_evaluator is not None
         else None
     )
+    ev["numerator"] = (
+        writer.save_evaluator(sector._numerator_evaluator, f"sector_{sector_id}_num", sector.name)
+        if sector._numerator_evaluator is not None
+        else None
+    )
+    ev["numerator_eps"] = [
+        (
+            writer.save_evaluator(evaluator, f"sector_{sector_id}_num_eps_{index}", sector.name)
+            if evaluator is not None
+            else None
+        )
+        for index, evaluator in enumerate(sector._numerator_eps_evaluators)
+    ]
     ev["map_dual"] = [
         {
             "shape": _encode(shape),
@@ -533,6 +550,32 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         for shape, evaluator in sector._jacobian_dual_evaluators_by_shape.items()
         if evaluator is not None
     ]
+    ev["numerator_dual"] = [
+        {
+            "shape": _encode(shape),
+            "path": writer.save_evaluator(evaluator, f"sector_{sector_id}_num_dual", shape),
+        }
+        for shape, evaluator in sector._numerator_dual_evaluators_by_shape.items()
+        if evaluator is not None
+    ]
+    ev["numerator_eps_dual"] = [
+        {
+            "shape": _encode(shape),
+            "paths": [
+                (
+                    writer.save_evaluator(
+                        evaluator,
+                        f"sector_{sector_id}_num_eps_dual_{index}",
+                        shape,
+                    )
+                    if evaluator is not None
+                    else None
+                )
+                for index, evaluator in enumerate(evaluators)
+            ],
+        }
+        for shape, evaluators in sector._numerator_eps_dual_evaluators_by_shape.items()
+    ]
     return data
 
 
@@ -544,6 +587,11 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
         variable_names=list(data["variable_names"]),
         map_exprs=[_expr_from_text(expr) for expr in data["map_exprs"]],
         regular_jacobian_expr=_expr_from_text(data["regular_jacobian_expr"]),
+        numerator_expr=_expr_from_text(data.get("numerator_expr", "1")),
+        numerator_eps_exprs=[
+            _expr_from_text(expr)
+            for expr in data.get("numerator_eps_exprs", [data.get("numerator_expr", "1")])
+        ],
         f_monomial_powers=[int(value) for value in data["f_monomial_powers"]],
         jacobian_monomial_powers=[int(value) for value in data["jacobian_monomial_powers"]],
         singular_axes=[int(value) for value in data["singular_axes"]],
@@ -559,6 +607,10 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
     ev = data["evaluators"]
     sector._map_evaluators = _ref_list(store, ev.get("map", []))
     sector._jacobian_evaluator = _ref(store, ev.get("jacobian"))
+    sector._numerator_evaluator = _ref(store, ev.get("numerator"))
+    sector._numerator_eps_evaluators = [
+        _ref(store, item) for item in ev.get("numerator_eps", [])
+    ]
     sector._map_dual_evaluators_by_shape = {
         tuple(_decode(item["shape"])): _ref_list(store, item["paths"])
         for item in ev.get("map_dual", [])
@@ -567,9 +619,18 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
         tuple(_decode(item["shape"])): _ref(store, item["path"])
         for item in ev.get("jacobian_dual", [])
     }
+    sector._numerator_dual_evaluators_by_shape = {
+        tuple(_decode(item["shape"])): _ref(store, item["path"])
+        for item in ev.get("numerator_dual", [])
+    }
+    sector._numerator_eps_dual_evaluators_by_shape = {
+        tuple(_decode(item["shape"])): [_ref(store, path) for path in item.get("paths", [])]
+        for item in ev.get("numerator_eps_dual", [])
+    }
     key = tuple(sector.dual_shape)
     sector._map_dual_evaluators = sector._map_dual_evaluators_by_shape.get(key, [])
     sector._jacobian_dual_evaluator = sector._jacobian_dual_evaluators_by_shape.get(key)
+    sector._numerator_dual_evaluator = sector._numerator_dual_evaluators_by_shape.get(key)
     sector._evaluators_prepared = True
     return sector
 
@@ -944,6 +1005,7 @@ def save_prepared_bundle(
             "sector_evaluator_backend": request.sector_evaluator_backend,
             "ibp_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,
             "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
+            "allow_fallback_for_missing_caches": request.allow_fallback_for_missing_caches,
             "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
             "max_eps_order": request.max_eps_order,
         },

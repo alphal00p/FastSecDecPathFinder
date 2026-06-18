@@ -125,6 +125,12 @@ def build_endpoint_projector_formula_symbolica(
         _increment_topology_counter(topology, "endpoint_projector_formulas_from_cache")
         return cached
 
+    if not bool(getattr(topology, "allow_fallback_for_missing_caches", True)):
+        raise RuntimeError(
+            "missing cached endpoint-projector formula; rerun with "
+            "--allow-fallback-for-missing-caches to generate it"
+        )
+
     ctx = _EndpointProjectorContext(
         topology,
         sector,
@@ -175,6 +181,12 @@ def build_regular_taylor_formula_symbolica(
     if cached is not None:
         _increment_topology_counter(topology, "regular_taylor_formulas_from_cache")
         return cached
+
+    if not bool(getattr(topology, "allow_fallback_for_missing_caches", True)):
+        raise RuntimeError(
+            "missing cached regular-Taylor formula; rerun with "
+            "--allow-fallback-for-missing-caches to generate it"
+        )
 
     ctx = _RegularTaylorContext(topology, sector, signature)
     use_dualized_regular = ctx.uses_residual_inputs
@@ -405,6 +417,24 @@ def _endpoint_projector_cache_path(signature: tuple[Any, ...]) -> Path:
     return _endpoint_projector_cache_dir() / f"endpoint_projector_{digest}.json"
 
 
+def _expression_cache_text(expr: Any) -> str:
+    """Return a complete parseable Symbolica expression string for caches."""
+    for method in ("format_plain", "to_canonical_string"):
+        formatter = getattr(expr, method, None)
+        if formatter is None:
+            continue
+        try:
+            text = str(formatter())
+            if "..." not in text:
+                return text
+        except Exception:
+            continue
+    text = str(expr)
+    if "..." in text:
+        raise ValueError("Symbolica abbreviated a cache expression; cannot serialize it")
+    return text
+
+
 def _cache_read_paths(path: Path) -> list[Path]:
     """Return generated and curated cache locations for one formula filename."""
     paths: list[Path] = []
@@ -608,7 +638,9 @@ def _write_endpoint_projector_formula_to_cache(formula: Any) -> None:
     data = {
         "signature_payload": _signature_payload(formula.signature),
         "input_names": list(formula.input_names),
-        "output_expressions": [str(expr) for expr in formula.output_expressions],
+        "output_expressions": [
+            _expression_cache_text(expr) for expr in formula.output_expressions
+        ],
         "laurent_orders": list(formula.laurent_orders),
         "zero_subsets": [list(subset) for subset in formula.zero_subsets],
         "taylor_orders": list(formula.taylor_orders),
@@ -843,7 +875,7 @@ def _write_regular_expression_sidecar(path: Path, expressions: list[Any]) -> str
     name = _regular_expression_sidecar_name(path)
     destination = path.parent / name
     payload = json.dumps(
-        {"output_expressions": [str(expr) for expr in expressions]},
+        {"output_expressions": [_expression_cache_text(expr) for expr in expressions]},
         separators=(",", ":"),
     ).encode("utf-8")
     fd, tmp_name = tempfile.mkstemp(

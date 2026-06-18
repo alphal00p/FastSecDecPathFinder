@@ -1,0 +1,22 @@
+digraph triangle_numerator {
+  graph [
+    label="triangle_numerator",
+    num="2*k(mu)*p1(mu)",
+    loop_momenta="k",
+    external_momenta="p0,p1",
+    lorentz_indices="mu",
+    propagators="k**2;(k+p0)**2;(k+p0-p1)**2"
+  ];
+  ext0 [style=invis];
+  ext1 [style=invis];
+  ext2 [style=invis];
+  v1; v2; v3;
+
+  ext0 -> v1 [id=0, name="p0", mom="p0"];
+  v2 -> ext1 [id=1, name="p1", mom="p1"];
+  v3 -> ext2 [id=2, name="p2", mom="p2"];
+
+  v1 -> v2 [id=3, name="e0", mass="0"];
+  v2 -> v3 [id=4, name="e1", mass="0"];
+  v3 -> v1 [id=5, name="e2", mass="0"];
+}

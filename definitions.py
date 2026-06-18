@@ -63,6 +63,7 @@ class IntegralRequest:
     sector_method: str
     normaliz_executable: str | None
     dot_engine: str
+    numerator_reducer: str
     sectors: tuple[int, ...] | None
     pysecdec_workdir: str
     pysecdec_epsrel: float
@@ -100,6 +101,7 @@ class IntegralRequest:
     subtraction_backend: str
     ibp_reduce_to_log_endpoint: bool
     direct_projector_cache_term_threshold: int
+    allow_fallback_for_missing_caches: bool
     force_regular_taylor_formulas: bool
     regular_taylor_signature_limit: int
     regular_taylor_formula_volume_limit: int
@@ -121,6 +123,9 @@ class IntegralRequest:
     output: str | None = None
     evaluator_lru_size: int = 128
     dot_global_prefactor_coeffs: tuple[complex, ...] | None = None
+    dot_global_prefactor_min_order: int = 0
+    dot_sector_laurent_min_order: int | None = None
+    dot_sector_laurent_max_order: int | None = None
     max_eps_order_explicit: bool = False
     cache_loop_counts: tuple[int, ...] = (1, 2)
     cache_cases: tuple[str, ...] | None = None

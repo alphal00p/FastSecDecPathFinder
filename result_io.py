@@ -111,7 +111,11 @@ def target_from_result_file(path: str | Path, convention: str) -> TargetDefiniti
             convention=convention,
             coefficients=coefficients,
             errors=errors,
-            metadata={"path": str(Path(path).expanduser()), "stored_source": "target"},
+            metadata={
+                "path": str(Path(path).expanduser()),
+                "stored_source": "target",
+                "orders": stored_target.get("metadata", {}).get("orders", []),
+            },
         )
 
     # A result produced with ``--dot-engine pysecdec`` has no FSD aggregate.
@@ -130,7 +134,11 @@ def target_from_result_file(path: str | Path, convention: str) -> TargetDefiniti
             convention=convention,
             coefficients=coefficients,
             errors=errors,
-            metadata={"path": str(Path(path).expanduser()), "stored_source": "pysecdec"},
+            metadata={
+                "path": str(Path(path).expanduser()),
+                "stored_source": "pysecdec",
+                "orders": stored_pysecdec.get("orders", []),
+            },
         )
 
     aggregate = data.get("aggregate_results", {})

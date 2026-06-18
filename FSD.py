@@ -350,6 +350,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help="DOT execution engine: FSD/Havana, pySecDec generated integrator, or both.",
     )
     parser.add_argument(
+        "--numerator-reducer",
+        choices=["symbolica", "pysecdec"],
+        default="symbolica",
+        help=(
+            "Reducer used to turn DOT momentum-space dot-product numerators into "
+            "Feynman-parameter numerator polynomials for the FSD path."
+        ),
+    )
+    parser.add_argument(
         "--sectors",
         nargs="+",
         type=int,
@@ -580,6 +589,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--allow-fallback-for-missing-caches",
+        action="store_true",
+        help=(
+            "Allow generation of missing universal subtraction formula cache entries "
+            "during this run. Disabled by default so generation benchmarks do not "
+            "silently include cold cache construction."
+        ),
+    )
+    parser.add_argument(
         "--direct-projector-cache-term-threshold",
         type=int,
         default=54,
@@ -803,6 +821,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         sector_method=args.sector_method,
         normaliz_executable=args.normaliz_executable,
         dot_engine=args.dot_engine,
+        numerator_reducer=args.numerator_reducer,
         sectors=tuple(args.sectors) if args.sectors is not None else None,
         pysecdec_workdir=args.pysecdec_workdir,
         pysecdec_epsrel=args.pysecdec_epsrel,
@@ -841,6 +860,9 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         sector_evaluator_backend=args.sector_evaluator_backend,
         ibp_reduce_to_log_endpoint=args.ibp_reduce_to_log_endpoint,
         direct_projector_cache_term_threshold=args.direct_projector_cache_term_threshold,
+        allow_fallback_for_missing_caches=bool(
+            args.allow_fallback_for_missing_caches or command == "cache"
+        ),
         force_regular_taylor_formulas=force_regular_taylor_formulas,
         regular_taylor_signature_limit=regular_taylor_signature_limit,
         regular_taylor_formula_volume_limit=regular_taylor_formula_volume_limit,
@@ -877,13 +899,33 @@ def deepest_laurent_order(topology) -> int:
     return -2 * loop_count
 
 
-def configure_laurent_range(request: IntegralRequest, topology, sectors) -> None:
-    """Apply the CLI Laurent range and validate sector endpoint depth."""
-    min_order = deepest_laurent_order(topology)
+def _sector_max_order_for_display(request: IntegralRequest, topology, min_order: int) -> int:
+    """Return the raw sector order needed for the requested displayed order.
+
+    In DOT pySecDec convention the global Gamma prefactor is multiplied after
+    sector integration.  If that prefactor starts at eps^p with p < 0, a final
+    coefficient through eps^M needs raw sector coefficients through eps^(M-p).
+    """
+    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+        prefactor_min_order = int(getattr(topology, "global_prefactor_min_order", 0))
+        display_min_order = int(min_order) + prefactor_min_order
+        if request.max_eps_order < display_min_order:
+            raise ValueError(
+                f"--max-eps-order must be >= eps^{display_min_order}; "
+                f"got eps^{request.max_eps_order}"
+            )
+        return int(request.max_eps_order) - prefactor_min_order
     if request.max_eps_order < min_order:
         raise ValueError(
             f"--max-eps-order must be >= eps^{min_order}; got eps^{request.max_eps_order}"
         )
+    return int(request.max_eps_order)
+
+
+def configure_laurent_range(request: IntegralRequest, topology, sectors) -> None:
+    """Apply the CLI Laurent range and validate sector endpoint depth."""
+    min_order = deepest_laurent_order(topology)
+    sector_max_order = _sector_max_order_for_display(request, topology, min_order)
     max_sector_depth = max((len(sector.singular_axes) for sector in sectors), default=0)
     if max_sector_depth > -min_order:
         worst = [
@@ -893,15 +935,29 @@ def configure_laurent_range(request: IntegralRequest, topology, sectors) -> None
             f"sector endpoint pole depth {max_sector_depth} exceeds universal "
             f"2L depth {-min_order}; examples: {', '.join(worst)}"
         )
-    topology.set_laurent_range(min_order, request.max_eps_order)
+    topology.set_laurent_range(min_order, sector_max_order)
+
+
+def _display_laurent_orders(request: IntegralRequest, topology) -> list[int]:
+    """Return the Laurent orders shown in the selected prefactor convention."""
+    if request.command == "integrate" and not request.max_eps_order_explicit:
+        display_max_order = int(topology.laurent_max_order)
+    else:
+        display_max_order = int(request.max_eps_order)
+    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+        prefactor_min_order = int(getattr(topology, "global_prefactor_min_order", 0))
+        display_min_order = int(topology.laurent_min_order) + prefactor_min_order
+        if request.command == "integrate" and not request.max_eps_order_explicit:
+            display_max_order = int(topology.laurent_max_order) + prefactor_min_order
+        return list(range(display_min_order, display_max_order + 1))
+    return list(range(int(topology.laurent_min_order), display_max_order + 1))
 
 
 def _prepared_output_count(request: IntegralRequest, topology) -> int:
     """Return how many Laurent coefficients should be shown for integrate mode."""
     if request.command != "integrate" or not request.max_eps_order_explicit:
-        return topology.coefficient_count
-    max_order = min(int(request.max_eps_order), topology.laurent_max_order)
-    return max_order - topology.laurent_min_order + 1
+        return len(_display_laurent_orders(request, topology))
+    return len(_display_laurent_orders(request, topology))
 
 
 def _trim_sequence(values: list, count: int) -> list:
@@ -981,21 +1037,65 @@ def _align_coefficients(values: list[complex], count: int) -> list[complex]:
     return list(values)
 
 
+def _align_coefficients_by_order(
+    values: list[complex],
+    source_orders: list[int] | tuple[int, ...] | None,
+    target_orders: list[int],
+) -> list[complex]:
+    """Align coefficients by their integer epsilon powers when known.
+
+    pySecDec may return a reduced Laurent range when numerator factors cancel
+    the deepest universal pole.  In that case positional alignment would shift
+    the target by one or more epsilon powers.  Order-aware alignment keeps
+    explicit zero coefficients in the missing deepest-pole rows.
+    """
+    if not source_orders:
+        return _align_coefficients(values, len(target_orders))
+    by_order = {
+        int(order): values[index]
+        for index, order in enumerate(source_orders)
+        if index < len(values)
+    }
+    return [by_order.get(int(order), 0.0 + 0.0j) for order in target_orders]
+
+
+def _align_target_to_topology(
+    target: TargetDefinition,
+    topology,
+    request: IntegralRequest,
+) -> TargetDefinition:
+    """Return a target aligned to the displayed Laurent order range."""
+    source_orders = target.metadata.get("orders")
+    target_orders = _display_laurent_orders(request, topology)
+    return TargetDefinition(
+        source=target.source,
+        convention=target.convention,
+        coefficients=_align_coefficients_by_order(
+            target.coefficients,
+            source_orders,
+            target_orders,
+        ),
+        errors=_align_coefficients_by_order(target.errors, source_orders, target_orders),
+        metadata=target.metadata,
+    )
+
+
 def _numeric_target(request: IntegralRequest, topology, args: tuple[str, ...]) -> TargetDefinition:
     """Parse numeric re/im target pairs in the selected display convention."""
     if len(args) % 2 != 0:
         raise ValueError("--target numeric form requires re/im pairs")
     pair_count = len(args) // 2
-    if pair_count > topology.coefficient_count:
+    target_count = len(_display_laurent_orders(request, topology))
+    if pair_count > target_count:
         raise ValueError(
             f"--target supplies {pair_count} coefficients but current Laurent range has "
-            f"{topology.coefficient_count}"
+            f"{target_count}"
         )
     coeffs = [
         complex(float(args[2 * index]), float(args[2 * index + 1]))
         for index in range(pair_count)
     ]
-    coeffs.extend([0.0 + 0.0j for _ in range(topology.coefficient_count - pair_count)])
+    coeffs.extend([0.0 + 0.0j for _ in range(target_count - pair_count)])
     return TargetDefinition(
         source="numeric",
         convention=request.prefactor_convention,
@@ -1063,7 +1163,7 @@ def _pysecdec_target(
         convention=request.prefactor_convention,
         coefficients=result.coeffs,
         errors=result.errors,
-        metadata={"workdir": request.pysecdec_workdir},
+        metadata={"workdir": request.pysecdec_workdir, "orders": result.orders},
     )
 
 
@@ -1113,6 +1213,7 @@ def _write_pysecdec_target_file(
         "pysecdec": {
             "coeffs": target.coefficients,
             "errors": target.errors,
+            "orders": target.metadata.get("orders", []),
             "timings": summary.get("pysecdec_timings", {}),
         },
     }
@@ -1132,24 +1233,11 @@ def resolve_target(
             token = args[0]
             if token == "pysecdec":
                 target = _pysecdec_target(request, summary, logger=logger)
-                target = TargetDefinition(
-                    source=target.source,
-                    convention=target.convention,
-                    coefficients=_align_coefficients(target.coefficients, topology.coefficient_count),
-                    errors=_align_coefficients(target.errors, topology.coefficient_count),
-                    metadata=target.metadata,
-                )
-                return target
+                return _align_target_to_topology(target, topology, request)
             candidate_path = Path(token).expanduser()
             if candidate_path.is_file() and not request.refresh_target:
                 target = target_from_result_file(candidate_path, request.prefactor_convention)
-                return TargetDefinition(
-                    source=target.source,
-                    convention=target.convention,
-                    coefficients=_align_coefficients(target.coefficients, topology.coefficient_count),
-                    errors=_align_coefficients(target.errors, topology.coefficient_count),
-                    metadata=target.metadata,
-                )
+                return _align_target_to_topology(target, topology, request)
             if not _is_numeric_token(token):
                 if request.command == "integrate":
                     raise ValueError(
@@ -1157,26 +1245,14 @@ def resolve_target(
                     )
                 _write_pysecdec_target_file(request, candidate_path, summary, logger=logger)
                 target = target_from_result_file(candidate_path, request.prefactor_convention)
-                return TargetDefinition(
-                    source=target.source,
-                    convention=target.convention,
-                    coefficients=_align_coefficients(target.coefficients, topology.coefficient_count),
-                    errors=_align_coefficients(target.errors, topology.coefficient_count),
-                    metadata=target.metadata,
-                )
+                return _align_target_to_topology(target, topology, request)
         return _numeric_target(request, topology, args)
 
     if request.integral != "dot":
         return _oneloop_target(request, topology)
     if request.dot_engine == "both":
         target = _pysecdec_target(request, summary, logger=logger)
-        return TargetDefinition(
-            source=target.source,
-            convention=target.convention,
-            coefficients=_align_coefficients(target.coefficients, topology.coefficient_count),
-            errors=_align_coefficients(target.errors, topology.coefficient_count),
-            metadata=target.metadata,
-        )
+        return _align_target_to_topology(target, topology, request)
     return None
 
 
@@ -1218,6 +1294,7 @@ def _prepare_sector_runtime_artifacts(
     topology.chain_rule_formula_signature_limit = request.chain_rule_formula_signature_limit
     topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
+    topology.allow_fallback_for_missing_caches = request.allow_fallback_for_missing_caches
     bridge_already_prepared_dot_duals = (
         request.command == "generate" and request.integral == "dot"
         and request.sector_evaluator_backend != "two-stage-explicit"
@@ -1357,21 +1434,36 @@ def main() -> int:
             prepared_min_order = topology.laurent_min_order
             prepared_max_order = topology.laurent_max_order
             if request.max_eps_order_explicit:
-                if request.max_eps_order < prepared_min_order:
+                display_min_order = (
+                    prepared_min_order
+                    + int(getattr(topology, "global_prefactor_min_order", 0))
+                    if request.prefactor_convention == "pysecdec"
+                    else prepared_min_order
+                )
+                required_sector_max_order = _sector_max_order_for_display(
+                    request,
+                    topology,
+                    prepared_min_order,
+                )
+                if request.max_eps_order < display_min_order:
                     raise ValueError(
                         "--max-eps-order is below the deepest pole prepared in "
                         f"the bundle: got eps^{request.max_eps_order}, prepared "
-                        f"starts at eps^{prepared_min_order}"
+                        f"starts at eps^{display_min_order} in the selected convention"
                     )
-                if request.max_eps_order > prepared_max_order:
+                if required_sector_max_order > prepared_max_order:
                     raise ValueError(
                         "--max-eps-order cannot exceed the prepared bundle range: "
-                        f"got eps^{request.max_eps_order}, prepared through "
-                        f"eps^{prepared_max_order}"
+                        f"got displayed eps^{request.max_eps_order}, which requires "
+                        f"raw sector eps^{required_sector_max_order}, but the bundle "
+                        f"is prepared only through eps^{prepared_max_order}"
                     )
             request = replace(
                 request,
                 dot_global_prefactor_coeffs=tuple(topology.global_prefactor_coeffs or []),
+                dot_global_prefactor_min_order=int(getattr(topology, "global_prefactor_min_order", 0)),
+                dot_sector_laurent_min_order=int(topology.laurent_min_order),
+                dot_sector_laurent_max_order=int(topology.laurent_max_order),
                 dual_evaluator_mode=topology.dual_evaluator_mode,
                 ibp_reduce_to_log_endpoint=topology.ibp_reduce_to_log_endpoint,
                 subtraction_backend=str(
@@ -1397,6 +1489,11 @@ def main() -> int:
             request = replace(
                 request,
                 dot_global_prefactor_coeffs=tuple(bundle.topology.global_prefactor_coeffs or []),
+                dot_global_prefactor_min_order=int(
+                    getattr(bundle.topology, "global_prefactor_min_order", 0)
+                ),
+                dot_sector_laurent_min_order=int(bundle.topology.laurent_min_order),
+                dot_sector_laurent_max_order=int(bundle.topology.laurent_max_order),
             )
         elif request.target_args is None:
             check_oneloop_bridge()
@@ -1540,6 +1637,7 @@ def main() -> int:
                     "pysecdec": {
                         "coeffs": pysecdec_result.coeffs if pysecdec_result else [],
                         "errors": pysecdec_result.errors if pysecdec_result else [],
+                        "orders": pysecdec_result.orders if pysecdec_result else [],
                     },
                 }
                 write_result_json(output, result_output_path(request))

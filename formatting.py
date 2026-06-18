@@ -205,6 +205,7 @@ def summary_data(
         "chain_rule_formulas_generated": getattr(
             topology, "chain_rule_formulas_generated", 0
         ),
+        "allow_fallback_for_missing_caches": request.allow_fallback_for_missing_caches,
         "regular_taylor_formulas_from_curated_cache": getattr(
             topology, "regular_taylor_formulas_from_curated_cache", 0
         ),
@@ -245,6 +246,10 @@ def summary_data(
             "F exponent": affine_expression_text(parametric.f_exponent),
             "parameter weights": parametric.parameter_weight_powers,
             "prefactor": parametric.prefactor_description,
+            "prefactor min order": int(getattr(topology, "global_prefactor_min_order", 0)),
+            "prefactor coefficients": [
+                complex(value) for value in (topology.global_prefactor_coeffs or [])
+            ],
             "convention": parametric.convention_description,
         }
 
@@ -258,6 +263,7 @@ def summary_data(
                 for j, expr in enumerate(sector.map_exprs)
             ],
             "regular_jacobian": expression_text(sector.regular_jacobian_expr),
+            "numerator": expression_text(sector.numerator_expr),
             "u_monomial": expression_text(sector.u_monomial_expr),
             "f_monomial": expression_text(sector.f_monomial_expr),
             "u_monomial_powers": sector.u_monomial_powers,
@@ -688,6 +694,7 @@ def apply_global_convention(
     sector_errors: list[complex],
     request: IntegralRequest,
     dot_global_prefactor_coeffs: list[complex] | tuple[complex, ...] | None = None,
+    dot_global_prefactor_min_order: int | None = None,
 ) -> tuple[list[complex], list[complex]]:
     """Apply gamma-scheme and stripped-convention shifts to sector coefficients."""
     def convolve_regular_factor(
@@ -711,6 +718,50 @@ def apply_global_convention(
                 errors_out[out_index] += abs(factor_coeff) * errors_in[coeff_index]
         return coeffs_out, errors_out
 
+    def convolve_laurent_factor(
+        coeffs_in: list[complex],
+        errors_in: list[complex],
+        factor_min_order: int,
+        factor_coeffs: list[complex],
+    ) -> tuple[list[complex], list[complex]]:
+        """Multiply by a Laurent prefactor and keep the displayed order window."""
+        raw_min_order = (
+            int(request.dot_sector_laurent_min_order)
+            if request.dot_sector_laurent_min_order is not None
+            else int(request.max_eps_order) - len(coeffs_in) + 1
+        )
+        raw_max_order = raw_min_order + len(coeffs_in) - 1
+        display_min_order = raw_min_order + int(factor_min_order)
+        display_max_order = int(request.max_eps_order)
+        if (
+            request.command == "integrate"
+            and not request.max_eps_order_explicit
+            and request.dot_sector_laurent_max_order is not None
+        ):
+            display_max_order = int(request.dot_sector_laurent_max_order) + int(factor_min_order)
+        display_max_order = min(display_max_order, raw_max_order + int(factor_min_order) + len(factor_coeffs) - 1)
+        if display_max_order < display_min_order:
+            return [], []
+        coeffs_out = [
+            0.0 + 0.0j
+            for _ in range(display_max_order - display_min_order + 1)
+        ]
+        errors_out = [
+            0.0 + 0.0j
+            for _ in range(display_max_order - display_min_order + 1)
+        ]
+        for coeff_index, coeff in enumerate(coeffs_in):
+            raw_order = raw_min_order + coeff_index
+            for factor_index, factor_coeff in enumerate(factor_coeffs):
+                factor_order = int(factor_min_order) + factor_index
+                out_order = raw_order + factor_order
+                if out_order < display_min_order or out_order > display_max_order:
+                    continue
+                out_index = out_order - display_min_order
+                coeffs_out[out_index] += factor_coeff * coeff
+                errors_out[out_index] += abs(factor_coeff) * errors_in[coeff_index]
+        return coeffs_out, errors_out
+
     if request.integral == "dot":
         if request.prefactor_convention == "pysecdec":
             prefactor = (
@@ -721,8 +772,21 @@ def apply_global_convention(
             if not prefactor:
                 from dot_topology import get_dot_bundle
 
-                prefactor = get_dot_bundle(request).topology.global_prefactor_coeffs or [1.0 + 0.0j]
-            return convolve_regular_factor(sector_coeffs, sector_errors, prefactor)
+                bundle_topology = get_dot_bundle(request).topology
+                prefactor = bundle_topology.global_prefactor_coeffs or [1.0 + 0.0j]
+                prefactor_min_order = int(getattr(bundle_topology, "global_prefactor_min_order", 0))
+            else:
+                prefactor_min_order = (
+                    int(dot_global_prefactor_min_order)
+                    if dot_global_prefactor_min_order is not None
+                    else int(request.dot_global_prefactor_min_order)
+                )
+            return convolve_laurent_factor(
+                sector_coeffs,
+                sector_errors,
+                prefactor_min_order,
+                prefactor,
+            )
         return sector_coeffs[:], sector_errors[:]
 
     if request.integral == "box":
@@ -783,6 +847,39 @@ def laurent_labels_for_coefficients(request: IntegralRequest, count: int) -> lis
     """Return contiguous Laurent labels ending at the requested max order."""
     min_order = request.max_eps_order - count + 1
     return [f"eps^{order}" for order in range(min_order, request.max_eps_order + 1)]
+
+
+def display_laurent_labels(
+    request: IntegralRequest,
+    raw_count: int,
+    summary: JsonDict | None = None,
+) -> list[str]:
+    """Return labels for coefficients after the selected prefactor convention."""
+    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+        raw_min_order = (
+            int(request.dot_sector_laurent_min_order)
+            if request.dot_sector_laurent_min_order is not None
+            else int(request.max_eps_order) - raw_count + 1
+        )
+        display_min_order = raw_min_order + int(request.dot_global_prefactor_min_order)
+        display_max_order = int(request.max_eps_order)
+        if (
+            request.command == "integrate"
+            and not request.max_eps_order_explicit
+            and request.dot_sector_laurent_max_order is not None
+        ):
+            display_max_order = (
+                int(request.dot_sector_laurent_max_order)
+                + int(request.dot_global_prefactor_min_order)
+            )
+        return [
+            f"eps^{order}"
+            for order in range(display_min_order, display_max_order + 1)
+        ]
+    labels = list((summary or {}).get("validation", {}).get("expected_laurent_orders", []))
+    if len(labels) == raw_count:
+        return labels
+    return laurent_labels_for_coefficients(request, raw_count)
 
 
 def format_complex(z: complex, digits: int = 8) -> str:
@@ -897,9 +994,7 @@ def make_output(
     display_coeffs, display_errors, _display_bench, factor = selected_prefactor_values(
         request, raw_coeffs, raw_errors, None
     )
-    labels = list(summary.get("validation", {}).get("expected_laurent_orders", []))
-    if len(labels) != len(raw_coeffs):
-        labels = laurent_labels_for_coefficients(request, len(raw_coeffs))
+    labels = display_laurent_labels(request, len(raw_coeffs), summary)
     benchmark_available = target is not None
     target_coeffs = target.coefficients if target is not None else [0.0 + 0.0j for _ in raw_coeffs]
     target_errors = target.errors if target is not None else [0.0 + 0.0j for _ in raw_coeffs]

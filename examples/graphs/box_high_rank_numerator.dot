@@ -1,0 +1,25 @@
+digraph box_high_rank_numerator {
+  graph [
+    label="box_high_rank_numerator",
+    num="11*(k(l0)*p1(l0))*(k(l1)*p2(l1))*(k(l2)*p3(l2))*(k(l3)*p1(l3))*(k(l4)*p2(l4))-7*(k(l5)*p3(l5))*(k(l6)*p2(l6))*(k(l7)*p1(l7))*(k(l8)*p3(l8))*(k(l9)*p1(l9))+5*(k(l10)*p1(l10))*(k(l11)*p1(l11))*(k(l12)*p2(l12))*(k(l13)*p3(l13))*(k(l14)*p3(l14))+13*(k(l15)*p2(l15))*(k(l16)*p2(l16))*(k(l17)*p3(l17))*(k(l18)*p1(l18))*(k(l19)*p3(l19))-17*(k(l20)*p3(l20))*(k(l21)*p1(l21))*(k(l22)*p2(l22))*(k(l23)*p2(l23))*(k(l24)*p1(l24))+19*(k(l25)*p1(l25))*(k(l26)*p3(l26))*(k(l27)*p1(l27))*(k(l28)*p2(l28))*(k(l29)*p3(l29))-23*(k(l30)*p2(l30))*(k(l31)*p1(l31))*(k(l32)*p3(l32))*(k(l33)*p2(l33))*(k(l34)*p2(l34))+29*(k(l35)*p3(l35))*(k(l36)*p3(l36))*(k(l37)*p2(l37))*(k(l38)*p1(l38))*(k(l39)*p1(l39))",
+    loop_momenta="k",
+    external_momenta="p1,p2,p3",
+    lorentz_indices="l0,l1,l2,l3,l4,l5,l6,l7,l8,l9,l10,l11,l12,l13,l14,l15,l16,l17,l18,l19,l20,l21,l22,l23,l24,l25,l26,l27,l28,l29,l30,l31,l32,l33,l34,l35,l36,l37,l38,l39",
+    propagators="k**2;(k+p1)**2;(k+p1+p2)**2;(k+p1+p2+p3)**2"
+  ];
+  ext1 [style=invis];
+  ext2 [style=invis];
+  ext3 [style=invis];
+  ext4 [style=invis];
+  v1; v2; v3; v4;
+
+  v1 -> ext1 [id=0, name="p1", mom="p1"];
+  v2 -> ext2 [id=1, name="p2", mom="p2"];
+  v3 -> ext3 [id=2, name="p3", mom="p3"];
+  v4 -> ext4 [id=3, name="p4", mom="p4"];
+
+  v1 -> v2 [id=4, name="e0", mass="0"];
+  v2 -> v3 [id=5, name="e1", mass="0"];
+  v3 -> v4 [id=6, name="e2", mass="0"];
+  v4 -> v1 [id=7, name="e3", mass="0"];
+}

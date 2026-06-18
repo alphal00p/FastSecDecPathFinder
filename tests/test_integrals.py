@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from FSD import (
     _align_coefficients,
+    _align_coefficients_by_order,
     build_request,
     compute_benchmark_quietly,
     configure_laurent_range,
@@ -66,7 +67,16 @@ from subtraction_formula import endpoint_projector_formula_has_curated_cache
 import integrator as integrator_module
 from integrator import integrate
 from kinematics import load_kinematics
+from kinematics import KinematicsDefinition
+from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
+from pysecdec_bridge import (
+    _make_loop_integral,
+    _prefactor_series,
+    _polynomial_to_expr,
+    _polynomial_to_symbolica_text,
+    require_pysecdec,
+)
 from result_io import print_saved_results, target_from_result_file, write_result_json
 from sectors_generator import SectorDefinition, generate_sectors
 from symbolica import E
@@ -84,6 +94,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "sector_method": "iterative",
         "normaliz_executable": None,
         "dot_engine": "fsd",
+        "numerator_reducer": "symbolica",
         "sectors": None,
         "pysecdec_workdir": ".pysecdec_build",
         "pysecdec_epsrel": 1.0e-2,
@@ -121,6 +132,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "subtraction_backend": "formula",
         "ibp_reduce_to_log_endpoint": False,
         "direct_projector_cache_term_threshold": 54,
+        "allow_fallback_for_missing_caches": True,
         "force_regular_taylor_formulas": False,
         "regular_taylor_signature_limit": 256,
         "regular_taylor_formula_volume_limit": 8192,
@@ -332,6 +344,27 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     )
     with pytest.raises(SystemExit):
         parse_args()
+
+
+def test_numerator_reducer_cli_switch_defaults_to_symbolica() -> None:
+    """DOT momentum numerators use the FSD-owned reducer unless requested otherwise."""
+    default_request = build_request(parse_args([]))
+    assert default_request.numerator_reducer == "symbolica"
+
+    pysecdec_request = build_request(parse_args(["--numerator-reducer", "pysecdec"]))
+    assert pysecdec_request.numerator_reducer == "pysecdec"
+
+
+def test_missing_formula_cache_fallback_is_explicit() -> None:
+    """Normal CLI generation is cache-only unless the fallback flag is supplied."""
+    default_request = build_request(parse_args([]))
+    assert not default_request.allow_fallback_for_missing_caches
+
+    fallback_request = build_request(parse_args(["--allow-fallback-for-missing-caches"]))
+    assert fallback_request.allow_fallback_for_missing_caches
+
+    cache_request = build_request(parse_args(["cache"]))
+    assert cache_request.allow_fallback_for_missing_caches
 
 
 def test_run_yaml_resolves_paths_and_cli_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2681,6 +2714,360 @@ def test_example_dot_parser_preserves_external_direction_and_masses() -> None:
     assert parsed.pysecdec_internal_lines()[0][0] == "mt"
 
 
+def test_dot_parser_reads_graph_level_momentum_numerator() -> None:
+    """Graph-level ``num`` attributes are preserved for pySecDec numerator mode."""
+    triangle = parse_dot_file(PROJECT_ROOT / "examples/graphs/triangle_numerator.dot")
+    box = parse_dot_file(PROJECT_ROOT / "examples/graphs/box_numerator.dot")
+
+    assert triangle.numerator == "2*k(mu)*p1(mu)"
+    assert triangle.graph_attributes["loop_momenta"] == "k"
+    assert triangle.graph_attr_list("lorentz_indices") == ["mu"]
+    assert triangle.graph_attr_list("propagators", separator=";") == [
+        "k**2",
+        "(k+p0)**2",
+        "(k+p0-p1)**2",
+    ]
+    assert box.numerator == "2*k(mu)*p3(mu)"
+    assert box.graph_attr_list("external_momenta") == ["p1", "p2", "p3"]
+
+
+def _eval_symbolica_scalar(expr: Any, names: list[str], row: list[float]) -> complex:
+    """Evaluate one Symbolica expression in tests."""
+    evaluator = expr.evaluator([S(name) for name in names])
+    value = evaluator.evaluate([row])[0][0]
+    return complex(float(value), 0.0)
+
+
+def _assert_custom_numerator_matches_pysecdec(
+    *,
+    li: Any,
+    numerator: str,
+    loop_momenta: list[str],
+    external_momenta: list[str],
+    kinematics: KinematicsDefinition,
+    x_sample: list[float],
+    eps_samples: list[float],
+) -> None:
+    """Compare the FSD reducer with pySecDec's preliminary numerator."""
+    reduced = reduce_dot_product_numerator(
+        numerator=numerator,
+        loop_momenta=loop_momenta,
+        external_momenta=external_momenta,
+        li=li,
+        kinematics=kinematics,
+    )
+    x_names = [str(symbol) for symbol in list(li.integration_variables)]
+    u_value = _eval_symbolica_scalar(_polynomial_to_expr(li.U), x_names, x_sample)
+    f_value = _eval_symbolica_scalar(_polynomial_to_expr(li.F), x_names, x_sample)
+    pysecdec_expr = E(_polynomial_to_symbolica_text(li.numerator))
+    pysecdec_names = [*x_names, "U", "F", "eps"]
+    coefficient_values = [
+        _eval_symbolica_scalar(expr, x_names, x_sample)
+        for expr in reduced.eps_coefficients
+    ]
+    for eps_value in eps_samples:
+        fsd_value = sum(
+            coefficient * (eps_value**order)
+            for order, coefficient in enumerate(coefficient_values)
+        )
+        pysecdec_value = _eval_symbolica_scalar(
+            pysecdec_expr,
+            pysecdec_names,
+            [*x_sample, u_value.real, f_value.real, eps_value],
+        )
+        assert fsd_value.real == pytest.approx(pysecdec_value.real, rel=1.0e-10, abs=1.0e-10)
+        assert fsd_value.imag == pytest.approx(pysecdec_value.imag, abs=1.0e-14)
+
+
+@pytest.mark.parametrize(
+    ("graph_name", "kinematics_name", "x_sample"),
+    [
+        pytest.param("triangle_numerator", "triangle_kinematics", [0.19, 0.31, 0.50], id="one-loop-rank-1-triangle"),
+        pytest.param("box_rank2_numerator", "box_kinematics", [0.11, 0.23, 0.29, 0.37], id="one-loop-rank-2-box"),
+    ],
+)
+def test_symbolica_numerator_reducer_matches_pysecdec_dot_examples(
+    graph_name: str,
+    kinematics_name: str,
+    x_sample: list[float],
+) -> None:
+    """The FSD reducer reproduces pySecDec preliminary numerator polynomials."""
+    modules = require_pysecdec()
+    graph = parse_dot_file(PROJECT_ROOT / f"examples/graphs/{graph_name}.dot")
+    kinematics = load_kinematics(PROJECT_ROOT / f"examples/graphs/{kinematics_name}.yaml")
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / f"examples/graphs/{graph_name}.dot"),
+        kinematics_file=str(PROJECT_ROOT / f"examples/graphs/{kinematics_name}.yaml"),
+    )
+    li = _make_loop_integral(graph, kinematics, request, modules)
+
+    _assert_custom_numerator_matches_pysecdec(
+        li=li,
+        numerator=graph.numerator or "1",
+        loop_momenta=graph.graph_attr_list("loop_momenta"),
+        external_momenta=graph.graph_attr_list("external_momenta"),
+        kinematics=kinematics,
+        x_sample=x_sample,
+        eps_samples=[0.0, 0.17, -0.23],
+    )
+
+
+def test_symbolica_numerator_reducer_matches_pysecdec_two_loop_dot_products() -> None:
+    """The custom reducer handles multiple loop momenta and external dot products."""
+    modules = require_pysecdec()
+    kinematics = KinematicsDefinition(
+        path=PROJECT_ROOT / "inline-two-loop-kinematics.yaml",
+        values={},
+        replacements=[("p1*p1", -1.0)],
+        replacement_expressions=[("p1*p1", "-1")],
+    )
+    li = modules["LoopIntegralFromPropagators"](
+        ["k1**2", "k2**2", "(k1+k2+p1)**2"],
+        loop_momenta=["k1", "k2"],
+        external_momenta=["p1"],
+        Lorentz_indices=["mu", "nu"],
+        numerator="k1(mu)*k2(mu)+2*k1(nu)*p1(nu)",
+        replacement_rules=kinematics.pysecdec_replacement_rules(),
+        Feynman_parameters="x",
+        regulators=["eps"],
+        dimensionality="4-2*eps",
+    )
+
+    _assert_custom_numerator_matches_pysecdec(
+        li=li,
+        numerator="k1(mu)*k2(mu)+2*k1(nu)*p1(nu)",
+        loop_momenta=["k1", "k2"],
+        external_momenta=["p1"],
+        kinematics=kinematics,
+        x_sample=[0.17, 0.29, 0.54],
+        eps_samples=[0.0, 0.11, -0.19],
+    )
+
+
+def test_symbolica_numerator_reducer_matches_pysecdec_odd_rank() -> None:
+    """Odd tensor rank contractions are reduced by the same generic pairing code."""
+    modules = require_pysecdec()
+    kinematics = KinematicsDefinition(
+        path=PROJECT_ROOT / "inline-rank-three-kinematics.yaml",
+        values={},
+        replacements=[("p1*p1", 0.0), ("p2*p2", 0.0), ("p1*p2", -0.5)],
+        replacement_expressions=[("p1*p1", "0"), ("p2*p2", "0"), ("p1*p2", "-1/2")],
+    )
+    numerator = "k(mu)*p1(mu)*k(nu)*p1(nu)*k(rho)*p2(rho)"
+    li = modules["LoopIntegralFromPropagators"](
+        ["k**2", "(k+p1)**2", "(k+p1+p2)**2"],
+        loop_momenta=["k"],
+        external_momenta=["p1", "p2"],
+        Lorentz_indices=["mu", "nu", "rho"],
+        numerator=numerator,
+        replacement_rules=kinematics.pysecdec_replacement_rules(),
+        Feynman_parameters="x",
+        regulators=["eps"],
+        dimensionality="4-2*eps",
+    )
+
+    _assert_custom_numerator_matches_pysecdec(
+        li=li,
+        numerator=numerator,
+        loop_momenta=["k"],
+        external_momenta=["p1", "p2"],
+        kinematics=kinematics,
+        x_sample=[0.21, 0.34, 0.45],
+        eps_samples=[0.0, 0.13, -0.07],
+    )
+
+
+def test_symbolica_numerator_parser_rejects_open_lorentz_indices() -> None:
+    """Every Lorentz index must be paired in every expanded term."""
+    with pytest.raises(ValueError, match="exactly twice"):
+        parse_dot_product_numerator(
+            "k(mu)*p1(nu)",
+            loop_momenta=["k"],
+            external_momenta=["p1"],
+            values={},
+        )
+
+
+def test_numerator_epsilon_polynomial_stability_path_matches_ordinary_path() -> None:
+    """Forced high-precision rescue keeps all numerator epsilon coefficients."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_rank2_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        prefactor_convention="sector",
+        samples_per_iter=128,
+        batch_size=64,
+    )
+    try:
+        validate_request(request)
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        mode=request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+    sector = next(candidate for candidate in sectors if candidate.singular_axes)
+    point = np.full((1, sector.integration_dim), 0.37)
+    ordinary = SectorProcessor(
+        topology,
+        stability_threshold=0.0,
+        subtraction_backend=request.subtraction_backend,
+    )
+    precise = SectorProcessor(
+        topology,
+        stability_threshold=1.0,
+        high_precision_stability_threshold=1.0,
+        high_precision_stability_precision=80,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    ordinary_coeffs, _ordinary_training, _ordinary_timing = ordinary.evaluate_batch(sector, point)
+    precise_coeffs, _precise_training, precise_timing = precise.evaluate_batch(sector, point)
+
+    assert precise_timing.high_precision_samples == 1
+    assert np.max(np.abs(ordinary_coeffs - precise_coeffs)) < 1.0e-9
+
+
+def test_pysecdec_numerator_reducer_backend_matches_symbolica_backend() -> None:
+    """The optional pySecDec reducer feeds the same eps-polynomial sector data."""
+    common = dict(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_rank2_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        prefactor_convention="sector",
+        samples_per_iter=128,
+        batch_size=64,
+    )
+    symbolica_request = make_request(**common, numerator_reducer="symbolica")
+    pysecdec_request = make_request(**common, numerator_reducer="pysecdec")
+    try:
+        validate_request(symbolica_request)
+        symbolica_topology = build_topology(symbolica_request)
+        symbolica_sectors = generate_sectors(symbolica_request)
+        validate_request(pysecdec_request)
+        pysecdec_topology = build_topology(pysecdec_request)
+        pysecdec_sectors = generate_sectors(pysecdec_request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    assert len(symbolica_sectors) == len(pysecdec_sectors)
+    point = np.full((1, symbolica_sectors[0].integration_dim), 0.37)
+    for symbolica_sector, pysecdec_sector in zip(symbolica_sectors[:4], pysecdec_sectors[:4]):
+        symbolica_values = symbolica_sector.numerator_eps_eval_batch(
+            point,
+            symbolica_topology.coefficient_count,
+        )
+        pysecdec_values = pysecdec_sector.numerator_eps_eval_batch(
+            point,
+            pysecdec_topology.coefficient_count,
+        )
+        assert len(symbolica_values) == len(pysecdec_values)
+        for left, right in zip(symbolica_values, pysecdec_values):
+            assert np.max(np.abs(left - right)) < 1.0e-12
+
+
+def test_symbolica_global_prefactor_series_handles_gamma_pole() -> None:
+    """DOT global prefactors can now be Laurent-expanded with Symbolica."""
+    min_order, coeffs = _prefactor_series("gamma(eps)", 2)
+
+    assert min_order == -1
+    assert coeffs[0] == pytest.approx(1.0)
+    assert coeffs[1] == pytest.approx(-0.5772156649015329)
+    assert coeffs[2] == pytest.approx(0.9890559953279725)
+
+
+def test_laurent_global_prefactor_convolution_extends_displayed_pole_range() -> None:
+    """A singular DOT prefactor shifts raw sector orders into displayed orders."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_high_rank_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        prefactor_convention="pysecdec",
+        max_eps_order=0,
+        dot_global_prefactor_min_order=-1,
+        dot_global_prefactor_coeffs=(1.0 + 0.0j, 10.0 + 0.0j, 100.0 + 0.0j, 1000.0 + 0.0j),
+        dot_sector_laurent_min_order=-2,
+        dot_sector_laurent_max_order=1,
+    )
+
+    coeffs, errors = apply_global_convention(
+        [2.0 + 0.0j, 3.0 + 0.0j, 5.0 + 0.0j, 7.0 + 0.0j],
+        [0.2 + 0.0j, 0.3 + 0.0j, 0.5 + 0.0j, 0.7 + 0.0j],
+        request,
+    )
+
+    assert coeffs == pytest.approx([
+        2.0 + 0.0j,
+        23.0 + 0.0j,
+        235.0 + 0.0j,
+        2357.0 + 0.0j,
+    ])
+    assert errors == pytest.approx([
+        0.2 + 0.0j,
+        2.3 + 0.0j,
+        23.5 + 0.0j,
+        235.7 + 0.0j,
+    ])
+
+
+def test_dot_gamma_prefactor_extends_raw_sector_epsilon_depth() -> None:
+    """DOT generation requests extra raw sector coefficients for Gamma poles."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_high_rank_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        prefactor_convention="pysecdec",
+        max_eps_order=0,
+        sector_method="iterative",
+        numerator_reducer="symbolica",
+    )
+
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    assert topology.global_prefactor_min_order == -1
+    assert topology.laurent_min_order == -2
+    assert topology.laurent_max_order == 1
+    assert topology.expected_laurent_orders == ["eps^-2", "eps^-1", "eps^0", "eps^1"]
+
+
+def test_output_labels_follow_displayed_prefactor_convention() -> None:
+    """Output labels describe the prefactor-convolved coefficients."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_high_rank_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        prefactor_convention="pysecdec",
+        max_eps_order=0,
+        dot_global_prefactor_min_order=-1,
+        dot_sector_laurent_min_order=-2,
+    )
+    output = make_output(
+        request=request,
+        raw_coeffs=[0.0 + 0.0j for _ in range(4)],
+        raw_errors=[0.0 + 0.0j for _ in range(4)],
+        target=None,
+        samples=0,
+        elapsed_seconds=0.0,
+        avg_eval_us_per_sample_per_worker=0.0,
+        eval_seconds=0.0,
+        python_seconds=0.0,
+        havana_seconds=0.0,
+        python_overhead_fraction=0.0,
+        summary={"validation": {"expected_laurent_orders": ["eps^-2", "eps^-1", "eps^0", "eps^1"]}},
+    )
+
+    assert output["laurent_labels"] == ["eps^-3", "eps^-2", "eps^-1", "eps^0"]
+
+
 def test_kinematics_yaml_uses_symbolica_expression_evaluation() -> None:
     """YAML values and replacements are evaluated without SymPy/SciPy."""
     kin = load_kinematics(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml")
@@ -3868,6 +4255,7 @@ def test_result_file_target_reads_pysecdec_only_output(tmp_path: Path) -> None:
             "pysecdec": {
                 "coeffs": [1.5 + 0.0j, 2.5 + 0.0j],
                 "errors": [0.05 + 0.0j, 0.06 + 0.0j],
+                "orders": [-1, 0],
             },
         },
         path,
@@ -3878,6 +4266,18 @@ def test_result_file_target_reads_pysecdec_only_output(tmp_path: Path) -> None:
     assert target.source == "file:pysecdec"
     assert target.coefficients == [1.5 + 0.0j, 2.5 + 0.0j]
     assert target.errors == [0.05 + 0.0j, 0.06 + 0.0j]
+    assert target.metadata["orders"] == [-1, 0]
+
+
+def test_pysecdec_targets_align_by_laurent_order_when_poles_cancel() -> None:
+    """Reduced pySecDec Laurent ranges must not shift comparison rows."""
+    aligned = _align_coefficients_by_order(
+        [1.5 + 0.0j, 2.5 + 0.0j],
+        [-1, 0],
+        [-2, -1, 0],
+    )
+
+    assert aligned == [0.0 + 0.0j, 1.5 + 0.0j, 2.5 + 0.0j]
 
 
 def test_show_results_bypasses_generation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

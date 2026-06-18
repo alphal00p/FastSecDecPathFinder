@@ -32,6 +32,8 @@ __pycache__/
 /examples/outputs/double_box_validation_*.json
 /examples/outputs/triangle_progress_smoke.json
 /examples/outputs/profile_*.json
+/examples/outputs/*numerator*.json
+/examples/outputs/pysecdec_*numerator*/
 /examples/outputs/*.prof
 /examples/outputs/*.pid
 /examples/outputs/*.stdout

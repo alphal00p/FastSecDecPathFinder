@@ -128,16 +128,28 @@ class SectorDefinition:
     measure_monomial_powers: list[float] | None = None
     numerator_monomial_powers: list[float] | None = None
     endpoint_taylor_orders: list[int] | None = None
+    numerator_expr: Any | None = None
+    numerator_eps_exprs: list[Any] | None = None
     strict_prepared_bundle: bool = False
     f_monomial_expr: Any = field(init=False)
     u_monomial_expr: Any = field(init=False)
     dual_shape: list[tuple[int, ...]] = field(init=False)
     _map_evaluators: list[Any] = field(default_factory=list, init=False, repr=False)
     _jacobian_evaluator: Any | None = field(default=None, init=False, repr=False)
+    _numerator_evaluator: Any | None = field(default=None, init=False, repr=False)
+    _numerator_eps_evaluators: list[Any | None] = field(default_factory=list, init=False, repr=False)
     _jacobian_dual_evaluator: Any | None = field(init=False, repr=False)
+    _numerator_dual_evaluator: Any | None = field(init=False, repr=False)
     _jacobian_dual_evaluators_by_shape: dict[tuple[tuple[int, ...], ...], Any] = field(
         default_factory=dict, init=False, repr=False
     )
+    _numerator_dual_evaluators_by_shape: dict[tuple[tuple[int, ...], ...], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _numerator_eps_dual_evaluators_by_shape: dict[
+        tuple[tuple[int, ...], ...],
+        list[Any | None],
+    ] = field(default_factory=dict, init=False, repr=False)
     _map_dual_evaluators: list[Any] = field(default_factory=list, init=False, repr=False)
     _map_dual_evaluators_by_shape: dict[tuple[tuple[int, ...], ...], list[Any]] = field(
         default_factory=dict, init=False, repr=False
@@ -148,6 +160,7 @@ class SectorDefinition:
         default_factory=list, init=False, repr=False
     )
     _jacobian_monomial: tuple[complex, list[int]] | None = field(default=None, init=False, repr=False)
+    _numerator_monomial: tuple[complex, list[int]] | None = field(default=None, init=False, repr=False)
     _monomial_taylor_plan_cache: dict[
         tuple[Any, ...], tuple[np.ndarray, np.ndarray, list[tuple[int, int, np.ndarray]]]
     ] = field(default_factory=dict, init=False, repr=False)
@@ -181,6 +194,13 @@ class SectorDefinition:
         if any(order < 0 for order in self.endpoint_taylor_orders):
             raise ValueError(f"{self.name}: endpoint_taylor_orders must be non-negative")
 
+        if self.numerator_expr is None:
+            self.numerator_expr = E("1")
+        if self.numerator_eps_exprs is None:
+            self.numerator_eps_exprs = [self.numerator_expr]
+        if not self.numerator_eps_exprs:
+            self.numerator_eps_exprs = [E("0")]
+        self.numerator_expr = self.numerator_eps_exprs[0]
         self.f_monomial_expr = _monomial_expr(self.variable_names, self.f_monomial_powers)
         self.u_monomial_expr = _monomial_expr(self.variable_names, self.u_monomial_powers)
         # The docs describe each endpoint sector by a known monomial M_s(y).
@@ -199,6 +219,24 @@ class SectorDefinition:
         self._dual_index_by_multi_index = {multi_index: i for i, multi_index in enumerate(self.dual_shape)}
         self._map_monomials = [_monomial_data(expr, self.variable_names) for expr in self.map_exprs]
         self._jacobian_monomial = _monomial_data(self.regular_jacobian_expr, self.variable_names)
+        self._numerator_monomial = _monomial_data(self.numerator_expr, self.variable_names)
+
+    def has_nontrivial_numerator(self) -> bool:
+        """Return whether this sector carries a non-unit regular numerator.
+
+        Momentum-space numerator reduction produces an epsilon polynomial
+        ``N_s(y, eps) = sum_k eps^k N_{s,k}(y)``.  Some shortcuts in the
+        scalar endpoint machinery are valid only when this full polynomial is
+        identically one, not merely when the ``eps^0`` coefficient is one.
+        """
+        exprs = self.numerator_eps_exprs or [self.numerator_expr]
+        if len(exprs) != 1:
+            return True
+        monomial = _monomial_data(exprs[0], self.variable_names)
+        if monomial is None:
+            return True
+        coefficient, powers = monomial
+        return abs(coefficient - (1.0 + 0.0j)) > 1.0e-14 or any(int(power) != 0 for power in powers)
 
     def structurally_active_map_indices(self) -> tuple[int, ...] | None:
         """Return varying Feynman-parameter indices for monomial maps.
@@ -244,7 +282,24 @@ class SectorDefinition:
         self._map_dual_evaluators = []
         self._map_dual_evaluators_by_shape = {}
         self._jacobian_dual_evaluators_by_shape = {}
+        self._numerator_dual_evaluators_by_shape = {}
+        self._numerator_eps_dual_evaluators_by_shape = {}
         self._jacobian_dual_evaluator = None
+        self._numerator_dual_evaluator = None
+        self._numerator_evaluator = None
+        self._numerator_eps_evaluators = []
+        if self.has_nontrivial_numerator():
+            self._numerator_evaluator = self.numerator_expr.evaluator(
+                params,
+                jit_compile=self.jit_compile_evaluators,
+            )
+        for expr in self.numerator_eps_exprs or [E("1")]:
+            if str(expr) == "0":
+                self._numerator_eps_evaluators.append(None)
+                continue
+            self._numerator_eps_evaluators.append(
+                expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+            )
         self._evaluators_prepared = True
         if include_dual:
             self.prepare_dual_evaluators_for_shape(self.dual_shape)
@@ -467,6 +522,254 @@ class SectorDefinition:
         row = self._dual_input_prec_row(np.asarray(y, dtype=float), self.dual_shape, precision_digits)
         return self._timed_evaluate_complex_with_prec(evaluator, row, precision_digits, timing)
 
+    def numerator_eval_batch(
+        self,
+        y_values: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate the regular numerator factor for a batch."""
+        self._ensure_evaluators()
+        rows = np.asarray(y_values, dtype=float)
+        if not self.has_nontrivial_numerator():
+            return np.ones(rows.shape[0], dtype=np.complex128)
+        zero_shape = [tuple(0 for _ in self.singular_axes)]
+        monomial_values = self._monomial_taylor_batch(
+            [self._numerator_monomial],
+            rows,
+            zero_shape,
+            dtype=np.complex128,
+        )
+        if monomial_values is not None:
+            return monomial_values[:, 0, 0]
+        if self._numerator_evaluator is None:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(f"{self.name}: missing prepared numerator evaluator")
+            self._numerator_evaluator = self.numerator_expr.evaluator(
+                _symbols(self.variable_names),
+                jit_compile=self.jit_compile_evaluators,
+            )
+        values = self._timed_evaluate(self._numerator_evaluator, rows, timing)
+        return np.asarray(values, dtype=np.complex128)[:, 0]
+
+    def numerator_eps_eval_batch(
+        self,
+        y_values: np.ndarray,
+        count: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[np.ndarray]:
+        """Evaluate the regular numerator epsilon-polynomial coefficients."""
+        self._ensure_evaluators()
+        rows = np.asarray(y_values, dtype=float)
+        out: list[np.ndarray] = []
+        for order in range(count):
+            if order >= len(self._numerator_eps_evaluators):
+                out.append(np.zeros(rows.shape[0], dtype=np.complex128))
+                continue
+            evaluator = self._numerator_eps_evaluators[order]
+            if evaluator is None:
+                out.append(np.zeros(rows.shape[0], dtype=np.complex128))
+                continue
+            values = self._timed_evaluate(evaluator, rows, timing)
+            out.append(np.asarray(values, dtype=np.complex128)[:, 0])
+        return out
+
+    def numerator_taylor_batch_for_shape(
+        self,
+        y_values: np.ndarray,
+        dual_shape: list[tuple[int, ...]],
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate regular-numerator Taylor coefficients for an explicit shape."""
+        self._ensure_evaluators()
+        rows_in = np.asarray(y_values, dtype=float)
+        width = len(dual_shape) if dual_shape else 1
+        if not self.has_nontrivial_numerator():
+            out = np.zeros((rows_in.shape[0], width), dtype=np.complex128)
+            out[:, 0] = 1.0 + 0.0j
+            return out
+        if not dual_shape:
+            return self.numerator_eval_batch(rows_in, timing)[:, np.newaxis]
+        monomial_values = self._monomial_taylor_batch(
+            [self._numerator_monomial],
+            rows_in,
+            dual_shape,
+            dtype=np.complex128,
+        )
+        if monomial_values is not None:
+            return monomial_values[:, 0, :]
+        evaluator = self.prepare_numerator_dual_evaluator(dual_shape)
+        if evaluator is None:
+            return self.numerator_eval_batch(rows_in, timing)[:, np.newaxis]
+        rows = self._dual_input_matrix(rows_in, dual_shape)
+        values = self._timed_evaluate(evaluator, rows, timing)
+        return np.asarray(values, dtype=np.complex128)
+
+    def numerator_taylor_eps_batch_for_shape(
+        self,
+        y_values: np.ndarray,
+        dual_shape: list[tuple[int, ...]],
+        count: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[np.ndarray]:
+        """Evaluate numerator Taylor coefficients for each epsilon order."""
+        self._ensure_evaluators()
+        rows_in = np.asarray(y_values, dtype=float)
+        width = len(dual_shape) if dual_shape else 1
+        if not dual_shape:
+            return [
+                values[:, np.newaxis]
+                for values in self.numerator_eps_eval_batch(rows_in, count, timing)
+            ]
+        key = tuple(dual_shape)
+        evaluators = self._numerator_eps_dual_evaluators_by_shape.get(key)
+        if evaluators is None:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(
+                    f"{self.name}: missing prepared numerator epsilon dual evaluators for shape {key}"
+                )
+            params = _symbols(self.variable_names)
+            evaluators = []
+            for expr in self.numerator_eps_exprs or [E("1")]:
+                if str(expr) == "0":
+                    evaluators.append(None)
+                    continue
+                evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+                evaluator.dualize([list(mi) for mi in dual_shape])
+                evaluators.append(evaluator)
+            self._numerator_eps_dual_evaluators_by_shape[key] = evaluators
+        rows = self._dual_input_matrix(rows_in, dual_shape)
+        out: list[np.ndarray] = []
+        for order in range(count):
+            if order >= len(evaluators) or evaluators[order] is None:
+                out.append(np.zeros((rows_in.shape[0], width), dtype=np.complex128))
+                continue
+            values = self._timed_evaluate(evaluators[order], rows, timing)
+            out.append(np.asarray(values, dtype=np.complex128))
+        return out
+
+    def numerator_taylor_prec(
+        self,
+        y: np.ndarray,
+        dual_shape: list[tuple[int, ...]],
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[tuple[Any, Any]]:
+        """Evaluate one numerator Taylor row with complex multiprecision."""
+        self._ensure_evaluators()
+        width = len(dual_shape) if dual_shape else 1
+        zero = (_decimal_real(0.0, precision_digits), _decimal_real(0.0, precision_digits))
+        if not self.has_nontrivial_numerator():
+            return [(_decimal_real(1.0, precision_digits), _decimal_real(0.0, precision_digits))] + [
+                zero for _ in range(max(0, width - 1))
+            ]
+        if not dual_shape:
+            if self._numerator_evaluator is None:
+                if self.strict_prepared_bundle:
+                    raise RuntimeError(f"{self.name}: missing prepared numerator evaluator")
+                self._numerator_evaluator = self.numerator_expr.evaluator(
+                    _symbols(self.variable_names),
+                    jit_compile=self.jit_compile_evaluators,
+                )
+            row = [_decimal_complex(value, precision_digits) for value in np.asarray(y, dtype=float)]
+            return self._timed_evaluate_complex_with_prec(
+                self._numerator_evaluator,
+                row,
+                precision_digits,
+                timing,
+            )
+        monomial_values = self._monomial_taylor_prec(
+            [self._numerator_monomial],
+            np.asarray(y, dtype=float),
+            dual_shape,
+            precision_digits,
+        )
+        if monomial_values is not None:
+            return monomial_values[0]
+        evaluator = self.prepare_numerator_dual_evaluator(dual_shape)
+        if evaluator is None:
+            return [(_decimal_real(1.0, precision_digits), _decimal_real(0.0, precision_digits))]
+        row = self._dual_input_prec_row(np.asarray(y, dtype=float), dual_shape, precision_digits)
+        return self._timed_evaluate_complex_with_prec(evaluator, row, precision_digits, timing)
+
+    def numerator_taylor_eps_prec(
+        self,
+        y: np.ndarray,
+        dual_shape: list[tuple[int, ...]],
+        count: int,
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[list[tuple[Any, Any]]]:
+        """Evaluate numerator Taylor coefficients for every epsilon order.
+
+        This is the high-precision counterpart of
+        ``numerator_taylor_eps_batch_for_shape``.  It is used only by endpoint
+        stability rescue, so clarity and strict prepared-bundle checks matter
+        more than vectorized throughput here.
+        """
+        self._ensure_evaluators()
+        width = len(dual_shape) if dual_shape else 1
+        zero = (_decimal_real(0.0, precision_digits), _decimal_real(0.0, precision_digits))
+        one = (_decimal_real(1.0, precision_digits), _decimal_real(0.0, precision_digits))
+        if not self.has_nontrivial_numerator():
+            out = [[one] + [zero for _ in range(max(0, width - 1))]]
+            out.extend([[zero for _ in range(width)] for _ in range(max(0, count - 1))])
+            return out[:count]
+
+        if not dual_shape:
+            row = [_decimal_complex(value, precision_digits) for value in np.asarray(y, dtype=float)]
+            out: list[list[tuple[Any, Any]]] = []
+            for order in range(count):
+                if order >= len(self._numerator_eps_evaluators):
+                    out.append([zero])
+                    continue
+                evaluator = self._numerator_eps_evaluators[order]
+                if evaluator is None:
+                    out.append([zero])
+                    continue
+                out.append(
+                    self._timed_evaluate_complex_with_prec(
+                        evaluator,
+                        row,
+                        precision_digits,
+                        timing,
+                    )
+                )
+            return out
+
+        key = tuple(dual_shape)
+        evaluators = self._numerator_eps_dual_evaluators_by_shape.get(key)
+        if evaluators is None:
+            if self.strict_prepared_bundle:
+                raise RuntimeError(
+                    f"{self.name}: missing prepared numerator epsilon dual evaluators for shape {key}"
+                )
+            params = _symbols(self.variable_names)
+            evaluators = []
+            for expr in self.numerator_eps_exprs or [E("1")]:
+                if str(expr) == "0":
+                    evaluators.append(None)
+                    continue
+                evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+                evaluator.dualize([list(mi) for mi in dual_shape])
+                evaluators.append(evaluator)
+            self._numerator_eps_dual_evaluators_by_shape[key] = evaluators
+
+        row = self._dual_input_prec_row(np.asarray(y, dtype=float), dual_shape, precision_digits)
+        out = []
+        for order in range(count):
+            if order >= len(evaluators) or evaluators[order] is None:
+                out.append([zero for _ in range(width)])
+                continue
+            out.append(
+                self._timed_evaluate_complex_with_prec(
+                    evaluators[order],
+                    row,
+                    precision_digits,
+                    timing,
+                )
+            )
+        return out
+
     def f_monomial_value(self, y: list[float] | tuple[float, ...]) -> float:
         """Evaluate the declared F monomial at one point."""
         value = 1.0
@@ -590,11 +893,42 @@ class SectorDefinition:
         self._jacobian_dual_evaluators_by_shape[key] = evaluator
         return evaluator
 
+    def prepare_numerator_dual_evaluator(self, dual_shape: list[tuple[int, ...]]) -> Any | None:
+        """Build or return a dualized regular-numerator evaluator."""
+        if not dual_shape or not self.has_nontrivial_numerator():
+            return None
+        self._ensure_evaluators()
+        key = tuple(dual_shape)
+        if key == tuple(self.dual_shape) and self._numerator_dual_evaluator is not None:
+            return self._numerator_dual_evaluator
+        existing = self._numerator_dual_evaluators_by_shape.get(key)
+        if existing is not None:
+            return existing
+        if self.strict_prepared_bundle:
+            raise RuntimeError(f"{self.name}: missing prepared numerator dual evaluator for shape {key}")
+        params = _symbols(self.variable_names)
+        evaluator = self.numerator_expr.evaluator(
+            params,
+            jit_compile=self.jit_compile_evaluators,
+        )
+        evaluator.dualize([list(mi) for mi in dual_shape])
+        if key == tuple(self.dual_shape):
+            self._numerator_dual_evaluator = evaluator
+        self._numerator_dual_evaluators_by_shape[key] = evaluator
+        return evaluator
+
     def prepare_dual_evaluators_for_shape(self, dual_shape: list[tuple[int, ...]]) -> None:
         """Pregenerate all sector-local dual callbacks for one shape."""
         if not dual_shape:
             return
         self.prepare_jacobian_dual_evaluator(dual_shape)
+        self.prepare_numerator_dual_evaluator(dual_shape)
+        self.numerator_taylor_eps_batch_for_shape(
+            np.zeros((1, self.integration_dim), dtype=float),
+            dual_shape,
+            len(self.numerator_eps_exprs or [E("1")]),
+            None,
+        )
         self.prepare_map_dual_evaluators(dual_shape)
 
     def map_dual_eval_batch_for_shape(

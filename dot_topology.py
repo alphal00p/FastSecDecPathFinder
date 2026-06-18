@@ -191,6 +191,8 @@ def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
         request.graph_name,
         request.sector_method,
         request.normaliz_executable,
+        request.prefactor_convention,
+        request.numerator_reducer,
         request.jit_compile_evaluators,
         request.dual_evaluator_mode,
         request.max_eps_order,
