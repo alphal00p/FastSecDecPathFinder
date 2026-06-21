@@ -29,6 +29,15 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit-gb", type=float, required=True)
     parser.add_argument(
+        "--attach-pid",
+        type=int,
+        default=None,
+        help=(
+            "Monitor an already-running process tree rooted at this PID instead "
+            "of launching a new command."
+        ),
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=None,
@@ -73,8 +82,10 @@ def _parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
-    if not args.command:
+    if args.attach_pid is None and not args.command:
         parser.error("missing command after --")
+    if args.attach_pid is not None and args.command:
+        parser.error("--attach-pid cannot be combined with a command")
     return args
 
 
@@ -112,6 +123,50 @@ def _terminate_process_group(
         _signal_process_tree(live_after_term or target_pids, signal.SIGKILL, log_handle)
 
 
+def _terminate_attached_process_tree(
+    root_pid: int,
+    log_handle,
+    reason: str,
+    interrupt_grace_seconds: float,
+    kill_grace_seconds: float,
+) -> None:
+    """Interrupt, then terminate, an attached process tree."""
+    target_pids = _target_process_tree_pids(root_pid)
+    _log(log_handle, f"{reason}; interrupting attached process tree pids={target_pids}")
+    _signal_process_tree(target_pids, signal.SIGINT, log_handle, include_process_groups=False)
+    interrupt_deadline = time.monotonic() + max(float(interrupt_grace_seconds), 0.0)
+    while _live_pids(target_pids) and time.monotonic() < interrupt_deadline:
+        time.sleep(0.5)
+    if not _live_pids(target_pids):
+        _log(log_handle, "attached process tree exited after SIGINT")
+        return
+
+    live_after_interrupt = _live_pids(target_pids)
+    _log(
+        log_handle,
+        f"attached process tree still alive; sending SIGTERM pids={live_after_interrupt}",
+    )
+    _signal_process_tree(
+        live_after_interrupt or target_pids,
+        signal.SIGTERM,
+        log_handle,
+        include_process_groups=False,
+    )
+    time.sleep(max(float(kill_grace_seconds), 0.0))
+    live_after_term = _live_pids(target_pids)
+    if live_after_term:
+        _log(
+            log_handle,
+            f"attached process tree still alive; sending SIGKILL pids={live_after_term}",
+        )
+        _signal_process_tree(
+            live_after_term or target_pids,
+            signal.SIGKILL,
+            log_handle,
+            include_process_groups=False,
+        )
+
+
 def _target_process_tree_pids(root_pid: int) -> list[int]:
     """Return known live process ids in the watched tree."""
     _rss_kb, pids = _tree_rss_kb(root_pid)
@@ -140,23 +195,30 @@ def _live_pids(pids: list[int]) -> list[int]:
     return [pid for pid in sorted(set(pids)) if _pid_is_live(pid)]
 
 
-def _signal_process_tree(pids: list[int], sig: signal.Signals, log_handle) -> None:
+def _signal_process_tree(
+    pids: list[int],
+    sig: signal.Signals,
+    log_handle,
+    *,
+    include_process_groups: bool = True,
+) -> None:
     pgids: set[int] = set()
     live = _live_pids(pids)
-    for pid in live:
-        try:
-            pgids.add(os.getpgid(pid))
-        except ProcessLookupError:
-            continue
-        except PermissionError as exc:
-            _log(log_handle, f"could not read process group for pid={pid}: {exc}")
-    for pgid in sorted(pgids):
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            continue
-        except PermissionError as exc:
-            _log(log_handle, f"could not send {sig.name} to process group {pgid}: {exc}")
+    if include_process_groups:
+        for pid in live:
+            try:
+                pgids.add(os.getpgid(pid))
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                _log(log_handle, f"could not read process group for pid={pid}: {exc}")
+        for pgid in sorted(pgids):
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                _log(log_handle, f"could not send {sig.name} to process group {pgid}: {exc}")
     for pid in live:
         try:
             os.kill(pid, sig)
@@ -285,23 +347,32 @@ def main() -> int:
     if stop_file.exists():
         stop_file.unlink()
         _log(log_handle, f"removed stale stop file {stop_file}")
-    proc = subprocess.Popen(args.command, start_new_session=True)
+    proc: subprocess.Popen[bytes] | None
+    if args.attach_pid is None:
+        proc = subprocess.Popen(args.command, start_new_session=True)
+        root_pid = int(proc.pid)
+    else:
+        proc = None
+        root_pid = int(args.attach_pid)
     start_time = time.monotonic()
     if args.pid_file:
-        args.pid_file.write_text(f"{proc.pid}\n")
+        args.pid_file.write_text(f"{root_pid}\n")
     timeout_text = (
         f" timeout={args.timeout_seconds:g}s"
         if args.timeout_seconds is not None
         else ""
     )
-    _log(log_handle, f"started pid={proc.pid} limit={args.limit_gb:g} GiB{timeout_text}")
+    if proc is None:
+        _log(log_handle, f"attached pid={root_pid} limit={args.limit_gb:g} GiB{timeout_text}")
+    else:
+        _log(log_handle, f"started pid={root_pid} limit={args.limit_gb:g} GiB{timeout_text}")
     _log(log_handle, f"watching stop file {stop_file}")
 
     try:
         while True:
-            rc = proc.poll()
+            rc = proc.poll() if proc is not None else (None if _pid_is_live(root_pid) else 0)
             elapsed = time.monotonic() - start_time
-            rss_kb, pids = _tree_rss_kb(proc.pid)
+            rss_kb, pids = _tree_rss_kb(root_pid)
             if rss_kb is None:
                 rss_text = "rss=unavailable"
             else:
@@ -313,35 +384,62 @@ def main() -> int:
                 args.watchdog_status,
             )
             if rss_kb is not None and rss_kb > limit_kb:
-                _terminate_process_group(
-                    proc,
-                    log_handle,
-                    "RSS limit exceeded",
-                    args.interrupt_grace_seconds,
-                    args.kill_grace_seconds,
-                )
+                if proc is None:
+                    _terminate_attached_process_tree(
+                        root_pid,
+                        log_handle,
+                        "RSS limit exceeded",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
+                else:
+                    _terminate_process_group(
+                        proc,
+                        log_handle,
+                        "RSS limit exceeded",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
                 return 137
             if args.timeout_seconds is not None and elapsed > float(args.timeout_seconds):
-                _terminate_process_group(
-                    proc,
-                    log_handle,
-                    "timeout exceeded",
-                    args.interrupt_grace_seconds,
-                    args.kill_grace_seconds,
-                )
+                if proc is None:
+                    _terminate_attached_process_tree(
+                        root_pid,
+                        log_handle,
+                        "timeout exceeded",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
+                else:
+                    _terminate_process_group(
+                        proc,
+                        log_handle,
+                        "timeout exceeded",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
                 return 124
             if stop_file.exists():
                 try:
                     stop_file.unlink()
                 except FileNotFoundError:
                     pass
-                _terminate_process_group(
-                    proc,
-                    log_handle,
-                    f"stop file observed at {stop_file}",
-                    args.interrupt_grace_seconds,
-                    args.kill_grace_seconds,
-                )
+                if proc is None:
+                    _terminate_attached_process_tree(
+                        root_pid,
+                        log_handle,
+                        f"stop file observed at {stop_file}",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
+                else:
+                    _terminate_process_group(
+                        proc,
+                        log_handle,
+                        f"stop file observed at {stop_file}",
+                        args.interrupt_grace_seconds,
+                        args.kill_grace_seconds,
+                    )
                 return 130
             if rc is not None:
                 _log(log_handle, f"finished returncode={rc}")
