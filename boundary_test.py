@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime, timezone
 import itertools
 import json
@@ -12,6 +12,7 @@ import multiprocessing as mp
 from pathlib import Path
 import time
 from typing import Any
+from types import SimpleNamespace
 
 from colorama import Fore, Style
 import numpy as np
@@ -48,6 +49,7 @@ class EndpointTestResult:
     boundary_growth_power_tolerance: float | None
     boundary_stability_failed_pair_count: int
     max_boundary_growth_power: float | None
+    max_boundary_growth_threshold_ratio: float | None
     worst_boundary_stability_pair: dict[str, Any]
     boundary_stability_failures: list[dict[str, Any]]
     max_abs_by_order: list[float | None]
@@ -76,6 +78,7 @@ class EndpointTestResult:
             "boundary_growth_power_tolerance": self.boundary_growth_power_tolerance,
             "boundary_stability_failed_pair_count": self.boundary_stability_failed_pair_count,
             "max_boundary_growth_power": self.max_boundary_growth_power,
+            "max_boundary_growth_threshold_ratio": self.max_boundary_growth_threshold_ratio,
             "worst_boundary_stability_pair": self.worst_boundary_stability_pair,
             "boundary_stability_failures": self.boundary_stability_failures,
             "max_abs_by_order": self.max_abs_by_order,
@@ -97,6 +100,24 @@ class EndpointChunkResult:
     training: np.ndarray
     elapsed_seconds: float
     profile: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EndpointProbeSet:
+    """All deterministic endpoint probes for one sector."""
+
+    rows: np.ndarray
+    labels: list[str]
+    row_distances: list[float | None]
+    row_kinds: list[str]
+
+
+@dataclass(frozen=True)
+class EndpointRunResult:
+    """Endpoint scan results plus whether the scan was stopped by the user."""
+
+    results: list[EndpointTestResult]
+    interrupted: bool = False
 
 
 _PARENT_TOPOLOGY: Any | None = None
@@ -127,6 +148,25 @@ def _make_processor(topology: Any, request: IntegralRequest) -> Any:
     """Create the real sector processor lazily so pure probe tests stay light."""
     from integrator import _make_sector_processor
 
+    # Endpoint test mode deliberately places samples directly at the requested
+    # distances from sector boundaries.  Those points are cancellation-heavy:
+    # using ordinary double precision at the larger test distances can create
+    # false power-growth failures even when the subtracted formula is regular.
+    # Promote all requested boundary distances by default so this command tests
+    # the subtraction algebra rather than double-precision cancellation.
+    if request.command == "test" and request.test_boundary_distances:
+        distances = [float(distance) for distance in request.test_boundary_distances]
+        stability_threshold = max(float(request.stability_threshold), max(distances))
+        high_precision_threshold = max(
+            float(request.high_precision_stability_threshold),
+            min(distances),
+        )
+        high_precision_threshold = min(high_precision_threshold, stability_threshold)
+        request = replace(
+            request,
+            stability_threshold=stability_threshold,
+            high_precision_stability_threshold=high_precision_threshold,
+        )
     return _make_sector_processor(topology, request)
 
 
@@ -165,15 +205,59 @@ def _corner_label(values: tuple[float, ...], low: float) -> str:
     return "".join("0" if value == low else "1" for value in values)
 
 
+def _endpoint_pattern_label(
+    dim: int,
+    assignments: dict[int, str],
+    distance: float,
+) -> str:
+    """Return ``corner_<pattern>_<distance>`` with x for bulk coordinates."""
+    pattern = "".join(assignments.get(axis, "x") for axis in range(int(dim)))
+    return f"corner_{pattern}_{float(distance):.1e}"
+
+
+def _append_endpoint_subset_probe(
+    rows: list[np.ndarray],
+    labels: list[str],
+    distances: list[float | None],
+    kinds: list[str],
+    seen: set[tuple[float, ...]],
+    *,
+    base: np.ndarray,
+    axes: tuple[int, ...],
+    endpoint_bits: tuple[str, ...],
+    distance: float,
+    kind: str,
+) -> None:
+    """Append one endpoint-subset probe using 0/1/x label notation."""
+    point = base.copy()
+    assignments: dict[int, str] = {}
+    for axis, bit in zip(axes, endpoint_bits, strict=True):
+        assignments[int(axis)] = str(bit)
+        point[int(axis)] = float(distance) if bit == "0" else 1.0 - float(distance)
+    _append_probe(
+        rows,
+        labels,
+        distances,
+        kinds,
+        seen,
+        _endpoint_pattern_label(len(base), assignments, float(distance)),
+        point,
+        float(distance),
+        kind,
+    )
+
+
 def endpoint_probe_points(
     sector: Any,
     distances: tuple[float, ...],
+    max_simultaneous_endpoint_approaches: int | None = None,
 ) -> tuple[np.ndarray, list[str], list[float | None], list[str]]:
     """Return deterministic endpoint probe rows for one sector.
 
-    The core endpoint combination is every low/high hypercube corner for each
-    requested distance.  Single-axis faces and grouped singular-axis faces are
-    included as cheaper diagnostics for boundary subsets.
+    If ``max_simultaneous_endpoint_approaches`` is supplied, all endpoint
+    subsets up to that size are generated.  Otherwise the historical coverage
+    is used: single-axis faces, grouped singular-axis faces, and full
+    low/high hypercube corners.
     """
 
     dim = int(sector.integration_dim)
@@ -197,73 +281,156 @@ def endpoint_probe_points(
     singular_axes = [int(axis) for axis in sector.singular_axes]
     for distance in distances:
         delta = float(distance)
+        if max_simultaneous_endpoint_approaches is not None:
+            max_count = min(int(max_simultaneous_endpoint_approaches), dim)
+            for size in range(1, max_count + 1):
+                kind = "axis_face" if size == 1 else "endpoint_subset"
+                if size == dim:
+                    kind = "hypercube_corner"
+                for axes in itertools.combinations(range(dim), size):
+                    for endpoint_bits in itertools.product(("0", "1"), repeat=size):
+                        _append_endpoint_subset_probe(
+                            rows,
+                            labels,
+                            row_distances,
+                            row_kinds,
+                            seen,
+                            base=base,
+                            axes=tuple(int(axis) for axis in axes),
+                            endpoint_bits=tuple(str(bit) for bit in endpoint_bits),
+                            distance=delta,
+                            kind=kind,
+                        )
+            continue
         for axis in range(dim):
-            low = base.copy()
-            low[axis] = delta
-            _append_probe(
+            _append_endpoint_subset_probe(
                 rows,
                 labels,
                 row_distances,
                 row_kinds,
                 seen,
-                f"axis_{axis}_low_{delta:.1e}",
-                low,
-                delta,
-                "axis_face",
+                base=base,
+                axes=(axis,),
+                endpoint_bits=("0",),
+                distance=delta,
+                kind="axis_face",
             )
-            high = base.copy()
-            high[axis] = 1.0 - delta
-            _append_probe(
+            _append_endpoint_subset_probe(
                 rows,
                 labels,
                 row_distances,
                 row_kinds,
                 seen,
-                f"axis_{axis}_high_{delta:.1e}",
-                high,
-                delta,
-                "axis_face",
+                base=base,
+                axes=(axis,),
+                endpoint_bits=("1",),
+                distance=delta,
+                kind="axis_face",
             )
         if singular_axes:
-            low = base.copy()
-            low[singular_axes] = delta
-            _append_probe(
+            _append_endpoint_subset_probe(
                 rows,
                 labels,
                 row_distances,
                 row_kinds,
                 seen,
-                f"singular_axes_low_{delta:.1e}",
-                low,
-                delta,
-                "singular_axis_face",
+                base=base,
+                axes=tuple(singular_axes),
+                endpoint_bits=tuple("0" for _axis in singular_axes),
+                distance=delta,
+                kind="singular_axis_face",
             )
-            high = base.copy()
-            high[singular_axes] = 1.0 - delta
-            _append_probe(
+            _append_endpoint_subset_probe(
                 rows,
                 labels,
                 row_distances,
                 row_kinds,
                 seen,
-                f"singular_axes_high_{delta:.1e}",
-                high,
-                delta,
-                "singular_axis_face",
+                base=base,
+                axes=tuple(singular_axes),
+                endpoint_bits=tuple("1" for _axis in singular_axes),
+                distance=delta,
+                kind="singular_axis_face",
             )
-        for values in itertools.product((delta, 1.0 - delta), repeat=dim):
-            _append_probe(
+        for endpoint_bits in itertools.product(("0", "1"), repeat=dim):
+            _append_endpoint_subset_probe(
                 rows,
                 labels,
                 row_distances,
                 row_kinds,
                 seen,
-                f"corner_{_corner_label(values, delta)}_{delta:.1e}",
-                np.asarray(values, dtype=float),
-                delta,
-                "hypercube_corner",
+                base=base,
+                axes=tuple(range(dim)),
+                endpoint_bits=tuple(str(bit) for bit in endpoint_bits),
+                distance=delta,
+                kind="hypercube_corner",
             )
     return np.vstack(rows), labels, row_distances, row_kinds
+
+
+def _probe_set(
+    sector: Any,
+    distances: tuple[float, ...],
+    max_simultaneous_endpoint_approaches: int | None = None,
+) -> EndpointProbeSet:
+    """Return endpoint probes bundled with their labels and grouping metadata."""
+    rows, labels, row_distances, row_kinds = endpoint_probe_points(
+        sector,
+        distances,
+        max_simultaneous_endpoint_approaches=max_simultaneous_endpoint_approaches,
+    )
+    return EndpointProbeSet(
+        rows=rows,
+        labels=labels,
+        row_distances=row_distances,
+        row_kinds=row_kinds,
+    )
+
+
+def _fixed_text(value: object, width: int) -> str:
+    """Return a fixed-width single-line field for non-jiggly progress output."""
+    text = " ".join(str(value).split())
+    if len(text) > width:
+        text = text[: max(width - 1, 0)] + "…"
+    return text.ljust(width)
+
+
+def _sector_shape_text(sector: Any, width: int = 46) -> str:
+    """Compact sector-shape descriptor for endpoint scan progress."""
+    variable_names = list(getattr(sector, "variable_names", []))
+    axis_names = [
+        variable_names[int(axis)] if int(axis) < len(variable_names) else f"y{int(axis)}"
+        for axis in getattr(sector, "singular_axes", [])
+    ]
+    f_monomial_powers = list(getattr(sector, "f_monomial_powers", []))
+    f_powers = ",".join(str(int(power)) for power in f_monomial_powers) or "-"
+    text = (
+        f"{sector.name} dim={sector.integration_dim} "
+        f"sing={len(sector.singular_axes)}[{','.join(axis_names)}] F=({f_powers})"
+    )
+    return _fixed_text(text, width)
+
+
+def _endpoint_shape_text(label: str, width: int = 32) -> str:
+    """Compact endpoint-probe descriptor for endpoint scan progress."""
+    return _fixed_text(label, width)
+
+
+def _endpoint_test_total(
+    sectors: list[Any],
+    selected_ids: list[int],
+    distances: tuple[float, ...],
+    max_simultaneous_endpoint_approaches: int | None = None,
+) -> int:
+    """Return the number of probe rows that will be evaluated."""
+    return sum(
+        _probe_set(
+            sectors[sector_id],
+            distances,
+            max_simultaneous_endpoint_approaches=max_simultaneous_endpoint_approaches,
+        ).rows.shape[0]
+        for sector_id in selected_ids
+    )
 
 
 def _finite_max(values: np.ndarray) -> float | None:
@@ -427,11 +594,11 @@ def _boundary_stability_summary(
     training: np.ndarray,
     growth_power_tolerance: float | None,
     failure_limit: int = 8,
-) -> tuple[bool, int, float | None, dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[bool, int, float | None, float | None, dict[str, Any], list[dict[str, Any]]]:
     """Compare matched endpoint probes at consecutive boundary distances."""
 
     if growth_power_tolerance is None:
-        return True, 0, None, {}, []
+        return True, 0, None, None, {}, []
 
     by_family: dict[str, dict[float, int]] = {}
     for index, (label, distance) in enumerate(zip(labels, row_distances, strict=True)):
@@ -446,6 +613,7 @@ def _boundary_stability_summary(
     distance_pairs = list(zip(unique_distances, unique_distances[1:], strict=False))
     worst: dict[str, Any] = {}
     worst_growth_power: float | None = None
+    worst_growth_threshold_ratio: float | None = None
     failures: list[dict[str, Any]] = []
     failed_count = 0
 
@@ -486,18 +654,25 @@ def _boundary_stability_summary(
                 if value is not None
             ]
             relative_change = max(finite_changes) if len(finite_changes) == 2 else None
-            finite_growth_powers = [
-                value
-                for value in (laurent_growth_power, training_growth_power)
-                if value is not None
-            ]
-            growth_power = max(finite_growth_powers) if len(finite_growth_powers) == 2 else None
+            # The endpoint subtraction test is about the Laurent integrand
+            # returned to the accumulator.  The training observable is an
+            # adaptive-sampling diagnostic and can grow or cross through small
+            # values without indicating an unsubtracted endpoint pole.
+            growth_power = laurent_growth_power
             endpoint_distance_coordinate_count = _endpoint_distance_count(
                 rows[right_index],
                 smaller_distance,
             )
             growth_power_threshold = (
                 float(growth_power_tolerance) * endpoint_distance_coordinate_count
+            )
+            growth_power_failure_threshold = (
+                growth_power_threshold + _GROWTH_POWER_NUMERICAL_FLOOR
+            )
+            growth_power_threshold_ratio = (
+                None
+                if growth_power is None or growth_power_failure_threshold <= 0.0
+                else float(growth_power) / growth_power_failure_threshold
             )
             entry = {
                 "probe_family": family,
@@ -508,9 +683,8 @@ def _boundary_stability_summary(
                 "zero_coordinate_count": int(endpoint_distance_coordinate_count),
                 "growth_power_threshold": growth_power_threshold,
                 "growth_power_numerical_floor": _GROWTH_POWER_NUMERICAL_FLOOR,
-                "growth_power_failure_threshold": (
-                    growth_power_threshold + _GROWTH_POWER_NUMERICAL_FLOOR
-                ),
+                "growth_power_failure_threshold": growth_power_failure_threshold,
+                "growth_power_threshold_ratio": growth_power_threshold_ratio,
                 "growth_power": growth_power,
                 "laurent_growth_power": laurent_growth_power,
                 "training_growth_power": training_growth_power,
@@ -528,9 +702,17 @@ def _boundary_stability_summary(
                 if worst_growth_power is None or growth_power > worst_growth_power:
                     worst_growth_power = float(growth_power)
                     worst = dict(entry)
+                if (
+                    growth_power_threshold_ratio is not None
+                    and (
+                        worst_growth_threshold_ratio is None
+                        or growth_power_threshold_ratio > worst_growth_threshold_ratio
+                    )
+                ):
+                    worst_growth_threshold_ratio = float(growth_power_threshold_ratio)
                 failed = (
                     growth_power
-                    > growth_power_threshold + _GROWTH_POWER_NUMERICAL_FLOOR
+                    > growth_power_failure_threshold
                 )
             if failed:
                 failed_count += 1
@@ -539,7 +721,14 @@ def _boundary_stability_summary(
 
     if worst_growth_power is None and failures:
         worst = dict(failures[0])
-    return failed_count == 0, failed_count, worst_growth_power, worst, failures
+    return (
+        failed_count == 0,
+        failed_count,
+        worst_growth_power,
+        worst_growth_threshold_ratio,
+        worst,
+        failures,
+    )
 
 
 def _profile_dict(timing: Any) -> dict[str, Any]:
@@ -614,6 +803,7 @@ def _result_from_arrays(
         boundary_stability_ok,
         boundary_stability_failed_pair_count,
         max_boundary_growth_power,
+        max_boundary_growth_threshold_ratio,
         worst_boundary_stability_pair,
         boundary_stability_failures,
     ) = _boundary_stability_summary(
@@ -643,6 +833,7 @@ def _result_from_arrays(
         boundary_growth_power_tolerance=boundary_growth_power_tolerance,
         boundary_stability_failed_pair_count=boundary_stability_failed_pair_count,
         max_boundary_growth_power=max_boundary_growth_power,
+        max_boundary_growth_threshold_ratio=max_boundary_growth_threshold_ratio,
         worst_boundary_stability_pair=worst_boundary_stability_pair,
         boundary_stability_failures=boundary_stability_failures,
         max_abs_by_order=max_abs_by_order,
@@ -667,8 +858,13 @@ def _evaluate_sector(
     sector: Any,
     distances: tuple[float, ...],
     boundary_growth_power_tolerance: float | None,
+    max_simultaneous_endpoint_approaches: int | None = None,
 ) -> EndpointTestResult:
-    rows, labels, row_distances, row_kinds = endpoint_probe_points(sector, distances)
+    rows, labels, row_distances, row_kinds = endpoint_probe_points(
+        sector,
+        distances,
+        max_simultaneous_endpoint_approaches=max_simultaneous_endpoint_approaches,
+    )
     start = time.perf_counter()
     coeffs, training, timing = processor.evaluate_batch(sector, rows)
     elapsed = time.perf_counter() - start
@@ -687,6 +883,63 @@ def _evaluate_sector(
     )
 
 
+def _evaluate_sector_incremental(
+    processor: Any,
+    sector_id: int,
+    sector: Any,
+    distances: tuple[float, ...],
+    boundary_growth_power_tolerance: float | None,
+    max_simultaneous_endpoint_approaches: int | None,
+    progress: Any | None,
+    progress_state: dict[str, int],
+    total_tests: int,
+    run_start: float,
+) -> EndpointTestResult:
+    """Evaluate one sector one endpoint probe at a time for live progress."""
+    probe_set = _probe_set(
+        sector,
+        distances,
+        max_simultaneous_endpoint_approaches=max_simultaneous_endpoint_approaches,
+    )
+    coeff_chunks: list[np.ndarray] = []
+    training_chunks: list[np.ndarray] = []
+    profiles: list[dict[str, Any]] = []
+    sector_start = time.perf_counter()
+    sector_shape = _sector_shape_text(sector)
+    for row_index, label in enumerate(probe_set.labels):
+        row = probe_set.rows[row_index : row_index + 1]
+        coeffs, training, timing = processor.evaluate_batch(sector, row)
+        coeff_chunks.append(coeffs)
+        training_chunks.append(training)
+        profiles.append(_profile_dict(timing))
+        progress_state["done"] += 1
+        _update_progress(
+            progress,
+            progress_state["done"],
+            total_tests,
+            progress_state["passed"],
+            progress_state["failed"],
+            sector_shape,
+            _endpoint_shape_text(label),
+            run_start,
+        )
+    elapsed = time.perf_counter() - sector_start
+    result = _result_from_arrays(
+        sector_id,
+        sector,
+        probe_set.rows,
+        probe_set.labels,
+        probe_set.row_distances,
+        probe_set.row_kinds,
+        np.vstack(coeff_chunks),
+        np.concatenate(training_chunks),
+        elapsed,
+        _combine_profiles(profiles),
+        boundary_growth_power_tolerance,
+    )
+    return result
+
+
 def _init_worker() -> None:
     global _WORKER_PROCESSOR, _WORKER_SECTORS
     if _PARENT_TOPOLOGY is None or _PARENT_SECTORS is None or _PARENT_REQUEST is None:
@@ -695,8 +948,10 @@ def _init_worker() -> None:
     _WORKER_PROCESSOR = _make_processor(_PARENT_TOPOLOGY, _PARENT_REQUEST)
 
 
-def _worker_evaluate(task: tuple[int, tuple[float, ...], float | None]) -> EndpointTestResult:
-    sector_id, distances, boundary_growth_power_tolerance = task
+def _worker_evaluate(
+    task: tuple[int, tuple[float, ...], float | None, int | None],
+) -> EndpointTestResult:
+    sector_id, distances, boundary_growth_power_tolerance, max_approaches = task
     if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
         _init_worker()
     assert _WORKER_PROCESSOR is not None
@@ -707,6 +962,7 @@ def _worker_evaluate(task: tuple[int, tuple[float, ...], float | None]) -> Endpo
         _WORKER_SECTORS[sector_id],
         distances,
         boundary_growth_power_tolerance,
+        max_approaches,
     )
 
 
@@ -735,16 +991,20 @@ def _make_progress_bar(request: IntegralRequest, total: int) -> Any | None:
         return None
     live_widget = progressbar.FormatCustomText(
         (
+            f"{_color('test', Fore.MAGENTA)}:%(test)s "
+            f"{_color('sector', Fore.CYAN)}:%(sector_shape)s "
+            f"{_color('endpoint', Fore.CYAN)}:%(endpoint_shape)s "
             f"{_color('pass', Fore.GREEN)}:%(passed)s "
             f"{_color('fail', Fore.RED)}:%(failed)s "
-            f"{_color('current', Fore.CYAN)}:%(current)s "
             f"{_color('t', Fore.BLUE)}:%(elapsed)s "
             f"{_color('eta', Fore.BLUE)}:%(eta)s"
         ),
         {
+            "test": "0/0",
+            "sector_shape": _fixed_text("n/a", 46),
+            "endpoint_shape": _fixed_text("n/a", 32),
             "passed": "0",
             "failed": "0",
-            "current": "n/a",
             "elapsed": "00:00:00",
             "eta": "n/a",
         },
@@ -769,7 +1029,8 @@ def _update_progress(
     total: int,
     passed: int,
     failed: int,
-    current: str,
+    sector_shape: str,
+    endpoint_shape: str,
     start: float,
 ) -> None:
     if bar is None:
@@ -780,9 +1041,11 @@ def _update_progress(
         eta_seconds = elapsed * (total - done) / done
         eta = _format_duration(eta_seconds)
     bar.fsd_live_widget.update_mapping(
+        test=f"{done}/{total}",
+        sector_shape=_fixed_text(sector_shape, 46),
+        endpoint_shape=_fixed_text(endpoint_shape, 32),
         passed=str(passed),
         failed=str(failed),
-        current=current,
         elapsed=_format_duration(elapsed),
         eta=eta,
     )
@@ -802,6 +1065,11 @@ def _selected_sector_ids(request: IntegralRequest, sectors: list[Any]) -> list[i
     return [int(sector_id) for sector_id in request.sectors]
 
 
+def _max_simultaneous_endpoint_approaches(request: IntegralRequest) -> int | None:
+    """Return the optional endpoint-approach cap for test mode."""
+    return getattr(request, "test_boundary_max_simultaneous_endpoint_approaches", None)
+
+
 def _run_serial(
     request: IntegralRequest,
     topology: Any,
@@ -809,28 +1077,162 @@ def _run_serial(
     selected_ids: list[int],
     progress: Any | None,
     start: float,
-) -> list[EndpointTestResult]:
+) -> EndpointRunResult:
     processor = _make_processor(topology, request)
     results: list[EndpointTestResult] = []
     passed = 0
     failed = 0
     distances = tuple(float(value) for value in request.test_boundary_distances)
+    max_approaches = _max_simultaneous_endpoint_approaches(request)
     boundary_growth_power_tolerance = request.test_boundary_growth_power_tolerance
-    _update_progress(progress, 0, len(selected_ids), passed, failed, "starting", start)
-    for done, sector_id in enumerate(selected_ids, start=1):
-        result = _evaluate_sector(
-            processor,
-            sector_id,
-            sectors[sector_id],
-            distances,
-            boundary_growth_power_tolerance,
+    total_tests = _endpoint_test_total(
+        sectors,
+        selected_ids,
+        distances,
+        max_simultaneous_endpoint_approaches=max_approaches,
+    )
+    progress_state = {"done": 0, "passed": 0, "failed": 0}
+    _update_progress(
+        progress,
+        0,
+        total_tests,
+        passed,
+        failed,
+        "starting",
+        "n/a",
+        start,
+    )
+    try:
+        for sector_id in selected_ids:
+            if progress is None:
+                result = _evaluate_sector(
+                    processor,
+                    sector_id,
+                    sectors[sector_id],
+                    distances,
+                    boundary_growth_power_tolerance,
+                    max_approaches,
+                )
+                progress_state["done"] += int(result.probe_count)
+            else:
+                result = _evaluate_sector_incremental(
+                    processor,
+                    sector_id,
+                    sectors[sector_id],
+                    distances,
+                    boundary_growth_power_tolerance,
+                    max_approaches,
+                    progress,
+                    progress_state,
+                    total_tests,
+                    start,
+                )
+            results.append(result)
+            if result.status == "ok":
+                passed += 1
+            else:
+                failed += 1
+            progress_state["passed"] = passed
+            progress_state["failed"] = failed
+            _update_progress(
+                progress,
+                progress_state["done"],
+                total_tests,
+                passed,
+                failed,
+                _sector_shape_text(sectors[sector_id]),
+                "sector done",
+                start,
+            )
+    except KeyboardInterrupt:
+        _update_progress(
+            progress,
+            progress_state["done"],
+            total_tests,
+            passed,
+            failed,
+            "interrupted",
+            "interrupted",
+            start,
         )
-        results.append(result)
-        if result.status == "ok":
-            passed += 1
-        else:
-            failed += 1
-        _update_progress(progress, done, len(selected_ids), passed, failed, result.name, start)
+        return EndpointRunResult(results=results, interrupted=True)
+    return EndpointRunResult(results=results, interrupted=False)
+
+
+def _cancel_executor_work(executor: ProcessPoolExecutor, futures: list[Any]) -> None:
+    """Cancel pending endpoint-test work and avoid waiting for long workers."""
+    for future in futures:
+        future.cancel()
+    # ``shutdown(cancel_futures=True)`` cancels queued work but does not
+    # necessarily stop already-running Symbolica calls.  In the interactive
+    # endpoint scan, returning the partial table promptly is more useful than
+    # waiting for those calls to unwind, so terminate known worker processes too.
+    for process in list((getattr(executor, "_processes", {}) or {}).values()):
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            continue
+    executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _assemble_sector_result_from_chunks(
+    sector_id: int,
+    sector: Any,
+    probe_set: EndpointProbeSet,
+    chunks: list[EndpointChunkResult],
+    boundary_growth_power_tolerance: float | None,
+    *,
+    partial: bool = False,
+) -> EndpointTestResult:
+    """Build one sector summary from completed endpoint probe chunks."""
+    sorted_chunks = sorted(chunks, key=lambda item: item.chunk_index)
+    row_indices = [int(chunk.chunk_index) for chunk in sorted_chunks]
+    rows = probe_set.rows[row_indices, :]
+    labels = [probe_set.labels[index] for index in row_indices]
+    row_distances = [probe_set.row_distances[index] for index in row_indices]
+    row_kinds = [probe_set.row_kinds[index] for index in row_indices]
+    result = _result_from_arrays(
+        sector_id,
+        sector,
+        rows,
+        labels,
+        row_distances,
+        row_kinds,
+        np.vstack([chunk.coeffs for chunk in sorted_chunks]),
+        np.concatenate([chunk.training for chunk in sorted_chunks]),
+        sum(float(chunk.elapsed_seconds) for chunk in sorted_chunks),
+        _combine_profiles([chunk.profile for chunk in sorted_chunks]),
+        boundary_growth_power_tolerance,
+    )
+    if partial and len(sorted_chunks) < probe_set.rows.shape[0]:
+        return replace(result, status="interrupted")
+    return result
+
+
+def _assemble_partial_results(
+    sectors: list[Any],
+    selected_ids: list[int],
+    probe_sets: dict[int, EndpointProbeSet],
+    chunk_results_by_sector: dict[int, list[EndpointChunkResult]],
+    boundary_growth_power_tolerance: float | None,
+) -> list[EndpointTestResult]:
+    """Return sector summaries for every sector with at least one finished probe."""
+    results: list[EndpointTestResult] = []
+    for sector_id in selected_ids:
+        chunks = chunk_results_by_sector.get(int(sector_id), [])
+        if not chunks:
+            continue
+        results.append(
+            _assemble_sector_result_from_chunks(
+                int(sector_id),
+                sectors[int(sector_id)],
+                probe_sets[int(sector_id)],
+                chunks,
+                boundary_growth_power_tolerance,
+                partial=True,
+            )
+        )
     return results
 
 
@@ -841,48 +1243,122 @@ def _run_parallel(
     selected_ids: list[int],
     progress: Any | None,
     start: float,
-) -> list[EndpointTestResult]:
+) -> EndpointRunResult:
     global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
     _PARENT_TOPOLOGY = topology
     _PARENT_SECTORS = sectors
     _PARENT_REQUEST = request
     distances = tuple(float(value) for value in request.test_boundary_distances)
+    max_approaches = _max_simultaneous_endpoint_approaches(request)
     boundary_growth_power_tolerance = request.test_boundary_growth_power_tolerance
-    tasks = [(sector_id, distances, boundary_growth_power_tolerance) for sector_id in selected_ids]
+    probe_sets = {
+        int(sector_id): _probe_set(
+            sectors[int(sector_id)],
+            distances,
+            max_simultaneous_endpoint_approaches=max_approaches,
+        )
+        for sector_id in selected_ids
+    }
+    tasks: list[tuple[int, int, np.ndarray]] = []
+    for sector_id in selected_ids:
+        probe_set = probe_sets[int(sector_id)]
+        for row_index in range(probe_set.rows.shape[0]):
+            tasks.append((int(sector_id), int(row_index), probe_set.rows[row_index : row_index + 1]))
     results: list[EndpointTestResult] = []
     passed = 0
     failed = 0
     done = 0
-    _update_progress(progress, done, len(tasks), passed, failed, "starting", start)
+    result_by_sector: dict[int, EndpointTestResult] = {}
+    chunk_results_by_sector: dict[int, list[EndpointChunkResult]] = {
+        int(sector_id): [] for sector_id in selected_ids
+    }
+    _update_progress(
+        progress,
+        done,
+        len(tasks),
+        passed,
+        failed,
+        "starting",
+        "n/a",
+        start,
+    )
     context = mp.get_context("fork")
-    with ProcessPoolExecutor(
+    executor = ProcessPoolExecutor(
         max_workers=max(1, int(request.workers)),
         mp_context=context,
         initializer=_init_worker,
-    ) as executor:
-        future_to_sector = {
-            executor.submit(_worker_evaluate, task): task[0]
+    )
+    future_to_task: dict[Any, tuple[int, int]] = {}
+    try:
+        future_to_task = {
+            executor.submit(_worker_evaluate_points, task): (task[0], task[1])
             for task in tasks
         }
-        for future in as_completed(future_to_sector):
-            sector_id = future_to_sector[future]
-            result = future.result()
-            results.append(result)
+        for future in as_completed(future_to_task):
+            sector_id, row_index = future_to_task[future]
+            chunk = future.result()
+            chunk_results_by_sector[sector_id].append(chunk)
             done += 1
-            if result.status == "ok":
-                passed += 1
-            else:
-                failed += 1
+            if (
+                sector_id not in result_by_sector
+                and len(chunk_results_by_sector[sector_id])
+                == probe_sets[sector_id].rows.shape[0]
+            ):
+                result = _assemble_sector_result_from_chunks(
+                    sector_id,
+                    sectors[sector_id],
+                    probe_sets[sector_id],
+                    chunk_results_by_sector[sector_id],
+                    boundary_growth_power_tolerance,
+                )
+                result_by_sector[sector_id] = result
+                results.append(result)
+                if result.status == "ok":
+                    passed += 1
+                else:
+                    failed += 1
             _update_progress(
                 progress,
                 done,
                 len(tasks),
                 passed,
                 failed,
-                f"{result.name} ({sector_id})",
+                _sector_shape_text(sectors[sector_id]),
+                _endpoint_shape_text(probe_sets[sector_id].labels[row_index]),
                 start,
             )
-    return results
+    except KeyboardInterrupt:
+        _cancel_executor_work(executor, list(future_to_task))
+        partial_results = _assemble_partial_results(
+            sectors,
+            selected_ids,
+            probe_sets,
+            chunk_results_by_sector,
+            boundary_growth_power_tolerance,
+        )
+        result_by_sector.update({result.sector_id: result for result in partial_results})
+        _update_progress(
+            progress,
+            done,
+            len(tasks),
+            passed,
+            failed,
+            "interrupted",
+            "interrupted",
+            start,
+        )
+        return EndpointRunResult(
+            results=sorted(result_by_sector.values(), key=lambda item: item.sector_id),
+            interrupted=True,
+        )
+    except BaseException:
+        _cancel_executor_work(executor, list(future_to_task))
+        raise
+    executor.shutdown(wait=True)
+    return EndpointRunResult(
+        results=sorted(results, key=lambda item: item.sector_id),
+        interrupted=False,
+    )
 
 
 def _chunk_bounds(length: int, chunk_count: int) -> list[tuple[int, int]]:
@@ -902,14 +1378,18 @@ def _run_single_sector_point_parallel(
     sectors: list[Any],
     sector_id: int,
     start: float,
-) -> list[EndpointTestResult]:
+) -> EndpointRunResult:
     global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
     _PARENT_TOPOLOGY = topology
     _PARENT_SECTORS = sectors
     _PARENT_REQUEST = request
     distances = tuple(float(value) for value in request.test_boundary_distances)
     sector = sectors[sector_id]
-    rows, labels, row_distances, row_kinds = endpoint_probe_points(sector, distances)
+    rows, labels, row_distances, row_kinds = endpoint_probe_points(
+        sector,
+        distances,
+        max_simultaneous_endpoint_approaches=_max_simultaneous_endpoint_approaches(request),
+    )
     worker_count = max(1, int(request.workers))
     bounds = _chunk_bounds(rows.shape[0], worker_count * 4)
     progress = _make_progress_bar(request, len(bounds))
@@ -923,16 +1403,20 @@ def _run_single_sector_point_parallel(
         passed_chunks,
         failed_chunks,
         f"{sector.name} chunks",
+        "chunk 0",
         start,
     )
     context = mp.get_context("fork")
     sector_start = time.perf_counter()
+    interrupted = False
     try:
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=max(1, int(request.workers)),
             mp_context=context,
             initializer=_init_worker,
-        ) as executor:
+        )
+        future_to_index = {}
+        try:
             future_to_index = {
                 executor.submit(
                     _worker_evaluate_points,
@@ -959,29 +1443,94 @@ def _run_single_sector_point_parallel(
                     passed_chunks,
                     failed_chunks,
                     f"{sector.name} chunk {chunk.chunk_index + 1}/{len(bounds)}",
+                    f"chunk {chunk.chunk_index + 1}",
                     start,
                 )
+        except KeyboardInterrupt:
+            interrupted = True
+            _cancel_executor_work(executor, list(future_to_index))
+            _update_progress(
+                progress,
+                len(chunk_results),
+                len(bounds),
+                passed_chunks,
+                failed_chunks,
+                "interrupted",
+                "interrupted",
+                start,
+            )
+        except BaseException:
+            _cancel_executor_work(executor, list(future_to_index))
+            raise
+        else:
+            executor.shutdown(wait=True)
     finally:
         if progress is not None:
             progress.finish()
     chunk_results.sort(key=lambda item: item.chunk_index)
+    if not chunk_results:
+        return EndpointRunResult(results=[], interrupted=interrupted)
+    selected_rows: list[np.ndarray] = []
+    selected_labels: list[str] = []
+    selected_distances: list[float] = []
+    selected_kinds: list[str] = []
+    for chunk in chunk_results:
+        start_index, end_index = bounds[chunk.chunk_index]
+        selected_rows.append(rows[start_index:end_index])
+        selected_labels.extend(labels[start_index:end_index])
+        selected_distances.extend(row_distances[start_index:end_index])
+        selected_kinds.extend(row_kinds[start_index:end_index])
     coeffs = np.vstack([chunk.coeffs for chunk in chunk_results])
     training = np.concatenate([chunk.training for chunk in chunk_results])
     profile = _combine_profiles([chunk.profile for chunk in chunk_results])
     result = _result_from_arrays(
         sector_id,
         sector,
-        rows,
-        labels,
-        row_distances,
-        row_kinds,
+        np.vstack(selected_rows),
+        selected_labels,
+        selected_distances,
+        selected_kinds,
         coeffs,
         training,
         time.perf_counter() - sector_start,
         profile,
         request.test_boundary_growth_power_tolerance,
     )
-    return [result]
+    return EndpointRunResult(results=[result], interrupted=interrupted)
+
+
+def _run_endpoint_scan_once(
+    request: IntegralRequest,
+    topology: Any,
+    sectors: list[Any],
+    selected_ids: list[int],
+    start: float,
+) -> EndpointRunResult:
+    """Run one endpoint-test pass over ``selected_ids`` with current distances."""
+    distances = tuple(float(value) for value in request.test_boundary_distances)
+    total_tests = _endpoint_test_total(
+        sectors,
+        selected_ids,
+        distances,
+        max_simultaneous_endpoint_approaches=_max_simultaneous_endpoint_approaches(request),
+    )
+    progress = _make_progress_bar(request, total_tests)
+    try:
+        if int(request.workers) <= 1:
+            return _run_serial(request, topology, sectors, selected_ids, progress, start)
+        return _run_parallel(request, topology, sectors, selected_ids, progress, start)
+    finally:
+        if progress is not None:
+            progress.finish()
+
+
+def _with_test_distances(request: IntegralRequest, distances: tuple[float, ...]) -> IntegralRequest:
+    """Return a request-like object with updated endpoint-test distances."""
+    if is_dataclass(request):
+        return replace(request, test_boundary_distances=distances)
+    data = dict(vars(request))
+    data["test_boundary_distances"] = distances
+    return SimpleNamespace(**data)  # type: ignore[return-value]
 
 
 def _summary_table(results: list[EndpointTestResult]) -> PrettyTable:
@@ -992,6 +1541,7 @@ def _summary_table(results: list[EndpointTestResult]) -> PrettyTable:
         "probes",
         "max |w|",
         "max p",
+        "max rel. to thres.",
         "p fail",
         "nonfinite",
         "worst probe",
@@ -1009,6 +1559,7 @@ def _summary_table(results: list[EndpointTestResult]) -> PrettyTable:
                 result.probe_count,
                 _format_scalar(result.max_abs_laurent_weight),
                 _format_scalar(result.max_boundary_growth_power),
+                _format_scalar(result.max_boundary_growth_threshold_ratio),
                 result.boundary_stability_failed_pair_count,
                 result.nonfinite_probe_count,
                 result.worst_probe.get("probe"),
@@ -1053,40 +1604,101 @@ def run_endpoint_test_mode(
 
     selected_ids = _selected_sector_ids(request, sectors)
     start = time.perf_counter()
-    point_parallel = int(request.workers) > 1 and len(selected_ids) == 1
-    if point_parallel:
-        results = _run_single_sector_point_parallel(
-            request,
-            topology,
-            sectors,
-            selected_ids[0],
-            start,
-        )
-    else:
-        progress = _make_progress_bar(request, len(selected_ids))
-        try:
-            if int(request.workers) <= 1 or len(selected_ids) <= 1:
-                results = _run_serial(request, topology, sectors, selected_ids, progress, start)
-            else:
-                results = _run_parallel(request, topology, sectors, selected_ids, progress, start)
-        finally:
-            if progress is not None:
-                progress.finish()
+    original_distances = tuple(float(value) for value in request.test_boundary_distances)
+    run_result = _run_endpoint_scan_once(request, topology, sectors, selected_ids, start)
+    result_by_sector = {int(result.sector_id): result for result in run_result.results}
+    interrupted = run_result.interrupted
+    retry_reports: list[dict[str, Any]] = []
+    if not interrupted:
+        for retry_index, scale in enumerate(request.test_boundary_retry_scales, start=1):
+            failed_ids = [
+                sector_id
+                for sector_id in selected_ids
+                if result_by_sector.get(int(sector_id)) is not None
+                and result_by_sector[int(sector_id)].status != "ok"
+            ]
+            if not failed_ids:
+                break
+            retry_distances = tuple(float(distance) * float(scale) for distance in original_distances)
+            if not all(0.0 < distance < 0.5 for distance in retry_distances):
+                retry_reports.append(
+                    {
+                        "retry_index": retry_index,
+                        "scale": float(scale),
+                        "distances": [float(value) for value in retry_distances],
+                        "selected_sector_ids": failed_ids,
+                        "status": "skipped",
+                        "reason": "scaled distances must stay in (0, 0.5)",
+                    }
+                )
+                continue
+            retry_request = _with_test_distances(request, retry_distances)
+            if not request.json:
+                print(
+                    f"{Fore.YELLOW}retry {retry_index}:{Style.RESET_ALL} "
+                    f"{len(failed_ids)} failed sector(s), scale={scale:g}, "
+                    f"distances={[float(value) for value in retry_distances]}"
+                )
+            retry_result = _run_endpoint_scan_once(
+                retry_request,
+                topology,
+                sectors,
+                failed_ids,
+                start,
+            )
+            for retry_sector_result in retry_result.results:
+                result_by_sector[int(retry_sector_result.sector_id)] = retry_sector_result
+            retry_reports.append(
+                {
+                    "retry_index": retry_index,
+                    "scale": float(scale),
+                    "distances": [float(value) for value in retry_distances],
+                    "selected_sector_ids": failed_ids,
+                    "completed_sector_count": len(retry_result.results),
+                    "passed": sum(1 for result in retry_result.results if result.status == "ok"),
+                    "failed": sum(1 for result in retry_result.results if result.status != "ok"),
+                    "interrupted": retry_result.interrupted,
+                    "sector_statuses": {
+                        str(result.sector_id): result.status for result in retry_result.results
+                    },
+                }
+            )
+            if retry_result.interrupted:
+                interrupted = True
+                break
+    results = [result_by_sector[sector_id] for sector_id in selected_ids if sector_id in result_by_sector]
     elapsed = time.perf_counter() - start
     passed = sum(1 for result in results if result.status == "ok")
     failed = len(results) - passed
-    status = "ok" if failed == 0 else "failed"
+    status = "interrupted" if interrupted else ("ok" if failed == 0 else "failed")
     report = {
         "schema_version": 1,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "status": status,
+        "interrupted": interrupted,
         "sector_count": len(results),
+        "requested_sector_count": len(selected_ids),
+        "completed_sector_count": len(results),
         "passed": passed,
         "failed": failed,
         "total_seconds": elapsed,
         "workers": int(request.workers),
-        "parallelism": "probe-points" if point_parallel else "sectors",
-        "distances": [float(value) for value in request.test_boundary_distances],
+        "parallelism": "endpoint-probes" if int(request.workers) > 1 else "serial",
+        "requested_endpoint_test_count": _endpoint_test_total(
+            sectors,
+            selected_ids,
+            original_distances,
+            max_simultaneous_endpoint_approaches=(
+                _max_simultaneous_endpoint_approaches(request)
+            ),
+        ),
+        "completed_endpoint_test_count": sum(int(result.probe_count) for result in results),
+        "distances": [float(value) for value in original_distances],
+        "max_simultaneous_endpoint_approaches": (
+            _max_simultaneous_endpoint_approaches(request)
+        ),
+        "retry_scales": [float(value) for value in request.test_boundary_retry_scales],
+        "retry_attempts": retry_reports,
         "boundary_growth_power_tolerance": request.test_boundary_growth_power_tolerance,
         "boundary_growth_power_threshold": (
             "tolerance * endpoint_distance_coordinate_count"
@@ -1102,12 +1714,17 @@ def run_endpoint_test_mode(
     if request.json:
         print(_output_json(report))
     else:
-        title_color = Fore.GREEN if status == "ok" else Fore.RED
+        title_color = Fore.YELLOW if interrupted else (Fore.GREEN if status == "ok" else Fore.RED)
         print(
             f"{title_color}endpoint test {status}:{Style.RESET_ALL} "
             f"{passed} passed, {failed} failed, {len(results)} sector(s), "
             f"{elapsed:.3g}s"
         )
+        if interrupted:
+            print(
+                f"{Fore.YELLOW}partial scan:{Style.RESET_ALL} "
+                f"{len(results)}/{len(selected_ids)} requested sector(s) completed before interrupt"
+            )
         print(_summary_table(results))
         if request.test_report_path:
             print(f"report: {Fore.BLUE}{Path(request.test_report_path).expanduser().resolve()}{Style.RESET_ALL}")

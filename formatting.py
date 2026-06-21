@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 import json
 import math
+import textwrap
 from typing import Any
 
 from colorama import Fore, Style
@@ -186,37 +187,7 @@ def summary_data(
         "regular_taylor_formula_axis_limit": request.regular_taylor_formula_axis_limit,
         "chain_rule_formula_signature_limit": request.chain_rule_formula_signature_limit,
         "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
-        "formula_cache_dir": str(formula_cache_dir()),
-        "endpoint_projector_formulas_from_cache": getattr(
-            topology, "endpoint_projector_formulas_from_cache", 0
-        ),
-        "endpoint_projector_formulas_generated": getattr(
-            topology, "endpoint_projector_formulas_generated", 0
-        ),
-        "regular_taylor_formulas_from_cache": getattr(
-            topology, "regular_taylor_formulas_from_cache", 0
-        ),
-        "regular_taylor_formulas_generated": getattr(
-            topology, "regular_taylor_formulas_generated", 0
-        ),
-        "chain_rule_formulas_from_cache": getattr(
-            topology, "chain_rule_formulas_from_cache", 0
-        ),
-        "chain_rule_formulas_generated": getattr(
-            topology, "chain_rule_formulas_generated", 0
-        ),
         "allow_fallback_for_missing_caches": request.allow_fallback_for_missing_caches,
-        "regular_taylor_formulas_from_curated_cache": getattr(
-            topology, "regular_taylor_formulas_from_curated_cache", 0
-        ),
-        "regular_taylor_formulas_skipped": getattr(
-            topology, "regular_taylor_formulas_skipped", 0
-        ),
-        "regular_taylor_formula_policy": (
-            "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded"
-            if request.subtraction_backend == "projector-formula"
-            else "not used by this subtraction backend"
-        ),
         "runtime_ready": (
             "recursive endpoint subtraction; coefficient dual evaluators lazy"
             if request.subtraction_backend == "recursive" and request.dual_evaluator_mode == "lazy"
@@ -343,6 +314,16 @@ def summary_data(
                 "chain_rule_formulas_generated",
                 0,
             ),
+            "chain_rule_formula_cache_seconds": getattr(
+                topology,
+                "chain_rule_formula_cache_seconds",
+                0.0,
+            ),
+            "chain_rule_formula_generation_seconds": getattr(
+                topology,
+                "chain_rule_formula_generation_seconds",
+                0.0,
+            ),
             "chain_rule_formulas_skipped": getattr(
                 topology,
                 "chain_rule_formulas_skipped",
@@ -360,6 +341,16 @@ def summary_data(
                 topology,
                 "endpoint_projector_formulas_generated",
                 0,
+            ),
+            "endpoint_projector_formula_cache_seconds": getattr(
+                topology,
+                "endpoint_projector_formula_cache_seconds",
+                0.0,
+            ),
+            "endpoint_projector_formula_generation_seconds": getattr(
+                topology,
+                "endpoint_projector_formula_generation_seconds",
+                0.0,
             ),
             "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
             "direct_projector_cache_override_sectors": getattr(
@@ -380,6 +371,16 @@ def summary_data(
                 topology,
                 "regular_taylor_formulas_generated",
                 0,
+            ),
+            "regular_taylor_formula_cache_seconds": getattr(
+                topology,
+                "regular_taylor_formula_cache_seconds",
+                0.0,
+            ),
+            "regular_taylor_formula_generation_seconds": getattr(
+                topology,
+                "regular_taylor_formula_generation_seconds",
+                0.0,
             ),
             "regular_taylor_formulas_from_curated_cache": getattr(
                 topology,
@@ -403,6 +404,166 @@ def summary_data(
         "sector_stats": sector_stats,
         "validation": validation,
     }
+
+
+def _short_table_text(value: Any, width: int = 72) -> str:
+    """Keep generation-report cells single-line and terminal friendly."""
+    text = str(value)
+    text = " ".join(text.split())
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"
+    return text[: width - 1] + "…"
+
+
+def _wrapped_table_text(value: Any, width: int = 72) -> str:
+    """Wrap generation-report cells without dropping diagnostic content."""
+    text = " ".join(str(value).split())
+    if not text:
+        return "-"
+    parts = text.split("; ")
+    lines: list[str] = []
+    for part in parts:
+        wrapped = textwrap.wrap(part, width=width, break_long_words=False) or [part]
+        lines.extend(wrapped)
+    return "\n".join(lines)
+
+
+def _color_table_cell_lines(value: str, color: str) -> str:
+    """Color each physical table-cell line independently.
+
+    PrettyTable renders multiline cells by printing row-continuation separator
+    columns between the lines.  If a single ANSI color span crosses the embedded
+    newline, those separators inherit the color.  Resetting per line keeps the
+    table border and continuation columns uncolored.
+    """
+    return "\n".join(maybe_color(line, color) for line in str(value).splitlines())
+
+
+def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
+    """Print consolidated generation timings and cache/fallback statistics."""
+    if request.integral != "dot":
+        return
+    try:
+        from dot_topology import get_dot_bundle
+
+        timings = get_dot_bundle(request).timings
+    except Exception:
+        return
+
+    print(maybe_color("\nFSD generation report", Fore.CYAN))
+
+    headline_table = PrettyTable()
+    headline_table.field_names = [
+        maybe_color("headline bucket", Fore.CYAN),
+        maybe_color("time", Fore.CYAN),
+    ]
+    for name, seconds in timings.bucket_totals().items():
+        headline_table.add_row([maybe_color(name, Fore.MAGENTA), format_seconds(seconds)])
+    headline_table.add_row([
+        maybe_color("total recorded generation", Fore.MAGENTA),
+        format_seconds(timings.total()),
+    ])
+    print(headline_table)
+
+    details_table = PrettyTable()
+    details_table.field_names = [
+        maybe_color("#", Fore.CYAN),
+        maybe_color("stage", Fore.CYAN),
+        maybe_color("time", Fore.CYAN),
+        maybe_color("detail", Fore.CYAN),
+    ]
+    details_table.align["stage"] = "l"
+    details_table.align["detail"] = "l"
+    details_table.max_width["stage"] = 34
+    details_table.max_width["detail"] = 72
+    for index, record in enumerate(timings.records, start=1):
+        details_table.add_row(
+            [
+                index,
+                _color_table_cell_lines(_wrapped_table_text(record.name, 34), Fore.MAGENTA),
+                format_seconds(record.seconds),
+                _wrapped_table_text(record.detail or "-", 72),
+            ]
+        )
+    print(details_table)
+
+    symanzik = data["symanzik"]
+    cache_table = PrettyTable()
+    cache_table.field_names = [
+        maybe_color("artifact", Fore.CYAN),
+        maybe_color("ready", Fore.CYAN),
+        maybe_color("cache hit", Fore.CYAN),
+        maybe_color("fallback gen", Fore.CYAN),
+        maybe_color("cache retrieval", Fore.CYAN),
+        maybe_color("fallback time", Fore.CYAN),
+        maybe_color("skipped / notes", Fore.CYAN),
+    ]
+    cache_table.align["artifact"] = "l"
+    cache_table.align["skipped / notes"] = "l"
+
+    def add_cache_row(
+        artifact: str,
+        ready: int,
+        cache_hits: int,
+        generated: int,
+        cache_seconds: float,
+        generation_seconds: float,
+        notes: str = "-",
+    ) -> None:
+        color = Fore.GREEN if generated == 0 else Fore.YELLOW
+        cache_table.add_row(
+            [
+                maybe_color(artifact, Fore.MAGENTA),
+                ready,
+                maybe_color(str(cache_hits), Fore.GREEN),
+                maybe_color(str(generated), color),
+                format_seconds(cache_seconds),
+                maybe_color(format_seconds(generation_seconds), color),
+                _wrapped_table_text(notes, 64),
+            ]
+        )
+
+    add_cache_row(
+        "endpoint projectors",
+        int(symanzik.get("endpoint_projector_formula_count", 0)),
+        int(symanzik.get("endpoint_projector_formulas_from_cache", 0)),
+        int(symanzik.get("endpoint_projector_formulas_generated", 0)),
+        float(symanzik.get("endpoint_projector_formula_cache_seconds", 0.0)),
+        float(symanzik.get("endpoint_projector_formula_generation_seconds", 0.0)),
+        (
+            f"direct overrides: {symanzik.get('direct_projector_cache_override_sectors', 0)} sectors / "
+            f"{symanzik.get('direct_projector_cache_override_signatures', 0)} signatures"
+            if symanzik.get("direct_projector_cache_override_sectors", 0)
+            else "-"
+        ),
+    )
+    add_cache_row(
+        "regular Taylor",
+        int(symanzik.get("regular_taylor_formula_count", 0)),
+        int(symanzik.get("regular_taylor_formulas_from_cache", 0)),
+        int(symanzik.get("regular_taylor_formulas_generated", 0)),
+        float(symanzik.get("regular_taylor_formula_cache_seconds", 0.0)),
+        float(symanzik.get("regular_taylor_formula_generation_seconds", 0.0)),
+        (
+            f"curated: {symanzik.get('regular_taylor_formulas_from_curated_cache', 0)}; "
+            f"skipped: {symanzik.get('regular_taylor_formulas_skipped', 0)}"
+        ),
+    )
+    add_cache_row(
+        "chain rule",
+        int(symanzik.get("chain_rule_formula_count", 0)),
+        int(symanzik.get("chain_rule_formulas_from_cache", 0)),
+        int(symanzik.get("chain_rule_formulas_generated", 0)),
+        float(symanzik.get("chain_rule_formula_cache_seconds", 0.0)),
+        float(symanzik.get("chain_rule_formula_generation_seconds", 0.0)),
+        (
+            f"skipped: {symanzik.get('chain_rule_formulas_skipped', 0)}; "
+            f"output limit: {symanzik.get('chain_rule_formula_output_length_limit', 0)}"
+        ),
+    )
+    print(cache_table)
 
 
 def print_preintegration_summary(
@@ -523,22 +684,7 @@ def print_preintegration_summary(
     symanzik.add_row(["U/F Taylor shapes", shape_text])
     print(symanzik)
 
-    if request.integral == "dot":
-        try:
-            from dot_topology import get_dot_bundle
-
-            timings = get_dot_bundle(request).timings
-            timing_table = PrettyTable()
-            timing_table.field_names = [
-                maybe_color("generation bucket", Fore.CYAN),
-                maybe_color("time", Fore.CYAN),
-            ]
-            for name, seconds in timings.bucket_totals().items():
-                timing_table.add_row([maybe_color(name, Fore.MAGENTA), format_seconds(seconds)])
-            timing_table.add_row([maybe_color("total recorded generation", Fore.MAGENTA), format_seconds(timings.total())])
-            print(timing_table)
-        except Exception:
-            pass
+    print_generation_report(request, data)
 
     sector_table = PrettyTable()
     sector_table.field_names = [

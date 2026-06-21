@@ -474,8 +474,12 @@ class TopologyDefinition:
     regular_taylor_formulas_from_curated_cache: int = field(default=0, init=False)
     endpoint_projector_formulas_from_cache: int = field(default=0, init=False)
     endpoint_projector_formulas_generated: int = field(default=0, init=False)
+    endpoint_projector_formula_cache_seconds: float = field(default=0.0, init=False)
+    endpoint_projector_formula_generation_seconds: float = field(default=0.0, init=False)
     regular_taylor_formulas_from_cache: int = field(default=0, init=False)
     regular_taylor_formulas_generated: int = field(default=0, init=False)
+    regular_taylor_formula_cache_seconds: float = field(default=0.0, init=False)
+    regular_taylor_formula_generation_seconds: float = field(default=0.0, init=False)
     endpoint_projector_direct_cache_override_sectors: int = field(default=0, init=False)
     endpoint_projector_direct_cache_override_signatures: int = field(default=0, init=False)
     chain_rule_formula_build_seconds: float = field(default=0.0, init=False)
@@ -484,6 +488,8 @@ class TopologyDefinition:
     chain_rule_formulas_skipped: int = field(default=0, init=False)
     chain_rule_formulas_from_cache: int = field(default=0, init=False)
     chain_rule_formulas_generated: int = field(default=0, init=False)
+    chain_rule_formula_cache_seconds: float = field(default=0.0, init=False)
+    chain_rule_formula_generation_seconds: float = field(default=0.0, init=False)
     two_stage_sector_formula_build_seconds: float = field(default=0.0, init=False)
     two_stage_sector_formulas_generated: int = field(default=0, init=False)
 
@@ -1090,11 +1096,17 @@ class TopologyDefinition:
                         detail=f"{sector.name} endpoint signature {index}/{len(pending)}",
                     )
                 start = time.perf_counter()
+                cache_hits_before = self.endpoint_projector_formulas_from_cache
+                generated_before = self.endpoint_projector_formulas_generated
                 formula = build_endpoint_projector_formula(self, sector, signature)
                 elapsed = time.perf_counter() - start
                 formula.build_seconds = elapsed
                 self._endpoint_projector_formulas[signature] = formula
                 self.subtraction_formula_build_seconds += elapsed
+                if self.endpoint_projector_formulas_generated > generated_before:
+                    self.endpoint_projector_formula_generation_seconds += elapsed
+                elif self.endpoint_projector_formulas_from_cache > cache_hits_before:
+                    self.endpoint_projector_formula_cache_seconds += elapsed
                 if progress is not None:
                     progress.update(
                         index,
@@ -1396,12 +1408,18 @@ class TopologyDefinition:
                         detail=f"{sector.name} regular signature {index}/{len(pending)}",
                     )
                 start = time.perf_counter()
+                cache_hits_before = self.regular_taylor_formulas_from_cache
+                generated_before = self.regular_taylor_formulas_generated
                 formula = build_regular_taylor_formula(self, sector, signature)
                 formula.dual_shape = _regular_formula_dual_shape(formula)
                 elapsed = time.perf_counter() - start
                 formula.build_seconds = elapsed
                 self._regular_taylor_formulas[signature] = formula
                 self.subtraction_formula_build_seconds += elapsed
+                if self.regular_taylor_formulas_generated > generated_before:
+                    self.regular_taylor_formula_generation_seconds += elapsed
+                elif self.regular_taylor_formulas_from_cache > cache_hits_before:
+                    self.regular_taylor_formula_cache_seconds += elapsed
                 if progress is not None:
                     progress.update(
                         index,
@@ -1814,14 +1832,22 @@ class TopologyDefinition:
                             f"{index}/{len(ordered_requests)} len={len(shape)}"
                         ),
                     )
+                start = time.perf_counter()
+                cache_hits_before = self.chain_rule_formulas_from_cache
+                generated_before = self.chain_rule_formulas_generated
                 formula = self.chain_rule_formula_for(sector, polynomial, shape)
+                elapsed = time.perf_counter() - start
+                if self.chain_rule_formulas_generated > generated_before:
+                    self.chain_rule_formula_generation_seconds += elapsed
+                elif self.chain_rule_formulas_from_cache > cache_hits_before:
+                    self.chain_rule_formula_cache_seconds += elapsed
                 if progress is not None:
                     progress.update(
                         index,
                         total=len(ordered_requests),
                         detail=(
                             f"{sector.name} {polynomial.upper()} chain done "
-                            f"in {formula.build_seconds:.3g}s"
+                            f"in {elapsed:.3g}s"
                         ),
                     )
         finally:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
+import shutil
 import time
 from typing import Iterator
 
@@ -133,6 +134,39 @@ def _color(text: str, color: str) -> str:
     return f"{color}{text}{Style.RESET_ALL}"
 
 
+def _clip(text: object, width: int) -> str:
+    """Return ``text`` truncated to one terminal-friendly field."""
+    value = str(text)
+    if width <= 0 or len(value) <= width:
+        return value
+    if width <= 1:
+        return "…"
+    return value[: width - 1] + "…"
+
+
+_STAGE_SHORT_NAMES = {
+    "DOT parse": "DOT parse",
+    "kinematics load/evaluation": "kinematics",
+    "pySecDec LoopIntegralFromGraph": "pySecDec graph",
+    "U/F extraction": "U/F",
+    "Symbolica scalar evaluator build": "scalar evals",
+    "pySecDec sector decomposition": "sector decomp",
+    "FSD SectorDefinition conversion": "sector convert",
+    "Symbolica sector evaluator build": "sector evals",
+    "Symbolica Taylor evaluator build": "Taylor evals",
+    "Symbolica endpoint projector build": "endpoint proj",
+    "Symbolica regular Taylor build": "regular Taylor",
+    "Symbolica chain-rule build": "chain rule",
+    "Symbolica subtraction formula build": "subtraction",
+    "Symbolica two-stage sector build": "two-stage",
+}
+
+
+def _stage_label(name: str) -> str:
+    """Return a compact label for live generation progress."""
+    return _STAGE_SHORT_NAMES.get(name, name)
+
+
 class GenerationProgress:
     """Live status reporter for long topology/package generation phases."""
 
@@ -166,12 +200,12 @@ class GenerationProgress:
         if self.enabled:
             self._live_widget = progressbar.FormatCustomText(
                 (
-                    f"{_color('stage', Fore.CYAN)}:%(stage)s "
+                    f"{_color('stg', Fore.CYAN)}:%(stage)s "
                     f"{_color('step', Fore.GREEN)}:%(step)s "
-                    f"{_color('elapsed', Fore.BLUE)}:%(elapsed)s "
-                    f"{_color('stage t', Fore.BLUE)}:%(stage_elapsed)s "
+                    f"{_color('t', Fore.BLUE)}:%(elapsed)s "
+                    f"{_color('st', Fore.BLUE)}:%(stage_elapsed)s "
                     f"{_color('eta', Fore.BLUE)}:%(eta)s "
-                    f"{_color('detail', Fore.MAGENTA)}:%(detail)s"
+                    f"{_color('msg', Fore.MAGENTA)}:%(detail)s"
                 ),
                 {
                     "stage": self._stage_name,
@@ -182,10 +216,11 @@ class GenerationProgress:
                     "detail": "",
                 },
             )
+            display_label = "FSD gen" if label == "FSD generation" else _clip(label, 10)
             self._bar = progressbar.ProgressBar(
                 max_value=progressbar.UnknownLength,
                 widgets=[
-                    _color(f"{label} ", Fore.CYAN),
+                    _color(f"{display_label} ", Fore.CYAN),
                     progressbar.AnimatedMarker(),
                     " ",
                     self._live_widget,
@@ -233,13 +268,17 @@ class GenerationProgress:
             if self._stage_total is not None
             else "n/a"
         )
+        terminal_width = max(shutil.get_terminal_size((120, 20)).columns, 80)
+        # Keep the live line safely below common terminal widths.  The progress
+        # bar itself accounts for ANSI escapes imperfectly, so leave margin.
+        detail_width = max(min(terminal_width - 78, 56), 16)
         self._live_widget.update_mapping(
-            stage=self._stage_name,
+            stage=_clip(_stage_label(self._stage_name), 20),
             step=step,
             elapsed=_duration_text(elapsed),
             stage_elapsed=_duration_text(stage_elapsed),
             eta=_duration_text(eta),
-            detail=self._stage_detail or "",
+            detail=_clip(self._stage_detail or "", detail_width),
         )
         self._tick += 1
         self._bar.update(self._tick, force=True)

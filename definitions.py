@@ -136,6 +136,9 @@ class IntegralRequest:
     test_boundary_distances: tuple[float, ...] = (1.0e-6, 1.0e-8)
     test_boundary_growth_power_tolerance: float | None = 0.5
     test_report_path: str | None = None
+    test_boundary_retry_scales: tuple[float, ...] = (1.0e-2,)
+    test_boundary_max_simultaneous_endpoint_approaches: int | None = None
+    benchmark_samples_per_sector: int = 5
 
 
 @dataclass(frozen=True)

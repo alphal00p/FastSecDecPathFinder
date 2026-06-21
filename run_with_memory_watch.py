@@ -58,6 +58,17 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pid-file", type=Path)
     parser.add_argument("--log-file", type=Path)
+    parser.add_argument(
+        "--watchdog-status",
+        choices=("inline", "line", "none"),
+        default="inline",
+        help=(
+            "How to display periodic RSS polling updates. 'inline' rewrites one "
+            "terminal line, 'line' prints one line per poll, and 'none' writes "
+            "periodic updates only to --log-file. Stop/finish events are still "
+            "printed."
+        ),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command and args.command[0] == "--":
@@ -65,6 +76,9 @@ def _parse_args() -> argparse.Namespace:
     if not args.command:
         parser.error("missing command after --")
     return args
+
+
+_INLINE_STATUS_LEN = 0
 
 
 def _terminate_process_group(
@@ -223,10 +237,41 @@ def _tree_rss_kb(root_pid: int) -> tuple[int | None, list[int]]:
 
 
 def _log(handle, message: str) -> None:
+    _clear_inline_status()
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
     print(line, flush=True)
     if handle is not None:
         print(line, file=handle, flush=True)
+
+
+def _log_poll_status(handle, message: str, mode: str) -> None:
+    """Emit one periodic watchdog status without corrupting child progress bars."""
+    global _INLINE_STATUS_LEN
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
+    if handle is not None:
+        print(line, file=handle, flush=True)
+    if mode == "none":
+        return
+    if mode == "inline" and not sys.stderr.isatty():
+        # Captured/non-interactive stderr often renders carriage-return based
+        # inline updates as fresh lines.  Keep the RSS history in --log-file
+        # but avoid corrupting child progress bars in that case.
+        return
+    if mode == "line":
+        _clear_inline_status()
+        print(line, flush=True)
+        return
+    padded = line + (" " * max(0, _INLINE_STATUS_LEN - len(line)))
+    print(f"\r{padded}", end="", file=sys.stderr, flush=True)
+    _INLINE_STATUS_LEN = len(line)
+
+
+def _clear_inline_status() -> None:
+    """Clear an in-place watchdog status line before printing normal output."""
+    global _INLINE_STATUS_LEN
+    if _INLINE_STATUS_LEN:
+        print("\r" + (" " * _INLINE_STATUS_LEN) + "\r", end="", file=sys.stderr, flush=True)
+        _INLINE_STATUS_LEN = 0
 
 
 def main() -> int:
@@ -262,7 +307,11 @@ def main() -> int:
             else:
                 rss_gb = rss_kb / (1024.0 * 1024.0)
                 rss_text = f"rss={rss_gb:.3f} GiB"
-            _log(log_handle, f"elapsed={elapsed:.1f}s {rss_text} processes={len(pids)}")
+            _log_poll_status(
+                log_handle,
+                f"elapsed={elapsed:.1f}s {rss_text} processes={len(pids)}",
+                args.watchdog_status,
+            )
             if rss_kb is not None and rss_kb > limit_kb:
                 _terminate_process_group(
                     proc,
@@ -299,6 +348,7 @@ def main() -> int:
                 return int(rc)
             time.sleep(poll)
     finally:
+        _clear_inline_status()
         if log_handle is not None:
             log_handle.close()
 

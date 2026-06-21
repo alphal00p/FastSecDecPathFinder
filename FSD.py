@@ -30,6 +30,7 @@ from formatting import (
     build_sector_result_rows,
     make_output,
     output_json,
+    print_generation_report,
     print_preintegration_summary,
     print_result_table,
     selected_prefactor_values,
@@ -49,6 +50,7 @@ from result_io import (
     target_from_result_file,
     write_result_json,
 )
+from runtime_benchmark import run_sector_runtime_benchmark
 from sectors_generator import generate_sectors
 
 
@@ -61,7 +63,7 @@ def resolve_mode(m: float, requested: str) -> str:
 
 def validate_request(request: IntegralRequest) -> None:
     """Reject unsupported kinematics before building sectors or benchmarks."""
-    if request.command not in {"run", "generate", "integrate", "cache", "test"}:
+    if request.command not in {"run", "generate", "integrate", "cache", "test", "benchmark"}:
         raise ValueError(f"unsupported command {request.command!r}")
     if request.command == "cache":
         if not request.cache_loop_counts:
@@ -87,6 +89,16 @@ def validate_request(request: IntegralRequest) -> None:
                 "--test-boundary-distances entries must lie in (0, 0.5); "
                 f"got {invalid_distances}"
             )
+        invalid_retry_scales = [
+            value for value in request.test_boundary_retry_scales if float(value) <= 0.0
+        ]
+        if invalid_retry_scales:
+            raise ValueError(f"--retries entries must be positive; got {invalid_retry_scales}")
+        if (
+            request.test_boundary_max_simultaneous_endpoint_approaches is not None
+            and request.test_boundary_max_simultaneous_endpoint_approaches <= 0
+        ):
+            raise ValueError("--max-simultaneous-endpoint-approaches must be positive")
         if (
             request.test_boundary_growth_power_tolerance is not None
             and request.test_boundary_growth_power_tolerance < 0.0
@@ -100,6 +112,8 @@ def validate_request(request: IntegralRequest) -> None:
                 "--test-boundary-growth-power-tolerance requires at least two "
                 "--test-boundary-distances"
             )
+    if request.command == "benchmark" and request.benchmark_samples_per_sector <= 0:
+        raise ValueError("--benchmark-samples-per-sector must be positive")
     if request.command in {"generate", "integrate"} and request.output is None:
         raise ValueError(f"{request.command} requires --output DIR")
     if request.command == "generate":
@@ -335,14 +349,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["run", "generate", "integrate", "cache", "test"],
+        choices=["run", "generate", "integrate", "cache", "test", "benchmark"],
         default=defaults.get("command", "run"),
         help=(
             "Two-stage DOT workflow command. Omit for the legacy single-shot "
             "generate+integrate path; use 'generate' to prepare a bundle and "
             "'integrate' to run strictly from a prepared bundle. Use 'cache' "
             "to warm topology-independent formula caches on example DOT cases, "
-            "or 'test' to probe selected sectors near all endpoint corners."
+            "'test' to probe selected sectors near all endpoint corners, or "
+            "'benchmark' to time ordinary f64 sector-integrand evaluation."
         ),
     )
     parser.add_argument(
@@ -747,6 +762,40 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help="Optional JSON report path written by the 'test' subcommand.",
     )
     parser.add_argument(
+        "--retries",
+        dest="test_boundary_retry_scales",
+        nargs="+",
+        type=float,
+        default=defaults.get("test_boundary_retry_scales", defaults.get("retries", (1.0e-2,))),
+        help=(
+            "Retry failed endpoint-test sectors with all "
+            "--test-boundary-distances multiplied by each listed positive scale. "
+            "Default: 1e-2. Example: --retries 1e-2 retries 1e-4 1e-6 1e-8 "
+            "as 1e-6 1e-8 1e-10."
+        ),
+    )
+    parser.add_argument(
+        "--max-simultaneous-endpoint-approaches",
+        dest="test_boundary_max_simultaneous_endpoint_approaches",
+        type=int,
+        default=defaults.get("test_boundary_max_simultaneous_endpoint_approaches"),
+        help=(
+            "In endpoint-test mode, probe only endpoint approaches where at most "
+            "N sector variables approach lower/upper limits simultaneously. "
+            "Unselected variables stay at deterministic bulk values and are "
+            "labelled with 'x' in probe names."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark-samples-per-sector",
+        type=int,
+        default=int(defaults.get("benchmark_samples_per_sector", 5)),
+        help=(
+            "Number of ordinary f64 interior sample points evaluated per active "
+            "sector by the 'benchmark' subcommand. Default: 5."
+        ),
+    )
+    parser.add_argument(
         "--no-cache-estimate-3l",
         dest="cache_estimate_3l",
         action="store_false",
@@ -962,6 +1011,15 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
             if args.test_report_path is not None
             else None
         ),
+        test_boundary_retry_scales=tuple(
+            float(value) for value in (args.test_boundary_retry_scales or ())
+        ),
+        test_boundary_max_simultaneous_endpoint_approaches=(
+            int(args.test_boundary_max_simultaneous_endpoint_approaches)
+            if args.test_boundary_max_simultaneous_endpoint_approaches is not None
+            else None
+        ),
+        benchmark_samples_per_sector=int(args.benchmark_samples_per_sector),
     )
 
 
@@ -1334,9 +1392,21 @@ def configure_logging(request: IntegralRequest) -> logging.Logger:
     level = getattr(logging, request.log_level.upper(), logging.INFO)
     handlers: list[logging.Handler] = []
     if not request.json:
-        handlers.append(logging.StreamHandler(sys.stderr))
+        console_handler = logging.StreamHandler(sys.stderr)
+        # INFO logging and progressbar redraws both target stderr.  During live
+        # progress, keep INFO records out of the terminal to avoid the
+        # ``... detail: <large padding> INFO:FSD:...`` suffix seen in wrapped
+        # generation output.  Full INFO detail is still available with
+        # ``--no-progress`` or in ``--log-file``.
+        if not request.no_progress and level <= logging.INFO:
+            console_handler.setLevel(logging.WARNING)
+        else:
+            console_handler.setLevel(level)
+        handlers.append(console_handler)
     if request.log_file is not None:
-        handlers.append(logging.FileHandler(request.log_file, encoding="utf-8"))
+        file_handler = logging.FileHandler(request.log_file, encoding="utf-8")
+        file_handler.setLevel(level)
+        handlers.append(file_handler)
     logging.basicConfig(level=level, handlers=handlers, format="%(levelname)s:%(name)s:%(message)s", force=True)
     return logging.getLogger("FSD")
 
@@ -1558,7 +1628,6 @@ def main() -> int:
         elif request.integral == "dot" and request.command != "generate":
             generation_progress = _generation_progress(request, logger, "FSD generation")
             bundle = get_dot_bundle(request, progress=generation_progress)
-            bundle.timings.log(logger)
             request = replace(
                 request,
                 dot_global_prefactor_coeffs=tuple(bundle.topology.global_prefactor_coeffs or []),
@@ -1655,6 +1724,8 @@ def main() -> int:
         if request.json:
             print(output_json(output))
         else:
+            if not request.quiet_summary:
+                print_generation_report(request, summary)
             print(
                 f"{Fore.GREEN}prepared bundle written:{Style.RESET_ALL} "
                 f"{Path(request.output or '').expanduser().resolve()}"
@@ -1665,10 +1736,22 @@ def main() -> int:
             )
         return 0
 
+    if request.command == "benchmark":
+        try:
+            if not request.json and not request.quiet_summary:
+                print_generation_report(request, summary)
+            run_sector_runtime_benchmark(request, topology, sectors, summary)
+        except Exception as exc:
+            print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     if request.command == "test":
         try:
             from boundary_test import run_endpoint_test_mode
 
+            if not request.json and not request.quiet_summary:
+                print_generation_report(request, summary)
             report = run_endpoint_test_mode(request, topology, sectors, summary)
         except Exception as exc:
             print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
