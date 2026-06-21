@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# Intended for a restart after the protected chain-rule expression sidecar exists.
+# The first evaluator attempt already proved that evaluator construction can grow
+# into hundreds of GiB. Keep Horner/CPE enabled for useful runtime quality, but
+# default checkpoint-resume to conservative memory-sensitive knobs.
+export FSD_CACHE_WATCHDOG_LIMIT_GB="${FSD_CACHE_WATCHDOG_LIMIT_GB:-950}"
+export FSD_CACHE_SHARD_JOBS="${FSD_CACHE_SHARD_JOBS:-100}"
+export FSD_CACHE_SHARD_MAX_ATTEMPTS="${FSD_CACHE_SHARD_MAX_ATTEMPTS:-1}"
+export FSD_CHAIN_RULE_DRAIN_RELEASE_AFTER="${FSD_CHAIN_RULE_DRAIN_RELEASE_AFTER:-formula-json}"
+export FSD_CACHE_PRESERVE_DRAIN_FILE="${FSD_CACHE_PRESERVE_DRAIN_FILE:-true}"
+export FSD_CACHE_INITIAL_DRAIN_UNTIL_FORMULA_JSON="${FSD_CACHE_INITIAL_DRAIN_UNTIL_FORMULA_JSON:-true}"
+
+export FSD_SYMBOLICA_EVALUATOR_VERBOSE="${FSD_SYMBOLICA_EVALUATOR_VERBOSE:-true}"
+export FSD_SYMBOLICA_EVALUATOR_CORES="${FSD_SYMBOLICA_EVALUATOR_CORES:-8}"
+export FSD_SYMBOLICA_EVALUATOR_ITERATIONS="${FSD_SYMBOLICA_EVALUATOR_ITERATIONS:-1}"
+export FSD_SYMBOLICA_EVALUATOR_CPE_ITERATIONS="${FSD_SYMBOLICA_EVALUATOR_CPE_ITERATIONS:-50}"
+export FSD_SYMBOLICA_MAX_HORNER_SCHEME_VARIABLES="${FSD_SYMBOLICA_MAX_HORNER_SCHEME_VARIABLES:-6}"
+export FSD_SYMBOLICA_MAX_COMMON_PAIR_CACHE_ENTRIES="${FSD_SYMBOLICA_MAX_COMMON_PAIR_CACHE_ENTRIES:-20000}"
+export FSD_SYMBOLICA_MAX_COMMON_PAIR_DISTANCE="${FSD_SYMBOLICA_MAX_COMMON_PAIR_DISTANCE:-6}"
+
+exec bash scripts/launch_protected_chain_rule_resume.sh

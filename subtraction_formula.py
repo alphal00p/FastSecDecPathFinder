@@ -25,16 +25,389 @@ from functools import lru_cache
 from itertools import product
 import os
 from pathlib import Path
+import resource
 import tempfile
+import time
 from typing import Any
 
-from cache_utils import formula_cache_dir, formula_cache_read_roots, mirror_cache_entry_to_primary
-from symbolica import E, Evaluator, Replacement, S
+from cache_utils import (
+    formula_cache_dir,
+    formula_cache_lock,
+    formula_cache_read_roots,
+    mirror_cache_entry_to_primary,
+)
+from symbolica import E, Evaluator, Expression, Replacement, S
 
 
 ENDPOINT_PROJECTOR_CACHE_VERSION = 1
 REGULAR_TAYLOR_CACHE_VERSION = 9
 REGULAR_TAYLOR_COMPATIBLE_CACHE_VERSIONS = (9, 8)
+REGULAR_TAYLOR_EXPRESSION_CACHE_VERSION = 1
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except ValueError:
+        return float(default)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return int(default)
+    try:
+        return max(int(value), int(minimum))
+    except ValueError:
+        return int(default)
+
+
+def _env_optional_int(
+    name: str,
+    default: int | None = None,
+    *,
+    minimum: int | None = None,
+) -> int | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    if minimum is not None:
+        return max(parsed, int(minimum))
+    return parsed
+
+
+def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
+    """Return evaluator tuning options shared with the chain-rule builder."""
+
+    kwargs: dict[str, Any] = {
+        "jit_compile": bool(jit_compile),
+        "n_cores": _env_int("FSD_SYMBOLICA_EVALUATOR_CORES", 4),
+        "verbose": _env_bool("FSD_SYMBOLICA_EVALUATOR_VERBOSE", True),
+    }
+    optional_ints = {
+        "iterations": ("FSD_SYMBOLICA_EVALUATOR_ITERATIONS", 1, 1),
+        "cpe_iterations": ("FSD_SYMBOLICA_EVALUATOR_CPE_ITERATIONS", 50, 50),
+        "jit_optimization_level": ("FSD_SYMBOLICA_JIT_OPTIMIZATION_LEVEL", None, None),
+        "max_horner_scheme_variables": ("FSD_SYMBOLICA_MAX_HORNER_SCHEME_VARIABLES", 6, None),
+        "max_common_pair_cache_entries": (
+            "FSD_SYMBOLICA_MAX_COMMON_PAIR_CACHE_ENTRIES",
+            20_000,
+            None,
+        ),
+        "max_common_pair_distance": ("FSD_SYMBOLICA_MAX_COMMON_PAIR_DISTANCE", 6, None),
+    }
+    for key, (env_name, default, minimum) in optional_ints.items():
+        value = _env_optional_int(env_name, default, minimum=minimum)
+        if value is not None:
+            kwargs[key] = value
+    bool_options = {
+        "direct_translation": "FSD_SYMBOLICA_DIRECT_TRANSLATION",
+        "jit_direct_translation": "FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION",
+    }
+    for key, env_name in bool_options.items():
+        if env_name in os.environ:
+            kwargs[key] = _env_bool(env_name)
+    return kwargs
+
+
+def _is_symbolica_panic(exc: BaseException) -> bool:
+    return type(exc).__name__ == "PanicException"
+
+
+def _append_unique_evaluator_attempt(
+    attempts: list[tuple[str, dict[str, Any]]],
+    label: str,
+    kwargs: dict[str, Any],
+) -> None:
+    if not any(existing == kwargs for _, existing in attempts):
+        attempts.append((label, kwargs))
+
+
+def _build_evaluator_multiple(
+    expressions: list[Any],
+    input_symbols: list[Any],
+    *,
+    jit_compile: bool,
+    monitor: "_FormulaBuildMonitor | None" = None,
+) -> tuple[list[Any], str]:
+    """Build one multi-output evaluator, with a conservative panic fallback."""
+
+    if not expressions:
+        return [], "separate"
+    primary = _symbolica_evaluator_kwargs(jit_compile)
+    attempts: list[tuple[str, dict[str, Any]]] = [("optimized", primary)]
+    direct = dict(primary)
+    direct["direct_translation"] = True
+    direct.setdefault("jit_direct_translation", False)
+    if direct != primary:
+        attempts.append(("direct_translation", direct))
+
+    last_error: BaseException | None = None
+    for label, kwargs in attempts:
+        start = time.perf_counter()
+        if monitor is not None:
+            monitor.emit(
+                "evaluator_attempt_start",
+                force=True,
+                attempt=label,
+                outputs=len(expressions),
+                n_cores=kwargs.get("n_cores"),
+                verbose=kwargs.get("verbose"),
+                iterations=kwargs.get("iterations"),
+                cpe_iterations=kwargs.get("cpe_iterations"),
+                max_horner_scheme_variables=kwargs.get("max_horner_scheme_variables"),
+                max_common_pair_cache_entries=kwargs.get("max_common_pair_cache_entries"),
+                max_common_pair_distance=kwargs.get("max_common_pair_distance"),
+                jit_compile=kwargs.get("jit_compile"),
+                direct_translation=kwargs.get("direct_translation", False),
+            )
+        try:
+            evaluator = Expression.evaluator_multiple(
+                expressions,
+                input_symbols,
+                **kwargs,
+            )
+            if monitor is not None:
+                monitor.emit(
+                    "evaluator_attempt_done",
+                    force=True,
+                    attempt=label,
+                    outputs=len(expressions),
+                    seconds=f"{time.perf_counter() - start:.3f}",
+                )
+            return [evaluator], "multiple"
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if not _is_symbolica_panic(exc) and not isinstance(exc, Exception):
+                raise
+            last_error = exc
+            if monitor is not None:
+                monitor.emit(
+                    "evaluator_attempt_failed",
+                    force=True,
+                    attempt=label,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:240],
+                    seconds=f"{time.perf_counter() - start:.3f}",
+                )
+
+    fallback_kwargs = dict(primary)
+    fallback_kwargs["direct_translation"] = True
+    fallback_kwargs.setdefault("jit_direct_translation", False)
+    fallback_kwargs["verbose"] = bool(fallback_kwargs.get("verbose", True))
+    scalar_attempts: list[tuple[str, dict[str, Any]]] = [
+        ("direct_translation", fallback_kwargs),
+    ]
+    no_jit_kwargs = dict(fallback_kwargs)
+    no_jit_kwargs["jit_compile"] = False
+    no_jit_kwargs["jit_direct_translation"] = False
+    _append_unique_evaluator_attempt(
+        scalar_attempts,
+        "direct_translation_no_jit",
+        no_jit_kwargs,
+    )
+    low_memory_kwargs = dict(no_jit_kwargs)
+    low_memory_kwargs["n_cores"] = 1
+    low_memory_kwargs["iterations"] = max(int(low_memory_kwargs.get("iterations", 1)), 1)
+    low_memory_kwargs["cpe_iterations"] = max(
+        int(low_memory_kwargs.get("cpe_iterations", 50)),
+        50,
+    )
+    low_memory_kwargs["max_horner_scheme_variables"] = 1
+    low_memory_kwargs["max_common_pair_cache_entries"] = min(
+        int(low_memory_kwargs.get("max_common_pair_cache_entries", 20_000)),
+        5_000,
+    )
+    low_memory_kwargs["max_common_pair_distance"] = min(
+        int(low_memory_kwargs.get("max_common_pair_distance", 6)),
+        2,
+    )
+    _append_unique_evaluator_attempt(
+        scalar_attempts,
+        "low_memory_scalar",
+        low_memory_kwargs,
+    )
+
+    if monitor is not None:
+        monitor.emit(
+            "evaluator_scalar_fallback_start",
+            force=True,
+            attempt=scalar_attempts[0][0],
+            attempts=",".join(label for label, _ in scalar_attempts),
+            outputs=len(expressions),
+            n_cores=scalar_attempts[0][1].get("n_cores"),
+            verbose=scalar_attempts[0][1].get("verbose"),
+            iterations=scalar_attempts[0][1].get("iterations"),
+            cpe_iterations=scalar_attempts[0][1].get("cpe_iterations"),
+            max_horner_scheme_variables=scalar_attempts[0][1].get(
+                "max_horner_scheme_variables"
+            ),
+            max_common_pair_cache_entries=scalar_attempts[0][1].get(
+                "max_common_pair_cache_entries"
+            ),
+            max_common_pair_distance=scalar_attempts[0][1].get(
+                "max_common_pair_distance"
+            ),
+            jit_compile=scalar_attempts[0][1].get("jit_compile"),
+            direct_translation=scalar_attempts[0][1].get("direct_translation", False),
+        )
+    evaluators: list[Any] = []
+    start = time.perf_counter()
+    preferred_attempt = 0
+    for index, expr in enumerate(expressions, start=1):
+        if monitor is not None and (
+            index == 1 or index % 50 == 0 or index == len(expressions)
+        ):
+            monitor.emit(
+                "evaluator_scalar_fallback_progress",
+                force=True,
+                attempt=scalar_attempts[preferred_attempt][0],
+                index=index,
+                outputs=len(expressions),
+            )
+        built_evaluator: Any | None = None
+        for attempt_index in range(preferred_attempt, len(scalar_attempts)):
+            label, scalar_kwargs = scalar_attempts[attempt_index]
+            try:
+                built_evaluator = expr.evaluator(input_symbols, **scalar_kwargs)
+                if attempt_index != preferred_attempt:
+                    preferred_attempt = attempt_index
+                    if monitor is not None:
+                        monitor.emit(
+                            "evaluator_scalar_fallback_switch",
+                            force=True,
+                            attempt=label,
+                            index=index,
+                            outputs=len(expressions),
+                            n_cores=scalar_kwargs.get("n_cores"),
+                            iterations=scalar_kwargs.get("iterations"),
+                            cpe_iterations=scalar_kwargs.get("cpe_iterations"),
+                            max_horner_scheme_variables=scalar_kwargs.get(
+                                "max_horner_scheme_variables"
+                            ),
+                            max_common_pair_cache_entries=scalar_kwargs.get(
+                                "max_common_pair_cache_entries"
+                            ),
+                            max_common_pair_distance=scalar_kwargs.get(
+                                "max_common_pair_distance"
+                            ),
+                        )
+                break
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:
+                if not _is_symbolica_panic(exc) and not isinstance(exc, Exception):
+                    raise
+                last_error = exc
+                if monitor is not None:
+                    monitor.emit(
+                        "evaluator_scalar_fallback_expr_failed",
+                        force=True,
+                        attempt=label,
+                        index=index,
+                        outputs=len(expressions),
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:240],
+                        seconds=f"{time.perf_counter() - start:.3f}",
+                    )
+        if built_evaluator is None:
+            if monitor is not None:
+                monitor.emit(
+                    "evaluator_scalar_fallback_failed",
+                    force=True,
+                    attempt=scalar_attempts[-1][0],
+                    index=index,
+                    outputs=len(expressions),
+                    error_type=type(last_error).__name__ if last_error else "unknown",
+                    error=str(last_error)[:240] if last_error else "",
+                    seconds=f"{time.perf_counter() - start:.3f}",
+                )
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("failed to build scalar Symbolica evaluator")
+        evaluators.append(built_evaluator)
+    if monitor is not None:
+        monitor.emit(
+            "evaluator_scalar_fallback_done",
+            force=True,
+            attempt=scalar_attempts[preferred_attempt][0],
+            outputs=len(expressions),
+            seconds=f"{time.perf_counter() - start:.3f}",
+        )
+    return evaluators, "separate"
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("failed to build Symbolica evaluators")
+
+
+def _rss_gib() -> float:
+    # ru_maxrss is KiB on Linux.
+    return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / (1024.0 * 1024.0)
+
+
+def _monitor_value(value: Any) -> str:
+    if isinstance(value, (tuple, list, dict)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+class _FormulaBuildMonitor:
+    """Low-overhead progress logger for long generated-formula builds."""
+
+    def __init__(self, *, kind: str, digest: str, enabled: bool, interval_seconds: float) -> None:
+        self.kind = kind
+        self.digest = digest
+        self.enabled = bool(enabled)
+        self.interval_seconds = max(float(interval_seconds), 0.0)
+        self.start = time.perf_counter()
+        self.next_emit = self.start
+
+    def emit(self, event: str, *, force: bool = False, **fields: Any) -> None:
+        if not self.enabled:
+            return
+        now = time.perf_counter()
+        if not force and self.interval_seconds > 0.0 and now < self.next_emit:
+            return
+        self.next_emit = now + self.interval_seconds
+        payload = {
+            "elapsed": f"{now - self.start:.3f}",
+            "rss_gib": f"{_rss_gib():.3f}",
+            **fields,
+        }
+        field_text = " ".join(
+            f"{key}={_monitor_value(value)}" for key, value in payload.items()
+        )
+        print(f"[fsd-subtraction] {self.kind} {self.digest} {event} {field_text}", flush=True)
+
+
+def _formula_monitor(kind: str, signature: tuple[Any, ...]) -> _FormulaBuildMonitor:
+    if kind == "regular-taylor":
+        payload = _regular_taylor_signature_payload(signature)
+    else:
+        payload = _signature_payload(signature)
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return _FormulaBuildMonitor(
+        kind=kind,
+        digest=digest,
+        enabled=_env_bool("FSD_SUBTRACTION_FORMULA_MONITOR", False),
+        interval_seconds=_env_float("FSD_SUBTRACTION_FORMULA_PROGRESS_SECONDS", 30.0),
+    )
 
 
 class _RegularCacheEvaluatorRef:
@@ -131,32 +504,43 @@ def build_endpoint_projector_formula_symbolica(
             "--allow-fallback-for-missing-caches to generate it"
         )
 
-    ctx = _EndpointProjectorContext(
-        topology,
-        sector,
-        signature,
-        ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
-    )
-    outputs = ctx.build_outputs()
-    evaluators = [
-        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
-        for expr in outputs
-    ]
-    formula = formula_class(
-        signature=signature,
-        input_names=ctx.input_names,
-        input_symbols=ctx.input_symbols,
-        output_expressions=outputs,
-        evaluators=evaluators,
-        laurent_orders=topology.laurent_orders,
-        zero_subsets=ctx.zero_subsets,
-        taylor_orders=ctx.taylor_orders,
-        coefficient_layout=ctx.coefficient_layout,
-        ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
-    )
-    _write_endpoint_projector_formula_to_cache(formula)
-    _increment_topology_counter(topology, "endpoint_projector_formulas_generated")
-    return formula
+    path = _endpoint_projector_cache_path(signature)
+    with formula_cache_lock(path):
+        cached = _load_endpoint_projector_formula_from_cache(
+            topology,
+            signature,
+            formula_class,
+        )
+        if cached is not None:
+            _increment_topology_counter(topology, "endpoint_projector_formulas_from_cache")
+            return cached
+
+        ctx = _EndpointProjectorContext(
+            topology,
+            sector,
+            signature,
+            ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
+        )
+        outputs = ctx.build_outputs()
+        evaluators = [
+            expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
+            for expr in outputs
+        ]
+        formula = formula_class(
+            signature=signature,
+            input_names=ctx.input_names,
+            input_symbols=ctx.input_symbols,
+            output_expressions=outputs,
+            evaluators=evaluators,
+            laurent_orders=topology.laurent_orders,
+            zero_subsets=ctx.zero_subsets,
+            taylor_orders=ctx.taylor_orders,
+            coefficient_layout=ctx.coefficient_layout,
+            ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
+        )
+        _write_endpoint_projector_formula_to_cache(formula)
+        _increment_topology_counter(topology, "endpoint_projector_formulas_generated")
+        return formula
 
 
 def build_regular_taylor_formula_symbolica(
@@ -188,44 +572,57 @@ def build_regular_taylor_formula_symbolica(
             "--allow-fallback-for-missing-caches to generate it"
         )
 
-    ctx = _RegularTaylorContext(topology, sector, signature)
-    use_dualized_regular = ctx.uses_residual_inputs
-    if use_dualized_regular and _regular_taylor_should_use_sparse_expression(ctx):
-        formula = _build_regular_taylor_sparse_expression_formula(
+    path = _regular_taylor_cache_path(signature)
+    with formula_cache_lock(path):
+        cached = _load_regular_taylor_formula_from_cache(
             topology,
-            ctx,
             signature,
             formula_class,
+        )
+        if cached is not None:
+            _increment_topology_counter(topology, "regular_taylor_formulas_from_cache")
+            return cached
+
+        ctx = _RegularTaylorContext(topology, sector, signature)
+        use_dualized_regular = ctx.uses_residual_inputs
+        if use_dualized_regular and _regular_taylor_should_use_sparse_expression(ctx):
+            formula = _build_regular_taylor_sparse_expression_formula(
+                topology,
+                ctx,
+                signature,
+                formula_class,
+            )
+            _write_regular_taylor_formula_to_cache(formula)
+            _increment_topology_counter(topology, "regular_taylor_formulas_generated")
+            return formula
+
+        if use_dualized_regular:
+            formula = _build_regular_taylor_dualized_formula(topology, ctx, signature, formula_class)
+            _write_regular_taylor_formula_to_cache(formula)
+            _increment_topology_counter(topology, "regular_taylor_formulas_generated")
+            return formula
+
+        outputs = ctx.build_outputs()
+        evaluators, evaluator_mode = _build_evaluator_multiple(
+            outputs,
+            ctx.input_symbols,
+            jit_compile=topology.jit_compile_evaluators,
+        )
+        formula = formula_class(
+            signature=signature,
+            input_names=ctx.input_names,
+            input_symbols=ctx.input_symbols,
+            output_expressions=outputs,
+            evaluators=evaluators,
+            evaluator_mode=evaluator_mode,
+            output_layout=ctx.output_layout,
+            input_layout=ctx.input_layout,
+            max_orders=ctx.max_orders,
+            zero_positions=ctx.zero_positions,
         )
         _write_regular_taylor_formula_to_cache(formula)
         _increment_topology_counter(topology, "regular_taylor_formulas_generated")
         return formula
-
-    if use_dualized_regular:
-        formula = _build_regular_taylor_dualized_formula(topology, ctx, signature, formula_class)
-        _write_regular_taylor_formula_to_cache(formula)
-        _increment_topology_counter(topology, "regular_taylor_formulas_generated")
-        return formula
-
-    outputs = ctx.build_outputs()
-    evaluators = [
-        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
-        for expr in outputs
-    ]
-    formula = formula_class(
-        signature=signature,
-        input_names=ctx.input_names,
-        input_symbols=ctx.input_symbols,
-        output_expressions=outputs,
-        evaluators=evaluators,
-        output_layout=ctx.output_layout,
-        input_layout=ctx.input_layout,
-        max_orders=ctx.max_orders,
-        zero_positions=ctx.zero_positions,
-    )
-    _write_regular_taylor_formula_to_cache(formula)
-    _increment_topology_counter(topology, "regular_taylor_formulas_generated")
-    return formula
 
 
 def _increment_topology_counter(topology: Any, name: str) -> None:
@@ -309,8 +706,18 @@ def _build_regular_taylor_sparse_expression_formula(
     formula_class: type,
 ) -> Any:
     """Build sparse residual-input regular coefficients as Symbolica formulas."""
+    monitor = _formula_monitor("regular-taylor", signature)
     allowed_multis = set(ctx.coefficient_multis)
     max_orders = list(ctx.max_orders)
+    monitor.emit(
+        "sparse_start",
+        force=True,
+        axes=ctx.n_axes,
+        coefficient_multis=len(ctx.coefficient_multis),
+        requested_outputs=len(ctx.requested_outputs),
+        coefficient_count=topology.coefficient_count,
+        max_orders=tuple(max_orders),
+    )
 
     def coefficient_series(kind: str) -> ExprSeries:
         return {
@@ -321,28 +728,50 @@ def _build_regular_taylor_sparse_expression_formula(
     j_series = coefficient_series("j")
     u_series = coefficient_series("u")
     f_series = coefficient_series("f")
+    monitor.emit(
+        "coefficient_series_done",
+        force=True,
+        j_terms=len(j_series),
+        u_terms=len(u_series),
+        f_terms=len(f_series),
+    )
     monomial_pref, monomial_log = ctx._regular_monomial_exprs()
+    monitor.emit("u_power_log_start", force=True, terms=len(u_series), power=topology.u_power_base)
     u_power, u_log = _expr_series_pow_real_and_log_allowed(
         u_series,
         topology.u_power_base,
         max_orders,
         allowed_multis,
     )
+    monitor.emit("u_power_log_done", force=True, power_terms=len(u_power), log_terms=len(u_log))
+    monitor.emit("f_power_log_start", force=True, terms=len(f_series), power=-topology.f_power_base)
     f_power, f_log = _expr_series_pow_real_and_log_allowed(
         f_series,
         -topology.f_power_base,
         max_orders,
         allowed_multis,
     )
+    monitor.emit("f_power_log_done", force=True, power_terms=len(f_power), log_terms=len(f_log))
     pref_series = _expr_series_mul_allowed(
         _expr_series_constant(monomial_pref, max_orders),
         _expr_series_mul_allowed(
             j_series,
-            _expr_series_mul_allowed(u_power, f_power, allowed_multis),
+            _expr_series_mul_allowed(
+                u_power,
+                f_power,
+                allowed_multis,
+                monitor=monitor,
+                label="u_power*f_power",
+            ),
             allowed_multis,
+            monitor=monitor,
+            label="jacobian*uf_power",
         ),
         allowed_multis,
+        monitor=monitor,
+        label="monomial_pref*prefactor",
     )
+    monitor.emit("pref_series_done", force=True, terms=len(pref_series))
     log_series = _expr_series_add(
         _expr_series_constant(monomial_log, max_orders),
         _expr_series_add(
@@ -350,19 +779,52 @@ def _build_regular_taylor_sparse_expression_formula(
             _expr_series_scale(f_log, topology.eps_log_f_coeff),
         ),
     )
+    monitor.emit("log_series_done", force=True, terms=len(log_series))
 
     by_eps_order: list[ExprSeries] = []
     log_power = _expr_series_constant(E("1"), max_orders)
     factorial = 1.0
     for regular_order in range(topology.coefficient_count):
+        monitor.emit(
+            "regular_order_start",
+            force=True,
+            regular_order=regular_order,
+            log_power_terms=len(log_power),
+        )
         if regular_order > 0:
             factorial *= float(regular_order)
-            log_power = _expr_series_mul_allowed(log_power, log_series, allowed_multis)
+            log_power = _expr_series_mul_allowed(
+                log_power,
+                log_series,
+                allowed_multis,
+                monitor=monitor,
+                label=f"log_power[{regular_order}]",
+            )
+            monitor.emit(
+                "log_power_done",
+                force=True,
+                regular_order=regular_order,
+                terms=len(log_power),
+            )
+        pref_log_series = _expr_series_mul_allowed(
+            pref_series,
+            log_power,
+            allowed_multis,
+            monitor=monitor,
+            label=f"pref_series*log_power[{regular_order}]",
+        )
         by_eps_order.append(
             _expr_series_scale(
-                _expr_series_mul_allowed(pref_series, log_power, allowed_multis),
+                pref_log_series,
                 1.0 / factorial,
             )
+        )
+        monitor.emit(
+            "regular_order_done",
+            force=True,
+            regular_order=regular_order,
+            terms=len(by_eps_order[-1]),
+            factorial=factorial,
         )
 
     outputs: list[Any] = []
@@ -376,16 +838,37 @@ def _build_regular_taylor_sparse_expression_formula(
         )
         output_layout.append((tuple(int(value) for value in multi_index), int(regular_order)))
 
-    evaluators = [
-        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
-        for expr in outputs
-    ]
+    monitor.emit("outputs_done", force=True, outputs=len(outputs))
+    _write_regular_expression_checkpoint_to_cache(
+        signature,
+        ctx.input_names,
+        output_layout,
+        ctx.input_layout,
+        ctx.max_orders,
+        ctx.zero_positions,
+        outputs,
+        monitor=monitor,
+    )
+    evaluator_start = time.perf_counter()
+    evaluators, evaluator_mode = _build_evaluator_multiple(
+        outputs,
+        ctx.input_symbols,
+        jit_compile=topology.jit_compile_evaluators,
+        monitor=monitor,
+    )
+    monitor.emit(
+        "evaluators_done",
+        force=True,
+        outputs=len(outputs),
+        seconds=f"{time.perf_counter() - evaluator_start:.3f}",
+    )
     return formula_class(
         signature=signature,
         input_names=ctx.input_names,
         input_symbols=ctx.input_symbols,
         output_expressions=outputs,
         evaluators=evaluators,
+        evaluator_mode=evaluator_mode,
         output_layout=output_layout,
         input_layout=ctx.input_layout,
         max_orders=ctx.max_orders,
@@ -694,12 +1177,18 @@ def _load_regular_taylor_formula_from_cache(
                 mirror_cache_entry_to_primary(
                     candidate,
                     data,
-                    sidecar_fields=("evaluator_cache_files",),
+                    sidecar_fields=(
+                        "evaluator_cache_files",
+                        "output_expression_cache_file",
+                        "output_expression_manifest_file",
+                        "output_expression_cache_files",
+                    ),
                 )
                 mode = str(data.get("mode", "explicit"))
                 input_names = [str(name) for name in data["input_names"]]
                 input_symbols = [S(name) for name in input_names]
                 cache_evaluator_files: list[str] = []
+                evaluator_mode = str(data.get("evaluator_mode", "separate"))
                 if mode == "dualized":
                     evaluator_input_names = [
                         str(name) for name in data["evaluator_input_names"]
@@ -739,6 +1228,7 @@ def _load_regular_taylor_formula_from_cache(
                 else:
                     evaluator_input_symbols = []
                     evaluator_dual_shape = []
+                    rebuilt_evaluator_mode: str | None = None
                     cached_evaluator_paths = _regular_evaluator_sidecar_paths(candidate, data)
                     if cached_evaluator_paths is not None:
                         outputs = []
@@ -750,26 +1240,36 @@ def _load_regular_taylor_formula_from_cache(
                             str(path) for path in cached_evaluator_paths
                         ]
                     else:
-                        output_texts = _load_regular_output_expression_strings(candidate, data)
-                        outputs = [E(text) for text in output_texts]
-                        evaluators = [
-                            expr.evaluator(
-                                input_symbols,
-                                jit_compile=topology.jit_compile_evaluators,
-                            )
-                            for expr in outputs
-                        ]
+                        outputs = _load_regular_output_expressions(candidate, data)
+                        evaluators, rebuilt_evaluator_mode = _build_evaluator_multiple(
+                            outputs,
+                            input_symbols,
+                            jit_compile=topology.jit_compile_evaluators,
+                        )
                         _upgrade_regular_cache_with_evaluator_sidecars(
                             candidate,
                             data,
                             evaluators,
                         )
+                    evaluator_mode = (
+                        rebuilt_evaluator_mode
+                        if rebuilt_evaluator_mode is not None
+                        else str(
+                            data.get(
+                                "evaluator_mode",
+                                "multiple"
+                                if len(evaluators) == 1 and len(data.get("output_layout", [])) != 1
+                                else "separate",
+                            )
+                        )
+                    )
                 return formula_class(
                     signature=signature,
                     input_names=input_names,
                     input_symbols=input_symbols,
                     output_expressions=outputs,
                     evaluators=evaluators,
+                    evaluator_mode=evaluator_mode,
                     output_layout=[
                         _regular_output_layout_from_json(item)
                         for item in data["output_layout"]
@@ -803,16 +1303,37 @@ def _regular_expression_sidecar_name(path: Path) -> str:
     return f"{path.stem}.expr.json.gz"
 
 
-def _load_regular_output_expression_strings(path: Path, data: dict[str, Any]) -> list[str]:
-    """Load regular-output expression strings from JSON or a sidecar.
+def _regular_expression_manifest_name(path: Path) -> str:
+    """Return the native Symbolica expression manifest filename."""
+    return f"{path.stem}.expr_manifest.json"
+
+
+def _regular_expression_binary_cache_name(path: Path, index: int) -> str:
+    """Return the native Symbolica binary sidecar filename for one output."""
+    return f"{path.stem}.expr_{int(index):05d}.bin"
+
+
+def _load_regular_output_expressions(path: Path, data: dict[str, Any]) -> list[Any]:
+    """Load regular-output expressions from JSON, text, or binary sidecars.
 
     Runtime-ready caches have serialized evaluator sidecars, so warm generation
-    should not parse these strings.  They are retained as a rebuild/debug asset
-    and loaded only when evaluator bytes are unavailable.
+    should not parse these expressions.  They are retained as a rebuild/debug
+    asset and loaded only when evaluator bytes are unavailable.
     """
     inline = data.get("output_expressions")
     if inline is not None:
-        return [str(item) for item in inline]
+        return [E(str(item)) for item in inline]
+    manifest_name = data.get("output_expression_manifest_file")
+    if manifest_name:
+        manifest_path = path.parent / str(manifest_name)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("signature_payload") != data.get("signature_payload"):
+            raise ValueError("regular Taylor expression manifest signature mismatch")
+        sidecar_names = [str(name) for name in manifest.get("expression_cache_files", [])]
+        expected_count = int(data.get("output_expression_count", -1))
+        if expected_count >= 0 and len(sidecar_names) != expected_count:
+            raise ValueError("regular Taylor expression sidecar count mismatch")
+        return [Expression.load(str(manifest_path.parent / name)) for name in sidecar_names]
     name = data.get("output_expression_cache_file")
     if not name:
         raise KeyError("regular Taylor cache has no output expressions")
@@ -822,7 +1343,7 @@ def _load_regular_output_expression_strings(path: Path, data: dict[str, Any]) ->
     raw = candidate.read_bytes()
     payload = gzip.decompress(raw) if candidate.suffix == ".gz" else raw
     decoded = json.loads(payload.decode("utf-8"))
-    return [str(item) for item in decoded["output_expressions"]]
+    return [E(str(item)) for item in decoded["output_expressions"]]
 
 
 def _regular_evaluator_sidecar_paths(path: Path, data: dict[str, Any]) -> list[Path] | None:
@@ -893,6 +1414,187 @@ def _write_regular_expression_sidecar(path: Path, expressions: list[Any]) -> str
     return name
 
 
+def _regular_expression_compression_level() -> int:
+    return _env_int("FSD_REGULAR_TAYLOR_EXPRESSION_COMPRESSION_LEVEL", 6, minimum=0)
+
+
+def _write_regular_expression_binary_sidecars(
+    path: Path,
+    signature: tuple[Any, ...],
+    input_names: list[str],
+    output_layout: list[tuple[tuple[int, ...], int]],
+    input_layout: list[tuple[str, tuple[int, ...]]],
+    max_orders: list[int],
+    zero_positions: tuple[int, ...],
+    expressions: list[Any],
+    *,
+    monitor: _FormulaBuildMonitor | None = None,
+) -> tuple[str | None, list[str]]:
+    """Persist native Symbolica expression sidecars before evaluator generation."""
+    if not expressions:
+        return None, []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_name = _regular_expression_manifest_name(path)
+    sidecar_names = [
+        _regular_expression_binary_cache_name(path, index)
+        for index in range(len(expressions))
+    ]
+    compression_level = _regular_expression_compression_level()
+    start = time.perf_counter()
+    if monitor is not None:
+        monitor.emit(
+            "expression_binary_sidecar_start",
+            force=True,
+            outputs=len(expressions),
+            compression_level=compression_level,
+        )
+    tmp_path: Path | None = None
+    try:
+        for index, expression in enumerate(expressions):
+            name = sidecar_names[index]
+            destination = path.parent / name
+            tmp_path = destination.with_name(destination.name + ".tmp")
+            expression.save(str(tmp_path), compression_level=compression_level)
+            tmp_path.replace(destination)
+            tmp_path = None
+            completed = index + 1
+            if monitor is not None and (
+                completed == 1 or completed % 64 == 0 or completed == len(expressions)
+            ):
+                size_bytes = destination.stat().st_size if destination.is_file() else 0
+                monitor.emit(
+                    "expression_binary_sidecar_progress",
+                    force=True,
+                    completed=completed,
+                    outputs=len(expressions),
+                    file=name,
+                    bytes=size_bytes,
+                )
+        manifest_payload = {
+            "schema_version": REGULAR_TAYLOR_EXPRESSION_CACHE_VERSION,
+            "kind": "regular-taylor-expression-sidecar",
+            "format": "symbolica-expression-binary",
+            "signature_payload": _regular_taylor_signature_payload(signature),
+            "signature": _jsonable(signature),
+            "input_names": list(input_names),
+            "output_layout": [
+                _regular_output_layout_to_json(item) for item in output_layout
+            ],
+            "input_layout": [
+                _regular_input_layout_to_json(item) for item in input_layout
+            ],
+            "max_orders": [int(order) for order in max_orders],
+            "zero_positions": [int(position) for position in zero_positions],
+            "output_expression_count": len(expressions),
+            "expression_cache_files": sidecar_names,
+            "compression_level": compression_level,
+        }
+        _write_json_atomic(path.parent / manifest_name, manifest_payload)
+        if monitor is not None:
+            monitor.emit(
+                "expression_binary_sidecar_done",
+                force=True,
+                outputs=len(expressions),
+                manifest=manifest_name,
+                seconds=f"{time.perf_counter() - start:.3f}",
+            )
+        return manifest_name, sidecar_names
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+
+def _regular_taylor_explicit_cache_payload(
+    signature: tuple[Any, ...],
+    input_names: list[str],
+    output_layout: list[tuple[tuple[int, ...], int]],
+    input_layout: list[tuple[str, tuple[int, ...]]],
+    max_orders: list[int],
+    zero_positions: tuple[int, ...],
+    *,
+    output_expression_count: int,
+    output_expression_manifest_file: str | None = None,
+    output_expression_cache_files: list[str] | None = None,
+    evaluator_cache_files: list[str] | None = None,
+    evaluator_mode: str = "separate",
+) -> dict[str, Any]:
+    """Build metadata for an explicit regular-Taylor cache/checkpoint."""
+    data: dict[str, Any] = {
+        "signature_payload": _regular_taylor_signature_payload(signature),
+        "mode": "explicit",
+        "input_names": list(input_names),
+        "evaluator_cache_files": list(evaluator_cache_files or []),
+        "evaluator_mode": str(evaluator_mode),
+        "output_layout": [
+            _regular_output_layout_to_json(item) for item in output_layout
+        ],
+        "input_layout": [
+            _regular_input_layout_to_json(item) for item in input_layout
+        ],
+        "max_orders": list(max_orders),
+        "zero_positions": list(zero_positions),
+        "output_expression_omitted": True,
+        "output_expression_count": int(output_expression_count),
+    }
+    if output_expression_manifest_file:
+        data["output_expression_manifest_file"] = output_expression_manifest_file
+    if output_expression_cache_files:
+        data["output_expression_cache_files"] = list(output_expression_cache_files)
+    return data
+
+
+def _write_regular_expression_checkpoint_to_cache(
+    signature: tuple[Any, ...],
+    input_names: list[str],
+    output_layout: list[tuple[tuple[int, ...], int]],
+    input_layout: list[tuple[str, tuple[int, ...]]],
+    max_orders: list[int],
+    zero_positions: tuple[int, ...],
+    output_expressions: list[Any],
+    *,
+    monitor: _FormulaBuildMonitor | None = None,
+) -> tuple[str | None, list[str]]:
+    """Write restartable regular expression metadata before evaluator lowering."""
+    path = _regular_taylor_cache_path(signature)
+    manifest_name, sidecar_names = _write_regular_expression_binary_sidecars(
+        path,
+        signature,
+        input_names,
+        output_layout,
+        input_layout,
+        max_orders,
+        zero_positions,
+        output_expressions,
+        monitor=monitor,
+    )
+    data = _regular_taylor_explicit_cache_payload(
+        signature,
+        input_names,
+        output_layout,
+        input_layout,
+        max_orders,
+        zero_positions,
+        output_expression_count=len(output_expressions),
+        output_expression_manifest_file=manifest_name,
+        output_expression_cache_files=sidecar_names,
+        evaluator_cache_files=[],
+        evaluator_mode="pending",
+    )
+    _write_json_atomic(path, data)
+    if monitor is not None:
+        monitor.emit(
+            "expression_checkpoint_done",
+            force=True,
+            outputs=len(output_expressions),
+            manifest=manifest_name,
+        )
+    return manifest_name, sidecar_names
+
+
 def _regular_cache_candidate_is_curated(path: Path) -> bool:
     """Return whether a cache path is part of the curated source assets."""
     return "curated" in {part.lower() for part in path.parts}
@@ -921,6 +1623,11 @@ def _upgrade_regular_cache_with_evaluator_sidecars(
         return
     try:
         data["evaluator_cache_files"] = _write_regular_evaluator_sidecars(path, evaluators)
+        data["evaluator_mode"] = (
+            "multiple"
+            if len(evaluators) == 1 and len(data.get("output_layout", [])) != 1
+            else str(data.get("evaluator_mode", "separate"))
+        )
         _write_json_atomic(path, data)
     except Exception:
         # The expression JSON remains a valid fallback cache even if evaluator
@@ -932,22 +1639,38 @@ def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
     """Atomically store parseable expression strings for a regular formula."""
     path = _regular_taylor_cache_path(formula.signature)
     path.parent.mkdir(parents=True, exist_ok=True)
+    expression_manifest_file: str | None = None
+    expression_cache_files: list[str] = []
+    if not getattr(formula, "evaluator_dual_shape", None):
+        expression_manifest_file, expression_cache_files = (
+            _write_regular_expression_binary_sidecars(
+                path,
+                formula.signature,
+                list(formula.input_names),
+                list(formula.output_layout),
+                list(formula.input_layout),
+                list(formula.max_orders),
+                tuple(int(position) for position in formula.zero_positions),
+                list(formula.output_expressions),
+            )
+        )
     evaluator_cache_files = _write_regular_evaluator_sidecars(path, list(formula.evaluators))
-    data = {
-        "signature_payload": _regular_taylor_signature_payload(formula.signature),
-        "mode": "dualized" if getattr(formula, "evaluator_dual_shape", None) else "explicit",
-        "input_names": list(formula.input_names),
-        "evaluator_cache_files": evaluator_cache_files,
-        "output_layout": [
-            _regular_output_layout_to_json(item) for item in formula.output_layout
-        ],
-        "input_layout": [
-            _regular_input_layout_to_json(item) for item in formula.input_layout
-        ],
-        "max_orders": list(formula.max_orders),
-        "zero_positions": list(formula.zero_positions),
-    }
     if getattr(formula, "evaluator_dual_shape", None):
+        data = {
+            "signature_payload": _regular_taylor_signature_payload(formula.signature),
+            "mode": "dualized",
+            "input_names": list(formula.input_names),
+            "evaluator_cache_files": evaluator_cache_files,
+            "evaluator_mode": str(getattr(formula, "evaluator_mode", "separate")),
+            "output_layout": [
+                _regular_output_layout_to_json(item) for item in formula.output_layout
+            ],
+            "input_layout": [
+                _regular_input_layout_to_json(item) for item in formula.input_layout
+            ],
+            "max_orders": list(formula.max_orders),
+            "zero_positions": list(formula.zero_positions),
+        }
         data["scalar_expression_omitted"] = True
         data["scalar_expression_count"] = len(formula.output_expressions)
         data["evaluator_input_names"] = [
@@ -962,8 +1685,19 @@ def _write_regular_taylor_formula_to_cache(formula: Any) -> None:
         ]
         data["dual_variable_count"] = int(formula.dual_variable_count)
     else:
-        data["output_expression_omitted"] = True
-        data["output_expression_count"] = len(formula.output_expressions)
+        data = _regular_taylor_explicit_cache_payload(
+            formula.signature,
+            list(formula.input_names),
+            list(formula.output_layout),
+            list(formula.input_layout),
+            list(formula.max_orders),
+            tuple(int(position) for position in formula.zero_positions),
+            output_expression_count=len(formula.output_expressions),
+            output_expression_manifest_file=expression_manifest_file,
+            output_expression_cache_files=expression_cache_files,
+            evaluator_cache_files=evaluator_cache_files,
+            evaluator_mode=str(getattr(formula, "evaluator_mode", "separate")),
+        )
     _write_json_atomic(path, data)
 
 
@@ -2033,22 +2767,74 @@ def _expr_series_mul_allowed(
     left: ExprSeries,
     right: ExprSeries,
     allowed_multis: set[tuple[int, ...]],
+    *,
+    monitor: _FormulaBuildMonitor | None = None,
+    label: str = "series_mul",
 ) -> ExprSeries:
     """Multiply sparse series and keep only declared ancestor support."""
     if not left or not right or not allowed_multis:
         return {}
     rank = len(next(iter(allowed_multis)))
+    if monitor is None or not monitor.enabled:
+        out: ExprSeries = {}
+        for left_key, left_value in left.items():
+            for right_key, right_value in right.items():
+                key = tuple(
+                    int(left_key[index]) + int(right_key[index])
+                    for index in range(rank)
+                )
+                if key not in allowed_multis:
+                    continue
+                term = left_value * right_value
+                out[key] = out[key] + term if key in out else term
+        return out
+
+    start = time.perf_counter()
+    pair_count = 0
     out: ExprSeries = {}
+    monitor.emit(
+        "series_mul_start",
+        force=True,
+        label=label,
+        left_terms=len(left),
+        right_terms=len(right),
+        allowed_terms=len(allowed_multis),
+    )
     for left_key, left_value in left.items():
         for right_key, right_value in right.items():
+            pair_count += 1
             key = tuple(
                 int(left_key[index]) + int(right_key[index])
                 for index in range(rank)
             )
             if key not in allowed_multis:
+                if pair_count % 4096 == 0:
+                    monitor.emit(
+                        "series_mul_progress",
+                        label=label,
+                        pair_count=pair_count,
+                        kept_terms=len(out),
+                    )
                 continue
             term = left_value * right_value
             out[key] = out[key] + term if key in out else term
+            if pair_count % 4096 == 0:
+                monitor.emit(
+                    "series_mul_progress",
+                    label=label,
+                    pair_count=pair_count,
+                    kept_terms=len(out),
+                )
+    monitor.emit(
+        "series_mul_done",
+        force=True,
+        label=label,
+        left_terms=len(left),
+        right_terms=len(right),
+        pair_count=pair_count,
+        kept_terms=len(out),
+        seconds=f"{time.perf_counter() - start:.3f}",
+    )
     return out
 
 

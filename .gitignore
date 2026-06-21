@@ -21,7 +21,19 @@ __pycache__/
 
 # Generated integration outputs kept out of the source history.
 /result.json
+/cache_generation_bottleneck.py
+/cache_generation_chain_rule_current_mini.py
+/cache_generation_chain_rule_live_example.py
+/symbolica_series_truncation_catch.py
+/.cache_warm*/
 /docs/triple_box_fsd_result.json
+/docs/bottleneck_*
+/docs/cache_shards/
+/docs/cluster_cache_*
+/docs/endpoint_test*.json
+/docs/hybrid_*
+/docs/sandbox_parallel/
+/docs/subtraction_probes/
 /examples/outputs/result.json
 /examples/outputs/*_result.json
 /examples/outputs/triple_box_all_*.json

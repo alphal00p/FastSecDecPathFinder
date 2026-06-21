@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -45,6 +46,8 @@ from formatting import (
     selected_prefactor_values,
     summary_data,
 )
+import integrand as integrand_module
+import subtraction_formula as subtraction_formula_module
 from integrand import (
     EndpointProjectorFormulaDefinition,
     RegularTaylorFormulaDefinition,
@@ -1256,6 +1259,7 @@ def test_summary_uses_compact_dual_shape_statistics() -> None:
 def test_watchdog_wrapper_stops_on_stop_file(tmp_path: Path) -> None:
     """The local run wrapper can stop its own child without an external kill."""
     stop_file = tmp_path / "stop.order"
+    sleep_executable = shutil.which("sleep") or "/bin/sleep"
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -1271,7 +1275,7 @@ def test_watchdog_wrapper_stops_on_stop_file(tmp_path: Path) -> None:
             "--stop-file",
             str(stop_file),
             "--",
-            "/bin/sleep",
+            sleep_executable,
             "30",
         ],
         cwd=PROJECT_ROOT,
@@ -2052,6 +2056,155 @@ def test_chain_rule_formula_matches_python_symbolic_composition() -> None:
 
     assert topology._chain_rule_formulas
     np.testing.assert_allclose(formula_values, python_values, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_chain_rule_expression_sidecar_resume_skips_expression_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A native expression sidecar should restart evaluator generation directly."""
+    cache_dir = tmp_path / "formula_cache"
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("FSD_CHAIN_RULE_MONITOR", "true")
+    monkeypatch.setenv("FSD_CHAIN_RULE_EXPRESSION_SIDECAR_REQUIRED", "true")
+    monkeypatch.setenv("FSD_CHAIN_RULE_EXPRESSION_PROGRESS_EVERY", "1")
+    monkeypatch.setenv("FSD_CHAIN_RULE_EXPRESSION_COMPRESSION_LEVEL", "0")
+    monkeypatch.setenv("FSD_SYMBOLICA_EVALUATOR_CORES", "1")
+    monkeypatch.setenv("FSD_SYMBOLICA_EVALUATOR_VERBOSE", "false")
+    monkeypatch.setattr(integrand_module, "formula_cache_read_roots", lambda: [cache_dir])
+
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        dual_evaluator_mode="symbolic-derivatives",
+    )
+    topology = build_topology(request)
+
+    class DummySector:
+        name = "sidecar_resume_sector"
+
+        def structurally_active_map_indices(self) -> tuple[int, ...]:
+            return (0,)
+
+    sector = DummySector()
+    output_shape = [(0,), (1,)]
+    signature = topology._chain_rule_formula_signature(sector, "f", output_shape)
+    cache_json_path = integrand_module._chain_rule_formula_cache_path(signature)
+
+    generated = topology._build_chain_rule_formula(sector, "f", output_shape, signature)
+    assert generated.cache_expression_manifest_file is not None
+    assert len(generated.cache_expression_files) == len(output_shape)
+    assert (cache_dir / generated.cache_expression_manifest_file).is_file()
+    assert all((cache_dir / name).is_file() for name in generated.cache_expression_files)
+    assert not cache_json_path.exists()
+
+    rows = np.asarray([[0.25, 2.0, 5.0], [0.5, 3.0, -7.0]], dtype=np.complex128)
+    generated_values = generated.evaluate_complex_batch(rows)
+    capsys.readouterr()
+
+    def forbidden_expression_generation(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("expression generation was entered despite sidecar cache")
+
+    monkeypatch.setattr(
+        integrand_module,
+        "_expr_series_mul_allowed",
+        forbidden_expression_generation,
+    )
+    resumed = topology.chain_rule_formula_for(sector, "f", output_shape)
+    captured = capsys.readouterr()
+
+    assert resumed.cache_expression_manifest_file == generated.cache_expression_manifest_file
+    assert resumed.cache_expression_files == generated.cache_expression_files
+    assert cache_json_path.exists()
+    assert "expressions_loaded_sidecar" in captured.err
+    assert "evaluator_start source=expression-sidecar" in captured.err
+    assert "expressions_done" not in captured.err
+    np.testing.assert_allclose(
+        resumed.evaluate_complex_batch(rows),
+        generated_values,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+def test_regular_taylor_expression_checkpoint_rebuilds_evaluator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regular Taylor expression checkpoints should skip expression generation."""
+    cache_dir = tmp_path / "formula_cache"
+    monkeypatch.setenv("FSD_SUBTRACTION_FORMULA_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("FSD_REGULAR_TAYLOR_EXPRESSION_COMPRESSION_LEVEL", "0")
+    monkeypatch.setattr(subtraction_formula_module, "formula_cache_read_roots", lambda: [cache_dir])
+
+    signature = ("regular-taylor", 3, 6, "checkpoint-test")
+    input_names = ["x"]
+    output_layout = [((0,), 0), ((1,), 1)]
+    input_layout = [("u", (0,)), ("u", (1,))]
+    max_orders = [1]
+    zero_positions: tuple[int, ...] = ()
+    x = S("x")
+    outputs = [x + E("1"), x * x]
+
+    manifest_name, sidecar_names = (
+        subtraction_formula_module._write_regular_expression_checkpoint_to_cache(
+            signature,
+            input_names,
+            output_layout,
+            input_layout,
+            max_orders,
+            zero_positions,
+            outputs,
+        )
+    )
+    cache_json_path = subtraction_formula_module._regular_taylor_cache_path(signature)
+    assert cache_json_path.is_file()
+    assert manifest_name is not None
+    assert (cache_dir / manifest_name).is_file()
+    assert all((cache_dir / name).is_file() for name in sidecar_names)
+
+    calls: list[int] = []
+
+    def fake_build_evaluator_multiple(
+        expressions: list[Any],
+        input_symbols: list[Any],
+        *,
+        jit_compile: bool,
+        monitor: Any = None,
+    ) -> tuple[list[Any], str]:
+        calls.append(len(expressions))
+        assert [str(symbol) for symbol in input_symbols] == input_names
+        assert jit_compile is False
+        return ["rebuilt-evaluator"], "multiple"
+
+    class DummyTopology:
+        jit_compile_evaluators = False
+
+    class DummyFormula:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(
+        subtraction_formula_module,
+        "_build_evaluator_multiple",
+        fake_build_evaluator_multiple,
+    )
+    loaded = subtraction_formula_module._load_regular_taylor_formula_from_cache(
+        DummyTopology(),
+        signature,
+        DummyFormula,
+    )
+
+    assert loaded is not None
+    assert calls == [len(outputs)]
+    assert loaded.evaluators == ["rebuilt-evaluator"]
+    assert loaded.evaluator_mode == "multiple"
+    assert len(loaded.output_expressions) == len(outputs)
+    assert loaded.output_layout == output_layout
+    assert loaded.input_layout == input_layout
 
 
 def test_chain_rule_signature_ignores_sector_name() -> None:

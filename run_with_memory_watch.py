@@ -74,40 +74,82 @@ def _terminate_process_group(
     interrupt_grace_seconds: float,
     kill_grace_seconds: float,
 ) -> None:
-    """Interrupt, then terminate, the child process group owned by this wrapper."""
-    _log(log_handle, f"{reason}; interrupting process group pid={proc.pid}")
-    try:
-        os.killpg(proc.pid, signal.SIGINT)
-    except ProcessLookupError:
-        return
-    except PermissionError as exc:
-        _log(log_handle, f"could not send SIGINT to process group: {exc}")
-        return
+    """Interrupt, then terminate, the child tree and all child process groups."""
+    target_pids = _target_process_tree_pids(proc.pid)
+    _log(log_handle, f"{reason}; interrupting process tree pids={target_pids}")
+    _signal_process_tree(target_pids, signal.SIGINT, log_handle)
     interrupt_deadline = time.monotonic() + max(float(interrupt_grace_seconds), 0.0)
-    while proc.poll() is None and time.monotonic() < interrupt_deadline:
+    while (
+        (proc.poll() is None or _live_pids(target_pids))
+        and time.monotonic() < interrupt_deadline
+    ):
         time.sleep(0.5)
-    if proc.poll() is not None:
-        _log(log_handle, "process group exited after SIGINT")
+    if proc.poll() is not None and not _live_pids(target_pids):
+        _log(log_handle, "process tree exited after SIGINT")
         return
 
-    _log(log_handle, f"process group still alive; sending SIGTERM pid={proc.pid}")
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except PermissionError as exc:
-        _log(log_handle, f"could not send SIGTERM to process group: {exc}")
-        return
+    live_after_interrupt = _live_pids(target_pids)
+    _log(log_handle, f"process tree still alive; sending SIGTERM pids={live_after_interrupt}")
+    _signal_process_tree(live_after_interrupt or target_pids, signal.SIGTERM, log_handle)
     time.sleep(max(float(kill_grace_seconds), 0.0))
-    if proc.poll() is None:
-        _log(log_handle, "process group still alive; sending SIGKILL")
+    live_after_term = _live_pids(target_pids)
+    if proc.poll() is None or live_after_term:
+        _log(log_handle, f"process tree still alive; sending SIGKILL pids={live_after_term}")
+        _signal_process_tree(live_after_term or target_pids, signal.SIGKILL, log_handle)
+
+
+def _target_process_tree_pids(root_pid: int) -> list[int]:
+    """Return known live process ids in the watched tree."""
+    _rss_kb, pids = _tree_rss_kb(root_pid)
+    return sorted(set([root_pid, *pids]))
+
+
+def _pid_is_live(pid: int) -> bool:
+    status_path = Path("/proc") / str(pid) / "status"
+    try:
+        for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("State:"):
+                parts = line.split()
+                return len(parts) < 2 or parts[1] != "Z"
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _live_pids(pids: list[int]) -> list[int]:
+    return [pid for pid in sorted(set(pids)) if _pid_is_live(pid)]
+
+
+def _signal_process_tree(pids: list[int], sig: signal.Signals, log_handle) -> None:
+    pgids: set[int] = set()
+    live = _live_pids(pids)
+    for pid in live:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            pgids.add(os.getpgid(pid))
         except ProcessLookupError:
-            pass
+            continue
         except PermissionError as exc:
-            _log(log_handle, f"could not send SIGKILL to process group: {exc}")
-            pass
+            _log(log_handle, f"could not read process group for pid={pid}: {exc}")
+    for pgid in sorted(pgids):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            _log(log_handle, f"could not send {sig.name} to process group {pgid}: {exc}")
+    for pid in live:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            _log(log_handle, f"could not send {sig.name} to pid={pid}: {exc}")
 
 
 def _tree_rss_kb_psutil(root_pid: int) -> tuple[int | None, list[int]] | None:

@@ -26,7 +26,7 @@ from cache_utils import formula_cache_dir
 from definitions import IntegralRequest
 from dot_topology import clear_dot_bundle_cache, get_dot_bundle
 from generation_timing import GenerationProgress
-from integrand import build_topology
+from integrand import ChainRuleColdBuildDeferred, build_topology
 from integrator import integrate
 from sectors_generator import generate_sectors
 
@@ -102,6 +102,28 @@ def _select_cases(request: IntegralRequest) -> list[CacheWarmCase]:
             selected.append(by_name[name])
         return selected
     return [case for case in EXAMPLE_CASES if case.loop_count in wanted_loops]
+
+
+def _selected_sector_ids(request: IntegralRequest, sectors: list[Any]) -> list[int]:
+    """Return validated canonical sector ids requested for cache warming."""
+
+    if request.sectors is None:
+        return list(range(len(sectors)))
+    if not request.sectors:
+        raise ValueError("--sectors requires at least one sector id")
+    selected = [int(sector_id) for sector_id in request.sectors]
+    if len(set(selected)) != len(selected):
+        raise ValueError("--sectors must not contain duplicate ids")
+    invalid = [
+        sector_id for sector_id in selected
+        if sector_id < 0 or sector_id >= len(sectors)
+    ]
+    if invalid:
+        raise ValueError(
+            f"--sectors contains invalid sector ids {invalid}; "
+            f"valid range is 0..{len(sectors) - 1}"
+        )
+    return selected
 
 
 def _case_request(base: IntegralRequest, case: CacheWarmCase, workdir: Path) -> IntegralRequest:
@@ -410,11 +432,13 @@ def run_universal_cache_mode(
             bundle = get_dot_bundle(case_request, progress=progress)
             topology = build_topology(case_request)
             sectors = generate_sectors(case_request)
+            selected_sector_ids = _selected_sector_ids(case_request, sectors)
+            active_sectors = [sectors[sector_id] for sector_id in selected_sector_ids]
             _configure_laurent_range(topology, sectors, int(request.max_eps_order))
             universal_seconds = _prepare_universal_formulas(
                 case_request,
                 topology,
-                sectors,
+                active_sectors,
                 progress,
             )
             verify = _verify_case(case_request, topology, sectors)
@@ -424,13 +448,27 @@ def run_universal_cache_mode(
                     "total_seconds": time.perf_counter() - start,
                     "universal_cache_seconds": universal_seconds,
                     "generation_timings": bundle.timings.to_summary_dict(),
-                    "sector_stats": _sector_stats(sectors),
+                    "selected_sector_ids": selected_sector_ids,
+                    "sector_stats": _sector_stats(active_sectors),
+                    "full_sector_stats": _sector_stats(sectors),
                     "verification": verify,
                     "cache_before": cache_before,
                     "cache_after": _count_cache_files(),
                 }
             )
             row["cache_delta"] = _cache_delta(row["cache_before"], row["cache_after"])
+        except ChainRuleColdBuildDeferred as exc:
+            row.update(
+                {
+                    "status": "deferred",
+                    "error": str(exc),
+                    "total_seconds": time.perf_counter() - start,
+                    "cache_before": cache_before,
+                    "cache_after": _count_cache_files(),
+                }
+            )
+            row["cache_delta"] = _cache_delta(row["cache_before"], row["cache_after"])
+            logger.warning("cache warm case %s deferred: %s", case.name, exc)
         except Exception as exc:
             row.update(
                 {

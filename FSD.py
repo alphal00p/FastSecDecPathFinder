@@ -61,7 +61,7 @@ def resolve_mode(m: float, requested: str) -> str:
 
 def validate_request(request: IntegralRequest) -> None:
     """Reject unsupported kinematics before building sectors or benchmarks."""
-    if request.command not in {"run", "generate", "integrate", "cache"}:
+    if request.command not in {"run", "generate", "integrate", "cache", "test"}:
         raise ValueError(f"unsupported command {request.command!r}")
     if request.command == "cache":
         if not request.cache_loop_counts:
@@ -73,6 +73,33 @@ def validate_request(request: IntegralRequest) -> None:
         return
     if request.evaluator_lru_size < 0:
         raise ValueError("--evaluator-lru-size must be >= 0")
+    if request.command == "test":
+        if request.workers <= 0:
+            raise ValueError("--workers must be positive in test mode")
+        if not request.test_boundary_distances:
+            raise ValueError("--test-boundary-distances requires at least one distance")
+        invalid_distances = [
+            value for value in request.test_boundary_distances
+            if not (0.0 < float(value) < 0.5)
+        ]
+        if invalid_distances:
+            raise ValueError(
+                "--test-boundary-distances entries must lie in (0, 0.5); "
+                f"got {invalid_distances}"
+            )
+        if (
+            request.test_boundary_growth_power_tolerance is not None
+            and request.test_boundary_growth_power_tolerance < 0.0
+        ):
+            raise ValueError("--test-boundary-growth-power-tolerance must be non-negative")
+        if (
+            request.test_boundary_growth_power_tolerance is not None
+            and len(request.test_boundary_distances) < 2
+        ):
+            raise ValueError(
+                "--test-boundary-growth-power-tolerance requires at least two "
+                "--test-boundary-distances"
+            )
     if request.command in {"generate", "integrate"} and request.output is None:
         raise ValueError(f"{request.command} requires --output DIR")
     if request.command == "generate":
@@ -308,13 +335,14 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["run", "generate", "integrate", "cache"],
+        choices=["run", "generate", "integrate", "cache", "test"],
         default=defaults.get("command", "run"),
         help=(
             "Two-stage DOT workflow command. Omit for the legacy single-shot "
             "generate+integrate path; use 'generate' to prepare a bundle and "
             "'integrate' to run strictly from a prepared bundle. Use 'cache' "
-            "to warm topology-independent formula caches on example DOT cases."
+            "to warm topology-independent formula caches on example DOT cases, "
+            "or 'test' to probe selected sectors near all endpoint corners."
         ),
     )
     parser.add_argument(
@@ -364,8 +392,9 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         type=int,
         default=None,
         help=(
-            "Integrate only the listed canonical sector ids from the sector summary table. "
-            "Inactive sectors are still recorded in result.json with zero samples."
+            "Restrict sector-oriented commands to the listed canonical sector ids "
+            "from the sector summary table. In integration output, inactive sectors "
+            "are still recorded in result.json with zero samples."
         ),
     )
     parser.add_argument("--s", type=float, default=None, help="Triangle invariant s=p0^2.")
@@ -686,6 +715,38 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help="Democratic samples per sector used to verify warmed cache assets.",
     )
     parser.add_argument(
+        "--test-boundary-distances",
+        nargs="+",
+        type=float,
+        default=defaults.get("test_boundary_distances", (1.0e-6, 1.0e-8)),
+        help=(
+            "Endpoint distances used by the 'test' subcommand. For each distance "
+            "the test probes all low/high hypercube corners plus diagnostic faces."
+        ),
+    )
+    parser.add_argument(
+        "--test-boundary-growth-power-tolerance",
+        "--test-boundary-relative-tolerance",
+        dest="test_boundary_growth_power_tolerance",
+        type=float,
+        default=defaults.get(
+            "test_boundary_growth_power_tolerance",
+            defaults.get("test_boundary_relative_tolerance", 0.5),
+        ),
+        help=(
+            "Per-endpoint-distance-coordinate allowed effective power-law growth exponent in the Laurent "
+            "weight vector or training weight between matched endpoint probes at "
+            "consecutive --test-boundary-distances. This flags power-like endpoint "
+            "growth when p exceeds tolerance times the number of coordinates tending to zero. "
+            "Set to a negative value to disable this stability check."
+        ),
+    )
+    parser.add_argument(
+        "--test-report-path",
+        default=defaults.get("test_report_path"),
+        help="Optional JSON report path written by the 'test' subcommand.",
+    )
+    parser.add_argument(
         "--no-cache-estimate-3l",
         dest="cache_estimate_3l",
         action="store_false",
@@ -889,6 +950,18 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         cache_workdir=str(Path(args.cache_workdir).expanduser()),
         cache_verify_samples_per_sector=int(args.cache_verify_samples_per_sector),
         cache_estimate_3l=bool(args.cache_estimate_3l),
+        test_boundary_distances=tuple(float(value) for value in args.test_boundary_distances),
+        test_boundary_growth_power_tolerance=(
+            None
+            if args.test_boundary_growth_power_tolerance is not None
+            and float(args.test_boundary_growth_power_tolerance) < 0.0
+            else float(args.test_boundary_growth_power_tolerance)
+        ),
+        test_report_path=(
+            str(Path(args.test_report_path).expanduser())
+            if args.test_report_path is not None
+            else None
+        ),
     )
 
 
@@ -1591,6 +1664,16 @@ def main() -> int:
                 f"{manifest.get('artifact_counts', {})}"
             )
         return 0
+
+    if request.command == "test":
+        try:
+            from boundary_test import run_endpoint_test_mode
+
+            report = run_endpoint_test_mode(request, topology, sectors, summary)
+        except Exception as exc:
+            print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+            return 1
+        return 0 if report.get("status") == "ok" else 1
 
     try:
         target = resolve_target(request, topology, summary, logger=logger)

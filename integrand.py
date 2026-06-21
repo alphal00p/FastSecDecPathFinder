@@ -8,6 +8,8 @@ only evaluates prepared sector callbacks and U/F callbacks on numeric batches.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 import copy
 import cmath
 from functools import lru_cache
@@ -17,17 +19,25 @@ import hashlib
 from itertools import product
 import json
 import math
+import resource
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Any
 
 import numpy as np
 from symbolica import E, Evaluator, Expression, Replacement, S
 
-from cache_utils import formula_cache_dir, formula_cache_read_roots, mirror_cache_entry_to_primary
+from cache_utils import (
+    FormulaCacheLockUnavailable,
+    formula_cache_dir,
+    formula_cache_lock,
+    formula_cache_read_roots,
+    mirror_cache_entry_to_primary,
+)
 from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
 from sectors_generator import SectorDefinition
 from subtraction_formula import (
@@ -38,6 +48,213 @@ from subtraction_formula import (
     regular_taylor_formula_has_cache,
     regular_taylor_formula_has_curated_cache,
 )
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean environment flag."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read an integer environment knob with a lower bound."""
+
+    value = os.environ.get(name)
+    if value is None:
+        return int(default)
+    try:
+        return max(int(value), int(minimum))
+    except ValueError:
+        return int(default)
+
+
+def _env_optional_int(
+    name: str,
+    default: int | None = None,
+    *,
+    minimum: int | None = None,
+) -> int | None:
+    """Read an optional integer environment knob."""
+
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    if minimum is not None:
+        return max(parsed, int(minimum))
+    return parsed
+
+
+def _chain_rule_monitor_enabled() -> bool:
+    """Return whether cold chain-rule formula builds should emit stage logs."""
+
+    return _env_flag("FSD_CHAIN_RULE_MONITOR", True)
+
+
+def _process_maxrss_gib() -> float:
+    """Return this process' peak resident set size in GiB."""
+
+    return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / (1024.0 * 1024.0)
+
+
+def _chain_rule_monitor(message: str, *, build_start: float | None = None) -> None:
+    """Emit one chain-rule monitor line to the worker log."""
+
+    if _chain_rule_monitor_enabled():
+        fields = []
+        if build_start is not None:
+            fields.append(f"elapsed={time.perf_counter() - build_start:.3f}")
+        fields.append(f"rss_gib={_process_maxrss_gib():.3f}")
+        print(f"[fsd-chain-rule] {message} {' '.join(fields)}", file=sys.stderr, flush=True)
+
+
+def _chain_rule_compose_mode() -> str:
+    """Return the cold chain-rule expression composition strategy."""
+
+    value = os.environ.get("FSD_CHAIN_RULE_COMPOSE_MODE", "inplace").strip().lower()
+    if value in {"inplace", "exact", "term-lists", "output-threads"}:
+        return value
+    return "inplace"
+
+
+def _chain_rule_compose_progress_every() -> int:
+    """Return the derivative interval for chain-rule composition progress."""
+
+    return _env_int("FSD_CHAIN_RULE_COMPOSE_PROGRESS_EVERY", 25)
+
+
+def _chain_rule_term_progress_every() -> int:
+    """Return the contribution interval for term-list composition progress."""
+
+    return _env_int("FSD_CHAIN_RULE_TERM_PROGRESS_EVERY", 10000)
+
+
+def _chain_rule_mul_progress_every() -> int:
+    """Return the pair interval for large chain-rule series products."""
+
+    return _env_int("FSD_CHAIN_RULE_MUL_PROGRESS_EVERY", 0, minimum=0)
+
+
+def _chain_rule_output_threads() -> int:
+    """Return the output-reduction thread count for output-threads composition."""
+
+    return _env_int("FSD_CHAIN_RULE_OUTPUT_THREADS", 1)
+
+
+def _chain_rule_expression_sidecar_progress_every() -> int:
+    """Return the expression-sidecar interval for chain-rule progress logs."""
+
+    return _env_int("FSD_CHAIN_RULE_EXPRESSION_PROGRESS_EVERY", 64)
+
+
+def _chain_rule_expression_compression_level() -> int:
+    """Return the Symbolica binary expression compression level."""
+
+    value = os.environ.get("FSD_CHAIN_RULE_EXPRESSION_COMPRESSION_LEVEL")
+    if value is None:
+        return 9
+    try:
+        return min(max(int(value), 0), 11)
+    except ValueError:
+        return 9
+
+
+def _chain_rule_expression_sidecar_required() -> bool:
+    """Return whether evaluator builds require a saved expression checkpoint."""
+
+    return _env_flag("FSD_CHAIN_RULE_EXPRESSION_SIDECAR_REQUIRED", True)
+
+
+def _chain_rule_defer_when_global_locked() -> bool:
+    """Return whether workers should defer instead of waiting on cold global lock."""
+
+    return _env_flag("FSD_CHAIN_RULE_DEFER_WHEN_GLOBAL_LOCKED", False)
+
+
+def _chain_rule_defer_when_cache_locked() -> bool:
+    """Return whether workers should defer instead of waiting on cold formula locks."""
+
+    if "FSD_CHAIN_RULE_DEFER_WHEN_CACHE_LOCKED" in os.environ:
+        return _env_flag("FSD_CHAIN_RULE_DEFER_WHEN_CACHE_LOCKED", False)
+    return _chain_rule_defer_when_global_locked()
+
+
+class ChainRuleColdBuildDeferred(RuntimeError):
+    """Raised when a shard should be requeued behind an active cold formula build."""
+
+
+class ChainRuleExpressionSidecarWriteError(RuntimeError):
+    """Raised when a required expression checkpoint cannot be persisted."""
+
+
+def _chain_rule_global_cold_lock_enabled() -> bool:
+    """Return whether cold chain-rule builds should be globally serialized."""
+
+    return _env_flag("FSD_CHAIN_RULE_GLOBAL_COLD_LOCK", False)
+
+
+@contextmanager
+def _chain_rule_global_cold_lock(signature_id: str):
+    """Optionally serialize cold chain-rule generation across cache signatures."""
+
+    if not _chain_rule_global_cold_lock_enabled():
+        yield
+        return
+
+    lock_path = _chain_rule_formula_cache_dir() / "chain_rule_global_cold_generation.json"
+    _chain_rule_monitor(f"{signature_id} global_cold_lock_wait lock={lock_path.name}")
+    try:
+        with formula_cache_lock(
+            lock_path,
+            blocking=not _chain_rule_defer_when_global_locked(),
+        ):
+            _chain_rule_monitor(f"{signature_id} global_cold_lock_acquired lock={lock_path.name}")
+            yield
+    except FormulaCacheLockUnavailable as exc:
+        _chain_rule_monitor(f"{signature_id} global_cold_lock_deferred lock={lock_path.name}")
+        raise ChainRuleColdBuildDeferred(
+            f"cold chain-rule formula deferred while another worker holds {lock_path.name}"
+        ) from exc
+
+
+def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
+    """Return tunable Symbolica evaluator optimization options."""
+
+    kwargs: dict[str, Any] = {
+        "jit_compile": bool(jit_compile),
+        "n_cores": _env_int("FSD_SYMBOLICA_EVALUATOR_CORES", 4),
+        "verbose": _env_flag("FSD_SYMBOLICA_EVALUATOR_VERBOSE", True),
+    }
+    optional_ints = {
+        "iterations": ("FSD_SYMBOLICA_EVALUATOR_ITERATIONS", 1, 1),
+        "cpe_iterations": ("FSD_SYMBOLICA_EVALUATOR_CPE_ITERATIONS", 50, 50),
+        "jit_optimization_level": ("FSD_SYMBOLICA_JIT_OPTIMIZATION_LEVEL", None, None),
+        "max_horner_scheme_variables": ("FSD_SYMBOLICA_MAX_HORNER_SCHEME_VARIABLES", 6, None),
+        "max_common_pair_cache_entries": (
+            "FSD_SYMBOLICA_MAX_COMMON_PAIR_CACHE_ENTRIES",
+            20_000,
+            None,
+        ),
+        "max_common_pair_distance": ("FSD_SYMBOLICA_MAX_COMMON_PAIR_DISTANCE", 6, None),
+    }
+    for key, (env_name, default, minimum) in optional_ints.items():
+        value = _env_optional_int(env_name, default, minimum=minimum)
+        if value is not None:
+            kwargs[key] = value
+    bool_options = {
+        "direct_translation": "FSD_SYMBOLICA_DIRECT_TRANSLATION",
+        "jit_direct_translation": "FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION",
+    }
+    for key, env_name in bool_options.items():
+        if env_name in os.environ:
+            kwargs[key] = _env_flag(env_name)
+    return kwargs
 from utils import decimal_complex_with_precision, decimal_with_precision
 
 
@@ -53,6 +270,7 @@ ComplexPreciseRow = list[ComplexPrecise]
 # topology.
 CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS = 4
 CHAIN_RULE_FORMULA_CACHE_VERSION = 4
+CHAIN_RULE_EXPRESSION_CACHE_VERSION = 1
 TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION = 1
 
 
@@ -2486,19 +2704,55 @@ class TopologyDefinition:
                 f"{polynomial} shape {tuple(active_shape)}"
             )
 
-        start = time.perf_counter()
-        formula = self._build_chain_rule_formula(sector, polynomial, active_shape, signature)
-        formula.build_seconds = time.perf_counter() - start
-        self.chain_rule_formula_build_seconds += formula.build_seconds
-        self.chain_rule_formulas_generated += 1
-        _write_chain_rule_formula_to_cache(formula)
-        if self.chain_rule_metadata_only:
-            metadata_formula = _load_chain_rule_formula_from_cache(
-                signature,
-                load_evaluators=False,
+        path = _chain_rule_formula_cache_path(signature)
+        signature_id = path.stem.removeprefix("chain_rule_")
+        _chain_rule_monitor(f"{signature_id} formula_lock_wait lock={path.name}")
+        try:
+            lock_context = formula_cache_lock(
+                path,
+                blocking=not _chain_rule_defer_when_cache_locked(),
             )
-            if metadata_formula is not None:
-                formula = metadata_formula
+            with lock_context:
+                _chain_rule_monitor(f"{signature_id} formula_lock_acquired lock={path.name}")
+                cached = _load_chain_rule_formula_from_cache(
+                    signature,
+                    load_evaluators=not self.chain_rule_metadata_only,
+                )
+                if cached is not None:
+                    self.chain_rule_formulas_from_cache += 1
+                    self._chain_rule_formulas[signature] = cached
+                    self._chain_rule_formula_lookup_cache[lookup_key] = cached
+                    return cached
+
+                with _chain_rule_global_cold_lock(signature_id):
+                    cached = _load_chain_rule_formula_from_cache(
+                        signature,
+                        load_evaluators=not self.chain_rule_metadata_only,
+                    )
+                    if cached is not None:
+                        self.chain_rule_formulas_from_cache += 1
+                        self._chain_rule_formulas[signature] = cached
+                        self._chain_rule_formula_lookup_cache[lookup_key] = cached
+                        return cached
+
+                    start = time.perf_counter()
+                    formula = self._build_chain_rule_formula(sector, polynomial, active_shape, signature)
+                    formula.build_seconds = time.perf_counter() - start
+                    self.chain_rule_formula_build_seconds += formula.build_seconds
+                    self.chain_rule_formulas_generated += 1
+                    _write_chain_rule_formula_to_cache(formula)
+                if self.chain_rule_metadata_only:
+                    metadata_formula = _load_chain_rule_formula_from_cache(
+                        signature,
+                        load_evaluators=False,
+                    )
+                    if metadata_formula is not None:
+                        formula = metadata_formula
+        except FormulaCacheLockUnavailable as exc:
+            _chain_rule_monitor(f"{signature_id} formula_lock_deferred lock={path.name}")
+            raise ChainRuleColdBuildDeferred(
+                f"cold chain-rule formula deferred while another worker holds {path.name}"
+            ) from exc
         self._chain_rule_formulas[signature] = formula
         self._chain_rule_formula_lookup_cache[lookup_key] = formula
         return formula
@@ -2511,6 +2765,9 @@ class TopologyDefinition:
         signature: tuple[Any, ...],
     ) -> "ChainRuleFormulaDefinition":
         """Build Symbolica expressions for ``P(X_s(y))`` Taylor composition."""
+        build_start = time.perf_counter()
+        cache_path = _chain_rule_formula_cache_path(signature)
+        signature_id = cache_path.stem.removeprefix("chain_rule_")
         rank = len(output_shape[0])
         zero = _zero_multi(rank)
         allowed_multis = {tuple(multi) for multi in output_shape}
@@ -2520,6 +2777,12 @@ class TopologyDefinition:
             tuple(int(value) for value in multi)
             for multi in self._chain_rule_dense_derivative_indices_for_signature(signature)
         ]
+        _chain_rule_monitor(
+            f"{signature_id} build_start polynomial={polynomial} rank={rank} "
+            f"active_x={active_x_count} outputs={len(output_shape)} "
+            f"derivatives={len(derivative_indices)}",
+            build_start=build_start,
+        )
         h_multis = [multi for multi in output_shape if tuple(multi) != zero]
 
         input_names: list[str] = []
@@ -2545,8 +2808,78 @@ class TopologyDefinition:
             input_names.append(name)
             input_symbols.append(symbol)
             derivative_symbols[tuple(multi)] = symbol
+        _chain_rule_monitor(
+            f"{signature_id} symbols_done seconds={time.perf_counter() - build_start:.3f} "
+            f"inputs={len(input_symbols)} h_symbols={len(h_layout)} "
+            f"derivative_symbols={len(derivative_symbols)}",
+            build_start=build_start,
+        )
+
+        def build_evaluators(output_expressions: list[Any], source: str) -> list[Any]:
+            evaluator_start = time.perf_counter()
+            evaluator_kwargs = _symbolica_evaluator_kwargs(self.jit_compile_evaluators)
+            _chain_rule_monitor(
+                f"{signature_id} evaluator_start source={source} "
+                f"n_cores={evaluator_kwargs.get('n_cores')} "
+                f"verbose={evaluator_kwargs.get('verbose')} "
+                f"iterations={evaluator_kwargs.get('iterations')} "
+                f"cpe_iterations={evaluator_kwargs.get('cpe_iterations')} "
+                f"max_horner_scheme_variables={evaluator_kwargs.get('max_horner_scheme_variables')} "
+                f"max_common_pair_cache_entries={evaluator_kwargs.get('max_common_pair_cache_entries')} "
+                f"max_common_pair_distance={evaluator_kwargs.get('max_common_pair_distance')} "
+                f"jit_compile={evaluator_kwargs.get('jit_compile')}",
+                build_start=build_start,
+            )
+            evaluators = (
+                [
+                    Expression.evaluator_multiple(
+                        output_expressions,
+                        input_symbols,
+                        **evaluator_kwargs,
+                    )
+                ]
+                if output_expressions
+                else []
+            )
+            evaluator_seconds = time.perf_counter() - evaluator_start
+            _chain_rule_monitor(
+                f"{signature_id} evaluator_done source={source} "
+                f"seconds={evaluator_seconds:.3f} "
+                f"total_seconds={time.perf_counter() - build_start:.3f}",
+                build_start=build_start,
+            )
+            return evaluators
+
+        cached_expression_sidecar = _load_chain_rule_expression_sidecars_from_cache(
+            signature,
+            input_names,
+            list(output_shape),
+            build_start=build_start,
+        )
+        if cached_expression_sidecar is not None:
+            output_expressions, expression_manifest_name, expression_file_names = cached_expression_sidecar
+            _chain_rule_monitor(
+                f"{signature_id} expressions_loaded_sidecar "
+                f"outputs={len(output_expressions)} manifest={expression_manifest_name}",
+                build_start=build_start,
+            )
+            evaluators = build_evaluators(output_expressions, source="expression-sidecar")
+            return ChainRuleFormulaDefinition(
+                signature=signature,
+                input_names=input_names,
+                input_symbols=input_symbols,
+                output_expressions=output_expressions,
+                evaluators=evaluators,
+                output_shape=list(output_shape),
+                derivative_indices=[tuple(multi) for multi in derivative_indices],
+                h_layout=list(h_layout),
+                evaluator_mode="multiple",
+                cache_expression_manifest_file=expression_manifest_name,
+                cache_expression_files=list(expression_file_names),
+            )
 
         power_cache: dict[tuple[int, int], ExprSeries] = {}
+        mul_progress_every = _chain_rule_mul_progress_every()
 
         def h_power(x_index: int, power: int) -> ExprSeries:
             key = (int(x_index), int(power))
@@ -2566,6 +2899,9 @@ class TopologyDefinition:
                     h_power(x_index, power - 1),
                     h_series[x_index],
                     allowed_multis,
+                    monitor_label=f"{signature_id}.h_power.x{x_index}^{power}",
+                    build_start=build_start,
+                    progress_every=mul_progress_every,
                 )
             power_cache[key] = cached
             return cached
@@ -2587,6 +2923,12 @@ class TopologyDefinition:
                     term,
                     h_power(active_index, power_int),
                     allowed_multis,
+                    monitor_label=(
+                        f"{signature_id}.chain_product.{_multi_suffix(x_multi_index)}"
+                        f".x{active_index}^{power_int}"
+                    ),
+                    build_start=build_start,
+                    progress_every=mul_progress_every,
                 )
                 if not term:
                     break
@@ -2595,31 +2937,204 @@ class TopologyDefinition:
             product_cache[x_multi_index] = term
             return term
 
-        composed: ExprSeries = {}
-        for x_multi_index in derivative_indices:
-            product_series = chain_product(tuple(int(value) for value in x_multi_index))
-            if not product_series:
-                continue
-            composed = _expr_series_add(
-                composed,
-                _expr_series_scale(product_series, derivative_symbols[tuple(x_multi_index)]),
+        compose_mode = _chain_rule_compose_mode()
+        compose_progress_every = _chain_rule_compose_progress_every()
+        term_progress_every = _chain_rule_term_progress_every()
+        _chain_rule_monitor(
+            f"{signature_id} compose_start mode={compose_mode} "
+            f"progress_every={compose_progress_every} "
+            f"term_progress_every={term_progress_every} "
+            f"mul_progress_every={mul_progress_every}",
+            build_start=build_start,
+        )
+        contribution_terms = 0
+        max_product_terms = 0
+        if compose_mode == "output-threads":
+            for index, x_multi_index in enumerate(derivative_indices, start=1):
+                if (
+                    index == 1
+                    or index % compose_progress_every == 0
+                    or index == len(derivative_indices)
+                ):
+                    _chain_rule_monitor(
+                        f"{signature_id} compose_progress {index}/{len(derivative_indices)} "
+                        f"mode={compose_mode} product_cache={len(product_cache)} "
+                        f"power_cache={len(power_cache)} composed_terms=0 "
+                        f"contribution_terms={contribution_terms}",
+                        build_start=build_start,
+                    )
+                product_series = chain_product(tuple(int(value) for value in x_multi_index))
+                if not product_series:
+                    continue
+                contribution_terms += len(product_series)
+                max_product_terms = max(max_product_terms, len(product_series))
+
+            output_threads = min(_chain_rule_output_threads(), max(len(output_shape), 1))
+            output_expressions = [E("0") for _ in output_shape]
+            output_term_counts = [0 for _ in output_shape]
+            _chain_rule_monitor(
+                f"{signature_id} output_reduce_start outputs={len(output_shape)} "
+                f"threads={output_threads} contribution_terms={contribution_terms}",
+                build_start=build_start,
             )
 
-        output_expressions = [
-            _expr_series_coefficient(composed, tuple(multi))
-            for multi in output_shape
-        ]
-        evaluators = (
-            [
-                Expression.evaluator_multiple(
-                    output_expressions,
-                    input_symbols,
-                    jit_compile=self.jit_compile_evaluators,
+            def output_expression_at(index: int, multi: tuple[int, ...]) -> tuple[int, Any, int]:
+                terms: list[Any] = []
+                for x_multi_index in derivative_indices:
+                    product_series = product_cache.get(tuple(x_multi_index))
+                    if not product_series:
+                        continue
+                    coefficient = product_series.get(multi)
+                    if coefficient is not None:
+                        terms.append(coefficient * derivative_symbols[tuple(x_multi_index)])
+                return index, _balanced_expression_sum(terms) if terms else E("0"), len(terms)
+
+            completed_outputs = 0
+            if output_threads <= 1:
+                for output_index, multi in enumerate(output_shape):
+                    index, expression, term_count = output_expression_at(
+                        output_index,
+                        tuple(multi),
+                    )
+                    output_expressions[index] = expression
+                    output_term_counts[index] = term_count
+                    completed_outputs += 1
+                    if (
+                        completed_outputs == 1
+                        or completed_outputs % compose_progress_every == 0
+                        or completed_outputs == len(output_shape)
+                    ):
+                        _chain_rule_monitor(
+                            f"{signature_id} output_reduce_progress "
+                            f"{completed_outputs}/{len(output_shape)} "
+                            f"threads={output_threads} "
+                            f"max_terms_per_output={max(output_term_counts, default=0)}",
+                            build_start=build_start,
+                        )
+            else:
+                with ThreadPoolExecutor(max_workers=output_threads) as executor:
+                    futures = [
+                        executor.submit(output_expression_at, output_index, tuple(multi))
+                        for output_index, multi in enumerate(output_shape)
+                    ]
+                    for future in as_completed(futures):
+                        index, expression, term_count = future.result()
+                        output_expressions[index] = expression
+                        output_term_counts[index] = term_count
+                        completed_outputs += 1
+                        if (
+                            completed_outputs == 1
+                            or completed_outputs % compose_progress_every == 0
+                            or completed_outputs == len(output_shape)
+                        ):
+                            _chain_rule_monitor(
+                                f"{signature_id} output_reduce_progress "
+                                f"{completed_outputs}/{len(output_shape)} "
+                                f"threads={output_threads} "
+                                f"max_terms_per_output={max(output_term_counts, default=0)}",
+                                build_start=build_start,
+                            )
+            composed_term_count = sum(1 for count in output_term_counts if count)
+            _chain_rule_monitor(
+                f"{signature_id} output_reduce_done composed_terms={composed_term_count} "
+                f"max_terms_per_output={max(output_term_counts, default=0)}",
+                build_start=build_start,
+            )
+        else:
+            composed: ExprSeries = {}
+            term_lists: dict[tuple[int, ...], list[Any]] = {}
+            last_term_progress = 0
+            for index, x_multi_index in enumerate(derivative_indices, start=1):
+                if (
+                    index == 1
+                    or index % compose_progress_every == 0
+                    or index == len(derivative_indices)
+                ):
+                    _chain_rule_monitor(
+                        f"{signature_id} compose_progress {index}/{len(derivative_indices)} "
+                        f"mode={compose_mode} product_cache={len(product_cache)} "
+                        f"power_cache={len(power_cache)} "
+                        f"composed_terms={len(composed) if compose_mode != 'term-lists' else len(term_lists)} "
+                        f"contribution_terms={contribution_terms}",
+                        build_start=build_start,
+                    )
+                product_series = chain_product(tuple(int(value) for value in x_multi_index))
+                if not product_series:
+                    continue
+                derivative_symbol = derivative_symbols[tuple(x_multi_index)]
+                contribution_terms += len(product_series)
+                max_product_terms = max(max_product_terms, len(product_series))
+                if compose_mode == "term-lists":
+                    _expr_series_accumulate_term_lists(term_lists, product_series, derivative_symbol)
+                    if contribution_terms - last_term_progress >= term_progress_every:
+                        last_term_progress = contribution_terms
+                        max_terms_per_output = max(
+                            (len(terms) for terms in term_lists.values()),
+                            default=0,
+                        )
+                        _chain_rule_monitor(
+                            f"{signature_id} term_lists_progress outputs={len(term_lists)} "
+                            f"contribution_terms={contribution_terms} "
+                            f"max_terms_per_output={max_terms_per_output}",
+                            build_start=build_start,
+                        )
+                elif compose_mode == "exact":
+                    composed = _expr_series_add(
+                        composed,
+                        _expr_series_scale(product_series, derivative_symbol),
+                    )
+                else:
+                    _expr_series_accumulate_scaled(composed, product_series, derivative_symbol)
+
+            if compose_mode == "term-lists":
+                max_terms_per_output = max((len(terms) for terms in term_lists.values()), default=0)
+                _chain_rule_monitor(
+                    f"{signature_id} term_lists_reduce_start outputs={len(term_lists)} "
+                    f"contribution_terms={contribution_terms} "
+                    f"max_terms_per_output={max_terms_per_output}",
+                    build_start=build_start,
                 )
+                for index, (multi, terms) in enumerate(term_lists.items(), start=1):
+                    composed[multi] = _balanced_expression_sum(terms)
+                    if (
+                        index == 1
+                        or index % compose_progress_every == 0
+                        or index == len(term_lists)
+                    ):
+                        _chain_rule_monitor(
+                            f"{signature_id} term_lists_reduce_progress "
+                            f"{index}/{len(term_lists)}",
+                            build_start=build_start,
+                        )
+                _chain_rule_monitor(
+                    f"{signature_id} term_lists_reduce_done composed_terms={len(composed)}",
+                    build_start=build_start,
+                )
+
+            output_expressions = [
+                _expr_series_coefficient(composed, tuple(multi))
+                for multi in output_shape
             ]
-            if output_expressions
-            else []
+            composed_term_count = len(composed)
+        expression_seconds = time.perf_counter() - build_start
+        _chain_rule_monitor(
+            f"{signature_id} expressions_done seconds={expression_seconds:.3f} "
+            f"inputs={len(input_symbols)} outputs={len(output_expressions)} "
+            f"product_cache={len(product_cache)} power_cache={len(power_cache)} "
+            f"composed_terms={composed_term_count} contribution_terms={contribution_terms} "
+            f"max_product_terms={max_product_terms}",
+            build_start=build_start,
         )
+        expression_manifest_name, expression_file_names = (
+            _write_chain_rule_expression_sidecars_to_cache(
+                signature,
+                input_names,
+                list(output_shape),
+                output_expressions,
+                build_start=build_start,
+            )
+        )
+        evaluators = build_evaluators(output_expressions, source="generated")
         return ChainRuleFormulaDefinition(
             signature=signature,
             input_names=input_names,
@@ -2630,6 +3145,8 @@ class TopologyDefinition:
             derivative_indices=[tuple(multi) for multi in derivative_indices],
             h_layout=list(h_layout),
             evaluator_mode="multiple",
+            cache_expression_manifest_file=expression_manifest_name,
+            cache_expression_files=list(expression_file_names),
         )
 
     def _compose_symbolic_derivative_taylor_batch(
@@ -4361,6 +4878,44 @@ def _expr_series_scale(a: ExprSeries, factor: float | int | Any) -> ExprSeries:
     return {key: value * factor_expr for key, value in a.items()}
 
 
+def _expr_series_accumulate_scaled(
+    out: ExprSeries,
+    a: ExprSeries,
+    factor: float | int | Any,
+) -> None:
+    """Add ``factor * a`` into ``out`` without allocating a temporary series."""
+    factor_expr = factor if hasattr(factor, "evaluator") else _expr_number(factor)
+    for key, value in a.items():
+        term = value * factor_expr
+        out[key] = out[key] + term if key in out else term
+
+
+def _expr_series_accumulate_term_lists(
+    out: dict[tuple[int, ...], list[Any]],
+    a: ExprSeries,
+    factor: float | int | Any,
+) -> None:
+    """Append ``factor * a`` terms for later balanced reduction."""
+    factor_expr = factor if hasattr(factor, "evaluator") else _expr_number(factor)
+    for key, value in a.items():
+        out.setdefault(key, []).append(value * factor_expr)
+
+
+def _balanced_expression_sum(terms: list[Any]) -> Any:
+    """Build a balanced Symbolica addition tree from term expressions."""
+    if not terms:
+        return E("0")
+    current = list(terms)
+    while len(current) > 1:
+        next_level: list[Any] = []
+        iterator = iter(current)
+        for left in iterator:
+            right = next(iterator, None)
+            next_level.append(left if right is None else left + right)
+        current = next_level
+    return current[0]
+
+
 def _expr_series_mul(a: ExprSeries, b: ExprSeries, max_orders: list[int]) -> ExprSeries:
     """Multiply two truncated sparse Symbolica Taylor series."""
     dim = len(max_orders)
@@ -4379,6 +4934,10 @@ def _expr_series_mul_allowed(
     a: ExprSeries,
     b: ExprSeries,
     allowed_multis: set[tuple[int, ...]],
+    *,
+    monitor_label: str | None = None,
+    build_start: float | None = None,
+    progress_every: int = 0,
 ) -> ExprSeries:
     """Multiply Symbolica series while keeping only explicit coefficients.
 
@@ -4389,14 +4948,122 @@ def _expr_series_mul_allowed(
     if not a or not b or not allowed_multis:
         return {}
     rank = len(next(iter(allowed_multis)))
+    allowed = {tuple(int(value) for value in key) for key in allowed_multis}
+    left_items = [(tuple(int(value) for value in key), value) for key, value in a.items()]
+    right_items = [(tuple(int(value) for value in key), value) for key, value in b.items()]
+
+    # All users of this helper are Taylor-like series with nonnegative powers.
+    # Keep a full fallback anyway so the helper remains exact if that changes.
+    all_keys = [key for key, _value in left_items]
+    all_keys.extend(key for key, _value in right_items)
+    all_keys.extend(allowed)
+    if any(
+        int(value) < 0
+        for key in all_keys
+        for value in key
+    ):
+        out: ExprSeries = {}
+        for key_a, value_a in left_items:
+            for key_b, value_b in right_items:
+                key = tuple(key_a[index] + key_b[index] for index in range(rank))
+                if key not in allowed:
+                    continue
+                term = value_a * value_b
+                out[key] = out[key] + term if key in out else term
+        return out
+
+    max_allowed = tuple(
+        max(int(key[index]) for key in allowed)
+        for index in range(rank)
+    )
+    right_lookup = {key: value for key, value in right_items}
+
+    def work_for_key(key_a: tuple[int, ...]) -> tuple[tuple[int, ...], int]:
+        remaining = tuple(max_allowed[index] - key_a[index] for index in range(rank))
+        if any(value < 0 for value in remaining):
+            return remaining, 0
+        candidate_count = math.prod(value + 1 for value in remaining)
+        return remaining, min(candidate_count, len(right_items))
+
     out: ExprSeries = {}
-    for key_a, value_a in a.items():
-        for key_b, value_b in b.items():
-            key = tuple(int(key_a[index]) + int(key_b[index]) for index in range(rank))
-            if key not in allowed_multis:
+    total_pairs = len(a) * len(b)
+    work_plan = [
+        (key_a, value_a, *work_for_key(key_a))
+        for key_a, value_a in left_items
+    ]
+    candidate_pairs = sum(entry[3] for entry in work_plan)
+    emit_progress = (
+        monitor_label is not None
+        and progress_every > 0
+        and candidate_pairs >= progress_every
+        and _chain_rule_monitor_enabled()
+    )
+
+    missing = object()
+
+    def multiply_with_filtered_candidates(*, emit: bool) -> int:
+        processed = 0
+        last_progress = 0
+        for key_a, value_a, remaining, work_count in work_plan:
+            if work_count <= 0:
                 continue
-            term = value_a * value_b
-            out[key] = out[key] + term if key in out else term
+            grid_count = math.prod(value + 1 for value in remaining)
+            if grid_count < len(right_items):
+                ranges = [range(value + 1) for value in remaining]
+                for key_b in product(*ranges):
+                    processed += 1
+                    value_b = right_lookup.get(key_b, missing)
+                    if value_b is missing:
+                        continue
+                    key = tuple(key_a[index] + key_b[index] for index in range(rank))
+                    if key not in allowed:
+                        continue
+                    term = value_a * value_b
+                    out[key] = out[key] + term if key in out else term
+                    if emit and processed - last_progress >= progress_every:
+                        last_progress = processed
+                        _chain_rule_monitor(
+                            f"series_mul_progress label={monitor_label} "
+                            f"pairs={processed}/{candidate_pairs} "
+                            f"original_pairs={total_pairs} kept_terms={len(out)}",
+                            build_start=build_start,
+                        )
+            else:
+                for key_b, value_b in right_items:
+                    processed += 1
+                    if any(key_b[index] > remaining[index] for index in range(rank)):
+                        continue
+                    key = tuple(key_a[index] + key_b[index] for index in range(rank))
+                    if key not in allowed:
+                        continue
+                    term = value_a * value_b
+                    out[key] = out[key] + term if key in out else term
+                    if emit and processed - last_progress >= progress_every:
+                        last_progress = processed
+                        _chain_rule_monitor(
+                            f"series_mul_progress label={monitor_label} "
+                            f"pairs={processed}/{candidate_pairs} "
+                            f"original_pairs={total_pairs} kept_terms={len(out)}",
+                            build_start=build_start,
+                        )
+        return processed
+
+    if not emit_progress:
+        multiply_with_filtered_candidates(emit=False)
+        return out
+
+    _chain_rule_monitor(
+        f"series_mul_start label={monitor_label} left_terms={len(a)} "
+        f"right_terms={len(b)} total_pairs={total_pairs} "
+        f"candidate_pairs={candidate_pairs} allowed_terms={len(allowed)}",
+        build_start=build_start,
+    )
+    processed_pairs = multiply_with_filtered_candidates(emit=True)
+    _chain_rule_monitor(
+        f"series_mul_done label={monitor_label} pairs={processed_pairs}/{candidate_pairs} "
+        f"original_pairs={total_pairs} kept_terms={len(out)}",
+        build_start=build_start,
+    )
     return out
 
 
@@ -4591,6 +5258,7 @@ class RegularTaylorFormulaDefinition:
     evaluator_dual_shape: list[tuple[int, ...]] = field(default_factory=list)
     evaluator_output_indices: list[int] = field(default_factory=list)
     dual_variable_count: int = 0
+    evaluator_mode: str = "separate"
     cache_evaluator_files: list[str] = field(default_factory=list)
     build_seconds: float = 0.0
 
@@ -4604,6 +5272,25 @@ class RegularTaylorFormulaDefinition:
             )
             if self.evaluator_output_indices:
                 values = values[:, self.evaluator_output_indices]
+            if timing is not None:
+                timing.add_eval(time.perf_counter() - start)
+            return values
+
+        if not self.evaluators:
+            if self.output_layout:
+                raise RuntimeError(
+                    "regular-Taylor formula was loaded as metadata only; "
+                    "it can be serialized into a prepared bundle but cannot be evaluated"
+                )
+            values = np.zeros((rows.shape[0], 0), dtype=np.complex128)
+            if timing is not None:
+                timing.add_eval(time.perf_counter() - start)
+            return values
+
+        if self.evaluator_mode == "multiple":
+            values = np.asarray(self.evaluators[0].evaluate_complex(rows), dtype=np.complex128)
+            if values.ndim == 1:
+                values = values.reshape(rows.shape[0], 1)
             if timing is not None:
                 timing.add_eval(time.perf_counter() - start)
             return values
@@ -4665,6 +5352,8 @@ class ChainRuleFormulaDefinition:
     build_seconds: float = 0.0
     cache_json_path: str | None = None
     cache_evaluator_files: list[str] = field(default_factory=list)
+    cache_expression_manifest_file: str | None = None
+    cache_expression_files: list[str] = field(default_factory=list)
 
     def evaluate_complex_batch(self, rows: np.ndarray, timing: HotPathTiming | None = None) -> np.ndarray:
         """Evaluate all mapped Taylor coefficients for a complex batch."""
@@ -4841,6 +5530,30 @@ def _chain_rule_expression_cache_name(path: Path) -> str:
     return f"{path.stem}.expr.json.gz"
 
 
+def _chain_rule_expression_manifest_name(path: Path) -> str:
+    """Return the native Symbolica expression sidecar manifest filename."""
+
+    return f"{path.stem}.expr_manifest.json"
+
+
+def _chain_rule_expression_binary_cache_name(path: Path, index: int) -> str:
+    """Return the native Symbolica binary sidecar filename for one expression."""
+
+    return f"{path.stem}.expr_{int(index):05d}.bin"
+
+
+def _chain_rule_expression_manifest_read_paths(path: Path) -> list[Path]:
+    """Return generated and curated expression-manifest candidates."""
+
+    manifest_name = _chain_rule_expression_manifest_name(path)
+    paths: list[Path] = []
+    for root in formula_cache_read_roots():
+        for candidate in (root / "curated" / manifest_name, root / manifest_name):
+            if candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
 def _write_chain_rule_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     """Atomically write one chain-rule cache JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4849,40 +5562,221 @@ def _write_chain_rule_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _write_chain_rule_expression_sidecars_to_cache(
+    signature: tuple[Any, ...],
+    input_names: list[str],
+    output_shape: list[tuple[int, ...]],
+    output_expressions: list[Any],
+    *,
+    build_start: float | None = None,
+) -> tuple[str | None, list[str]]:
+    """Persist native Symbolica expression sidecars before evaluator generation."""
+
+    if not output_expressions:
+        return None, []
+    path = _chain_rule_formula_cache_path(signature)
+    signature_id = path.stem.removeprefix("chain_rule_")
+    manifest_name = _chain_rule_expression_manifest_name(path)
+    sidecar_names = [
+        _chain_rule_expression_binary_cache_name(path, index)
+        for index in range(len(output_expressions))
+    ]
+    compression_level = _chain_rule_expression_compression_level()
+    progress_every = _chain_rule_expression_sidecar_progress_every()
+    tmp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        start = time.perf_counter()
+        _chain_rule_monitor(
+            f"{signature_id} expression_binary_sidecar_start "
+            f"outputs={len(output_expressions)} compression_level={compression_level}",
+            build_start=build_start,
+        )
+        for index, expression in enumerate(output_expressions):
+            name = sidecar_names[index]
+            destination = path.parent / name
+            tmp_path = destination.with_name(destination.name + ".tmp")
+            expression.save(str(tmp_path), compression_level=compression_level)
+            tmp_path.replace(destination)
+            tmp_path = None
+            completed = index + 1
+            if (
+                completed == 1
+                or completed % progress_every == 0
+                or completed == len(output_expressions)
+            ):
+                size_bytes = destination.stat().st_size if destination.is_file() else 0
+                _chain_rule_monitor(
+                    f"{signature_id} expression_binary_sidecar_progress "
+                    f"{completed}/{len(output_expressions)} file={name} "
+                    f"bytes={size_bytes}",
+                    build_start=build_start,
+                )
+        manifest_payload = {
+            "schema_version": CHAIN_RULE_EXPRESSION_CACHE_VERSION,
+            "kind": "chain-rule-expression-sidecar",
+            "format": "symbolica-expression-binary",
+            "signature_payload": _chain_rule_signature_payload(signature),
+            "signature": _chain_rule_jsonable(signature),
+            "input_names": list(input_names),
+            "output_shape": _chain_rule_jsonable(tuple(output_shape)),
+            "output_expression_count": len(output_expressions),
+            "expression_cache_files": sidecar_names,
+            "compression_level": compression_level,
+        }
+        _write_chain_rule_json_atomic(path.parent / manifest_name, manifest_payload)
+        _chain_rule_monitor(
+            f"{signature_id} expression_binary_sidecar_done "
+            f"seconds={time.perf_counter() - start:.3f} manifest={manifest_name}",
+            build_start=build_start,
+        )
+        return manifest_name, sidecar_names
+    except Exception as exc:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        _chain_rule_monitor(
+            f"{signature_id} expression_binary_sidecar_failed reason={type(exc).__name__}",
+            build_start=build_start,
+        )
+        if _chain_rule_expression_sidecar_required():
+            raise ChainRuleExpressionSidecarWriteError(
+                "failed to persist chain-rule expression sidecars before evaluator build"
+            ) from exc
+        return None, []
+
+
+def _load_chain_rule_expression_sidecars_from_cache(
+    signature: tuple[Any, ...],
+    input_names: list[str],
+    output_shape: list[tuple[int, ...]],
+    *,
+    build_start: float | None = None,
+) -> tuple[list[Any], str, list[str]] | None:
+    """Load native Symbolica expression sidecars for an unfinished evaluator cache."""
+
+    path = _chain_rule_formula_cache_path(signature)
+    signature_id = path.stem.removeprefix("chain_rule_")
+    expected_signature_payload = _chain_rule_signature_payload(signature)
+    expected_input_names = list(input_names)
+    expected_output_shape = _chain_rule_jsonable(tuple(output_shape))
+    for manifest_path in _chain_rule_expression_manifest_read_paths(path):
+        if not manifest_path.is_file():
+            continue
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if data.get("signature_payload") != expected_signature_payload:
+                continue
+            if data.get("input_names") != expected_input_names:
+                continue
+            if data.get("output_shape") != expected_output_shape:
+                continue
+            if int(data.get("output_expression_count", -1)) != len(output_shape):
+                continue
+            sidecar_names = [str(name) for name in data.get("expression_cache_files", [])]
+            if len(sidecar_names) != len(output_shape):
+                continue
+            sidecar_paths = [manifest_path.parent / name for name in sidecar_names]
+            if any(not sidecar_path.is_file() for sidecar_path in sidecar_paths):
+                continue
+            mirror_cache_entry_to_primary(
+                manifest_path,
+                data,
+                sidecar_fields=("expression_cache_files",),
+            )
+            progress_every = _chain_rule_expression_sidecar_progress_every()
+            start = time.perf_counter()
+            _chain_rule_monitor(
+                f"{signature_id} expression_binary_sidecar_load_start "
+                f"outputs={len(sidecar_paths)} manifest={manifest_path.name}",
+                build_start=build_start,
+            )
+            output_expressions: list[Any] = []
+            for index, sidecar_path in enumerate(sidecar_paths):
+                output_expressions.append(Expression.load(str(sidecar_path)))
+                completed = index + 1
+                if (
+                    completed == 1
+                    or completed % progress_every == 0
+                    or completed == len(sidecar_paths)
+                ):
+                    _chain_rule_monitor(
+                        f"{signature_id} expression_binary_sidecar_load_progress "
+                        f"{completed}/{len(sidecar_paths)} file={sidecar_path.name}",
+                        build_start=build_start,
+                    )
+            _chain_rule_monitor(
+                f"{signature_id} expression_binary_sidecar_load_done "
+                f"seconds={time.perf_counter() - start:.3f} "
+                f"manifest={manifest_path.name}",
+                build_start=build_start,
+            )
+            return output_expressions, manifest_path.name, sidecar_names
+        except Exception as exc:
+            _chain_rule_monitor(
+                f"{signature_id} expression_binary_sidecar_load_failed "
+                f"manifest={manifest_path.name} reason={type(exc).__name__}",
+                build_start=build_start,
+            )
+            continue
+    return None
+
+
 def _write_chain_rule_formula_to_cache(formula: ChainRuleFormulaDefinition) -> None:
     """Persist a generated universal chain-rule formula and evaluator sidecars."""
     path = _chain_rule_formula_cache_path(formula.signature)
+    signature_id = path.stem.removeprefix("chain_rule_")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         sidecar_names: list[str] = []
         for index, evaluator in enumerate(formula.evaluators):
+            start = time.perf_counter()
+            _chain_rule_monitor(f"{signature_id} evaluator_save_start index={index}")
             name = _chain_rule_evaluator_cache_name(path, index)
             raw_bytes = evaluator.save()
             (path.parent / name).write_bytes(gzip.compress(raw_bytes, compresslevel=6))
             sidecar_names.append(name)
-        expression_sidecar_name: str | None = None
-        if formula.output_expressions:
+            _chain_rule_monitor(
+                f"{signature_id} evaluator_save_done index={index} "
+                f"seconds={time.perf_counter() - start:.3f} "
+                f"raw_bytes={len(raw_bytes)} file={name}"
+            )
+        expression_sidecar_name = formula.cache_expression_manifest_file
+        expression_sidecar_names = list(formula.cache_expression_files)
+        if formula.output_expressions and not expression_sidecar_name:
             try:
-                expression_sidecar_name = _chain_rule_expression_cache_name(path)
-                expression_payload = json.dumps(
-                    [str(expr) for expr in formula.output_expressions],
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                (path.parent / expression_sidecar_name).write_bytes(
-                    gzip.compress(expression_payload, compresslevel=6)
+                expression_sidecar_name, expression_sidecar_names = (
+                    _write_chain_rule_expression_sidecars_to_cache(
+                        formula.signature,
+                        formula.input_names,
+                        formula.output_shape,
+                        formula.output_expressions,
+                    )
                 )
             except Exception:
+                if _chain_rule_expression_sidecar_required():
+                    raise
                 expression_sidecar_name = None
+                expression_sidecar_names = []
         payload = {
             "signature_payload": _chain_rule_signature_payload(formula.signature),
             "signature": _chain_rule_jsonable(formula.signature),
             "input_names": list(formula.input_names),
             # Runtime needs only the serialized evaluator plus the coefficient
-            # layouts below.  Reference expressions, when written, live in a
-            # compressed sidecar so the main metadata stays cheap to inspect.
+            # layouts below.  Reference expressions, when written, live in
+            # native Symbolica binary sidecars so evaluator generation can be
+            # retried without rebuilding the symbolic expression list.
             "output_expressions": [],
             "output_expression_count": len(formula.output_expressions),
             "expression_cache_file": expression_sidecar_name,
+            "expression_cache_format": (
+                "symbolica-expression-binary-manifest"
+                if expression_sidecar_name
+                else None
+            ),
+            "expression_cache_files": expression_sidecar_names,
             "output_shape": _chain_rule_jsonable(tuple(formula.output_shape)),
             "derivative_indices": _chain_rule_jsonable(tuple(formula.derivative_indices)),
             "h_layout": _chain_rule_jsonable(tuple(formula.h_layout)),
@@ -4890,10 +5784,19 @@ def _write_chain_rule_formula_to_cache(formula: ChainRuleFormulaDefinition) -> N
             "evaluator_cache_files": sidecar_names,
             "build_seconds": float(formula.build_seconds),
         }
+        start = time.perf_counter()
+        _chain_rule_monitor(f"{signature_id} metadata_write_start")
         _write_chain_rule_json_atomic(path, payload)
+        _chain_rule_monitor(
+            f"{signature_id} metadata_write_done seconds={time.perf_counter() - start:.3f}"
+        )
+    except ChainRuleExpressionSidecarWriteError:
+        _chain_rule_monitor(f"{signature_id} cache_write_failed expression_sidecar_required=true")
+        raise
     except Exception:
         # The cache is an optimization only.  A full prepared bundle will still
         # serialize the in-memory evaluator if this local cache write fails.
+        _chain_rule_monitor(f"{signature_id} cache_write_failed")
         return
 
 
@@ -4923,7 +5826,11 @@ def _load_chain_rule_formula_from_cache(
             mirror_cache_entry_to_primary(
                 candidate,
                 data,
-                sidecar_fields=("evaluator_cache_files", "expression_cache_file"),
+                sidecar_fields=(
+                    "evaluator_cache_files",
+                    "expression_cache_file",
+                    "expression_cache_files",
+                ),
             )
             sidecar_paths = []
             for name in sidecar_names:
@@ -4948,6 +5855,16 @@ def _load_chain_rule_formula_from_cache(
                 else []
             )
             input_names = [str(name) for name in data["input_names"]]
+            expression_cache_format = str(data.get("expression_cache_format", ""))
+            cache_expression_manifest_file = (
+                str(data.get("expression_cache_file"))
+                if expression_cache_format == "symbolica-expression-binary-manifest"
+                and data.get("expression_cache_file")
+                else None
+            )
+            cache_expression_files = [
+                str(name) for name in data.get("expression_cache_files", [])
+            ]
             # Chain-rule formula evaluation goes through the serialized
             # evaluator; the symbolic expression list is reference-only and is
             # intentionally omitted from current caches.  Avoid parsing legacy
@@ -4973,6 +5890,8 @@ def _load_chain_rule_formula_from_cache(
                 build_seconds=float(data.get("build_seconds", 0.0)),
                 cache_json_path=str(candidate),
                 cache_evaluator_files=[str(path) for path in sidecar_paths],
+                cache_expression_manifest_file=cache_expression_manifest_file,
+                cache_expression_files=cache_expression_files,
             )
         except Exception:
             continue
@@ -5157,12 +6076,24 @@ def _compose_polynomial_from_derivatives_expr(
         product_cache[alpha] = term
         return term
 
+    compose_mode = _chain_rule_compose_mode()
     out: ExprSeries = {}
+    term_lists: dict[tuple[int, ...], list[Any]] = {}
     for alpha, symbol in derivative_symbols.items():
         product_series = chain_product(tuple(int(value) for value in alpha))
         if not product_series:
             continue
-        out = _expr_series_add(out, _expr_series_scale(product_series, symbol))
+        if compose_mode == "term-lists":
+            _expr_series_accumulate_term_lists(term_lists, product_series, symbol)
+        elif compose_mode == "exact":
+            out = _expr_series_add(out, _expr_series_scale(product_series, symbol))
+        else:
+            _expr_series_accumulate_scaled(out, product_series, symbol)
+    if compose_mode == "term-lists":
+        out = {
+            multi: _balanced_expression_sum(terms)
+            for multi, terms in term_lists.items()
+        }
     return out
 
 

@@ -133,6 +133,9 @@ class IntegralRequest:
     cache_workdir: str = ".cache_warm"
     cache_verify_samples_per_sector: int = 16
     cache_estimate_3l: bool = True
+    test_boundary_distances: tuple[float, ...] = (1.0e-6, 1.0e-8)
+    test_boundary_growth_power_tolerance: float | None = 0.5
+    test_report_path: str | None = None
 
 
 @dataclass(frozen=True)

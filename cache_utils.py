@@ -7,14 +7,24 @@ runtime/distribution artifact: installations may populate it from an external
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback.
+    fcntl = None
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 FORMULA_CACHE_ENV = "FSD_SUBTRACTION_FORMULA_CACHE_DIR"
+
+
+class FormulaCacheLockUnavailable(RuntimeError):
+    """Raised when a non-blocking formula-cache lock is already held."""
 
 
 def default_formula_cache_dir() -> Path:
@@ -94,6 +104,32 @@ def mirror_cache_entry_to_primary(
                     _copy_if_missing(sidecar, target)
     except Exception:
         return
+
+
+@contextmanager
+def formula_cache_lock(metadata_path: Path, *, blocking: bool = True):
+    """Serialize cold generation for one formula-cache metadata file."""
+
+    lock_root = metadata_path.expanduser().parent / ".locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{metadata_path.name}.lock"
+    handle = lock_path.open("a+")
+    locked = False
+    try:
+        if fcntl is not None:
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(handle.fileno(), flags)
+            except BlockingIOError as exc:
+                raise FormulaCacheLockUnavailable(str(lock_path)) from exc
+            locked = True
+        yield
+    finally:
+        if fcntl is not None and locked:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _copy_if_missing(source: Path, destination: Path) -> None:
