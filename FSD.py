@@ -10,6 +10,7 @@ construction, and Havana sampling logic live in separate modules.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,10 +18,17 @@ import logging
 import os
 from pathlib import Path
 import shutil
+import signal
 import sys
+import time
 
 from colorama import Fore, Style, init as colorama_init
 import yaml
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - only relevant in very small envs.
+    psutil = None
 
 from benchmark import check_oneloop_bridge, compute_benchmark
 from cache_warm import run_universal_cache_mode
@@ -52,6 +60,146 @@ from result_io import (
 )
 from runtime_benchmark import run_sector_runtime_benchmark
 from sectors_generator import generate_sectors
+
+
+_INTERRUPT_CLEANUP_ACTIVE = False
+_INTERRUPT_CLEANUP_RUNNING = False
+
+
+def _live_descendants() -> list[object]:
+    """Return live child processes of this CLI process, if psutil is available."""
+    if psutil is None:
+        return []
+    try:
+        current = psutil.Process(os.getpid())
+        out = []
+        for child in current.children(recursive=True):
+            if not child.is_running():
+                continue
+            try:
+                if child.status() == psutil.STATUS_ZOMBIE:
+                    continue
+            except Exception:
+                pass
+            out.append(child)
+        return out
+    except Exception:
+        return []
+
+
+def _terminate_generation_descendants(reason: str, *, quiet: bool = False) -> None:
+    """Best-effort cleanup for subprocess trees created during generation.
+
+    DOT generation can enter pySecDec/FORM/Normaliz/make subprocesses.  If the
+    user interrupts the main CLI while one of those tools is active, Python does
+    not automatically reap every descendant.  This cleanup intentionally targets
+    only descendants of the current process, never unrelated user processes.
+    """
+
+    global _INTERRUPT_CLEANUP_RUNNING
+    if _INTERRUPT_CLEANUP_RUNNING:
+        return
+    _INTERRUPT_CLEANUP_RUNNING = True
+    try:
+        children = _live_descendants()
+        if not children:
+            return
+        if not quiet:
+            print(
+                f"{Fore.YELLOW}interrupt:{Style.RESET_ALL} {reason}; "
+                f"terminating {len(children)} child process(es)",
+                file=sys.stderr,
+                flush=True,
+            )
+        own_pgid = os.getpgrp()
+
+        def signal_children(sig: signal.Signals) -> None:
+            seen_groups: set[int] = set()
+            for child in list(children):
+                try:
+                    pid = int(child.pid)
+                    pgid = os.getpgid(pid)
+                except Exception:
+                    continue
+                if pgid != own_pgid and pgid not in seen_groups:
+                    try:
+                        os.killpg(pgid, sig)
+                        seen_groups.add(pgid)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        # Fall back to the individual PID below.
+                        pass
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    pass
+
+        signal_children(signal.SIGINT)
+        if psutil is not None:
+            try:
+                psutil.wait_procs(children, timeout=0.5)
+            except Exception:
+                pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not _live_descendants():
+                return
+            time.sleep(0.1)
+        children = _live_descendants()
+        signal_children(signal.SIGTERM)
+        if psutil is not None:
+            try:
+                psutil.wait_procs(children, timeout=0.5)
+            except Exception:
+                pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not _live_descendants():
+                return
+            time.sleep(0.1)
+        children = _live_descendants()
+        signal_children(signal.SIGKILL)
+    finally:
+        _INTERRUPT_CLEANUP_RUNNING = False
+
+
+class InterruptCleanupGuard:
+    """Install SIGINT/SIGTERM handlers that reap generation subprocesses."""
+
+    def __init__(self) -> None:
+        self._previous: dict[int, object] = {}
+
+    def __enter__(self) -> "InterruptCleanupGuard":
+        global _INTERRUPT_CLEANUP_ACTIVE
+        _INTERRUPT_CLEANUP_ACTIVE = True
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            self._previous[int(sig)] = signal.getsignal(sig)
+            signal.signal(sig, self._handle_signal)
+        atexit.register(self._atexit_cleanup)
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb) -> bool:
+        global _INTERRUPT_CLEANUP_ACTIVE
+        _INTERRUPT_CLEANUP_ACTIVE = False
+        for sig, previous in self._previous.items():
+            signal.signal(sig, previous)
+        if exc_type is KeyboardInterrupt:
+            _terminate_generation_descendants("keyboard interrupt")
+        return False
+
+    def _atexit_cleanup(self) -> None:
+        if _INTERRUPT_CLEANUP_ACTIVE:
+            _terminate_generation_descendants("process exit", quiet=True)
+
+    def _handle_signal(self, signum: int, _frame) -> None:
+        name = signal.Signals(signum).name
+        _terminate_generation_descendants(name)
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        raise SystemExit(128 + int(signum))
 
 
 def resolve_mode(m: float, requested: str) -> str:
@@ -1604,7 +1752,7 @@ def _record_generation_artifact_timings(
         )
 
 
-def main() -> int:
+def _main_impl() -> int:
     """Run the complete CLI workflow and return a process exit code."""
     colorama_init(strip=False)
     args = parse_args()
@@ -1946,6 +2094,16 @@ def main() -> int:
     else:
         print_result_table(output)
     return 0
+
+
+def main() -> int:
+    """Run the CLI with signal cleanup for generation subprocess trees."""
+    with InterruptCleanupGuard():
+        try:
+            return _main_impl()
+        except KeyboardInterrupt:
+            print(f"{Fore.YELLOW}interrupted by user{Style.RESET_ALL}", file=sys.stderr)
+            return 130
 
 
 if __name__ == "__main__":

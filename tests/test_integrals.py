@@ -12,6 +12,7 @@ import time
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -168,6 +169,39 @@ def assert_finite_complex(value: complex) -> None:
     z = complex(value)
     assert math.isfinite(z.real)
     assert math.isfinite(z.imag)
+
+
+def test_nonfinite_rows_are_retried_at_high_precision_before_training() -> None:
+    """A NaN f64 row must be rescued before Havana receives training data."""
+
+    class NaNThenFiniteProcessor(SectorProcessor):
+        def __init__(self) -> None:
+            self.high_precision_stability_precision = 100
+
+        def _evaluate_batch_impl(self, _sector, rows, timing):
+            if timing.precision_digits is None:
+                return (
+                    np.full((rows.shape[0], 2), complex(float("nan"), float("nan"))),
+                    np.full(rows.shape[0], float("nan")),
+                )
+            return (
+                np.tile(np.array([1.0 + 0.0j, 2.0 + 0.0j]), (rows.shape[0], 1)),
+                np.full(rows.shape[0], 2.0),
+            )
+
+    processor = NaNThenFiniteProcessor()
+    sector = SimpleNamespace(name="toy-sector", singular_axes=[0])
+    coeffs, training, timing = processor._evaluate_precision_chunk(
+        sector,
+        np.array([[1.0e-6]], dtype=float),
+        precision_digits=None,
+        precision_tier="ordinary",
+    )
+
+    assert np.all(np.isfinite(coeffs))
+    assert np.all(np.isfinite(training))
+    assert timing.ordinary_precision_samples == 0
+    assert timing.high_precision_samples == 1
 
 
 def prepare_generated_evaluators(

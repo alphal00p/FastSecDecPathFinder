@@ -8254,6 +8254,115 @@ class SectorProcessor:
         accounted = timing.eval_seconds + timing.python_seconds + timing.havana_seconds
         timing.add_python(max(elapsed - accounted, 0.0))
 
+    @staticmethod
+    def _finite_evaluation_mask(coeffs: np.ndarray, training: np.ndarray) -> np.ndarray:
+        """Return rows whose Laurent coefficients and training value are finite."""
+        coeff_array = np.asarray(coeffs, dtype=np.complex128)
+        training_array = np.asarray(training, dtype=float)
+        if coeff_array.ndim != 2:
+            return np.zeros(training_array.shape[0], dtype=bool)
+        coeff_finite = np.all(np.isfinite(coeff_array), axis=1)
+        return coeff_finite & np.isfinite(training_array)
+
+    @staticmethod
+    def _remove_precision_samples(timing: HotPathTiming, tier: str, count: int) -> None:
+        """Move rows between precision counters after a non-finite rescue."""
+        amount = max(int(count), 0)
+        if tier == "ordinary":
+            timing.ordinary_precision_samples = max(timing.ordinary_precision_samples - amount, 0)
+        elif tier == "stability":
+            timing.stability_precision_samples = max(timing.stability_precision_samples - amount, 0)
+        elif tier == "high_precision":
+            timing.high_precision_samples = max(timing.high_precision_samples - amount, 0)
+
+    def _evaluate_precision_chunk(
+        self,
+        sector: SectorDefinition,
+        rows: np.ndarray,
+        *,
+        precision_digits: int | None,
+        precision_tier: str,
+    ) -> tuple[np.ndarray, np.ndarray, HotPathTiming]:
+        """Evaluate a homogeneous precision chunk and rescue non-finite rows.
+
+        Endpoint-distance thresholds catch the expected numerically delicate
+        samples, but explicit sector expressions can still overflow/cancel at
+        points that are not below those static thresholds.  Before the row is
+        returned to Havana, retry any non-finite result with the high-precision
+        evaluator path.  Precision counters record the final tier used by each
+        sample, while timing still includes the failed lower-precision attempt.
+        """
+        chunk_rows = np.asarray(rows, dtype=float)
+        timing = HotPathTiming(precision_digits=precision_digits)
+        chunk_size = int(chunk_rows.shape[0])
+        if precision_tier == "ordinary":
+            timing.add_precision_samples(ordinary=chunk_size)
+        elif precision_tier == "stability":
+            timing.add_precision_samples(stability=chunk_size)
+        elif precision_tier == "high_precision":
+            timing.add_precision_samples(high=chunk_size)
+        else:
+            raise ValueError(f"unknown precision tier {precision_tier!r}")
+
+        start_time = time.perf_counter()
+        coeffs, training = self._evaluate_batch_impl(sector, chunk_rows, timing)
+        self._charge_unprofiled_python(timing, start_time)
+
+        finite_mask = self._finite_evaluation_mask(coeffs, training)
+        bad_count = int(np.count_nonzero(~finite_mask))
+        if (
+            bad_count == 0
+            or precision_tier == "high_precision"
+            or self.high_precision_stability_precision <= 0
+        ):
+            if bad_count:
+                self._raise_nonfinite_evaluation(sector, chunk_rows, coeffs, training)
+            return coeffs, training, timing
+
+        rescue_rows = chunk_rows[~finite_mask]
+        rescue_timing = HotPathTiming(precision_digits=self.high_precision_stability_precision)
+        rescue_timing.add_precision_samples(high=bad_count)
+        rescue_start = time.perf_counter()
+        rescue_coeffs, rescue_training = self._evaluate_batch_impl(
+            sector,
+            rescue_rows,
+            rescue_timing,
+        )
+        self._charge_unprofiled_python(rescue_timing, rescue_start)
+        self._remove_precision_samples(timing, precision_tier, bad_count)
+        timing.absorb(rescue_timing)
+        coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
+        training = np.array(training, dtype=float, copy=True)
+        coeffs[~finite_mask] = rescue_coeffs
+        training[~finite_mask] = rescue_training
+        if not np.all(self._finite_evaluation_mask(coeffs, training)):
+            self._raise_nonfinite_evaluation(sector, chunk_rows, coeffs, training)
+        return coeffs, training, timing
+
+    def _raise_nonfinite_evaluation(
+        self,
+        sector: SectorDefinition,
+        rows: np.ndarray,
+        coeffs: np.ndarray,
+        training: np.ndarray,
+    ) -> None:
+        """Raise a diagnostic for rows that remain non-finite after rescue."""
+        finite_mask = self._finite_evaluation_mask(coeffs, training)
+        bad_indices = np.flatnonzero(~finite_mask)
+        first = int(bad_indices[0]) if bad_indices.size else 0
+        row = np.asarray(rows, dtype=float)[first]
+        if sector.singular_axes:
+            endpoint_distance = float(np.min(row[sector.singular_axes]))
+        else:
+            endpoint_distance = float("nan")
+        raise FloatingPointError(
+            f"{sector.name}: non-finite sector integrand after "
+            f"{self.high_precision_stability_precision}-digit rescue; "
+            f"row={row.tolist()}, min_endpoint_distance={endpoint_distance:.6e}, "
+            f"coeffs={np.asarray(coeffs)[first].tolist()}, "
+            f"training={float(np.asarray(training)[first])}"
+        )
+
     def evaluate_batch(
         self,
         sector: SectorDefinition,
@@ -8285,12 +8394,12 @@ class SectorProcessor:
             or self.stability_threshold <= 0.0
             or rows.shape[0] == 0
         ):
-            timing = HotPathTiming()
-            timing.add_precision_samples(ordinary=rows.shape[0])
-            start_time = time.perf_counter()
-            coeffs, training = self._evaluate_batch_impl(sector, rows, timing)
-            self._charge_unprofiled_python(timing, start_time)
-            return coeffs, training, timing
+            return self._evaluate_precision_chunk(
+                sector,
+                rows,
+                precision_digits=None,
+                precision_tier="ordinary",
+            )
 
         singular_coords = rows[:, sector.singular_axes]
         min_endpoint_distance = np.min(singular_coords, axis=1)
@@ -8301,12 +8410,12 @@ class SectorProcessor:
         )
         ordinary_mask = ~(high_mask | stable_mask)
         if np.all(ordinary_mask):
-            timing = HotPathTiming()
-            timing.add_precision_samples(ordinary=rows.shape[0])
-            start_time = time.perf_counter()
-            coeffs, training = self._evaluate_batch_impl(sector, rows, timing)
-            self._charge_unprofiled_python(timing, start_time)
-            return coeffs, training, timing
+            return self._evaluate_precision_chunk(
+                sector,
+                rows,
+                precision_digits=None,
+                precision_tier="ordinary",
+            )
 
         coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
         training = np.zeros(rows.shape[0], dtype=float)
@@ -8317,33 +8426,22 @@ class SectorProcessor:
         ):
             if not np.any(mask):
                 continue
-            chunk_timing = HotPathTiming(precision_digits=precision)
-            chunk_size = int(np.count_nonzero(mask))
-            if precision is None:
-                chunk_timing.add_precision_samples(ordinary=chunk_size)
-            else:
-                chunk_timing.add_precision_samples(stability=chunk_size)
-            start_time = time.perf_counter()
-            chunk_coeffs, chunk_training = self._evaluate_batch_impl(
+            chunk_coeffs, chunk_training, chunk_timing = self._evaluate_precision_chunk(
                 sector,
                 rows[mask],
-                chunk_timing,
+                precision_digits=precision,
+                precision_tier="ordinary" if precision is None else "stability",
             )
-            self._charge_unprofiled_python(chunk_timing, start_time)
             timing.absorb(chunk_timing)
             coeffs[mask] = chunk_coeffs
             training[mask] = chunk_training
         if np.any(high_mask):
-            chunk_timing = HotPathTiming(precision_digits=self.high_precision_stability_precision)
-            chunk_size = int(np.count_nonzero(high_mask))
-            chunk_timing.add_precision_samples(high=chunk_size)
-            start_time = time.perf_counter()
-            chunk_coeffs, chunk_training = self._evaluate_batch_impl(
+            chunk_coeffs, chunk_training, chunk_timing = self._evaluate_precision_chunk(
                 sector,
                 rows[high_mask],
-                chunk_timing,
+                precision_digits=self.high_precision_stability_precision,
+                precision_tier="high_precision",
             )
-            self._charge_unprofiled_python(chunk_timing, start_time)
             timing.absorb(chunk_timing)
             coeffs[high_mask] = chunk_coeffs
             training[high_mask] = chunk_training
