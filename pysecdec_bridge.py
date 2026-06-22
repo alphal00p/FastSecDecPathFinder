@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -148,6 +149,92 @@ def _affine_epsilon(expr: Any) -> EpsilonExpansion:
     return EpsilonExpansion(base=base, eps_coeff=at_one - base)
 
 
+_SINGLE_GAMMA_RE = re.compile(r"^gamma\((.*)\)$")
+
+
+def _regular_series_multiply(
+    left: list[complex],
+    right: list[complex],
+    max_order: int,
+) -> list[complex]:
+    """Multiply two regular epsilon series through ``max_order``."""
+    out = [0.0 + 0.0j for _ in range(int(max_order) + 1)]
+    for left_order, left_value in enumerate(left[: int(max_order) + 1]):
+        for right_order, right_value in enumerate(right[: int(max_order) + 1 - left_order]):
+            out[left_order + right_order] += left_value * right_value
+    return out
+
+
+def _regular_series_exp(log_coeffs: list[complex], max_order: int) -> list[complex]:
+    """Exponentiate a regular epsilon series with zero constant term."""
+    out = [1.0 + 0.0j] + [0.0 + 0.0j for _ in range(int(max_order))]
+    power = [1.0 + 0.0j] + [0.0 + 0.0j for _ in range(int(max_order))]
+    factorial = 1.0
+    for term_order in range(1, int(max_order) + 1):
+        factorial *= float(term_order)
+        power = _regular_series_multiply(power, log_coeffs, int(max_order))
+        for output_order, value in enumerate(power):
+            out[output_order] += value / factorial
+    return out
+
+
+def _gamma_one_plus_affine_eps_series(eps_coeff: float, max_order: int) -> list[complex]:
+    """Return ``Gamma(1 + eps_coeff*eps)`` through ``eps^max_order``."""
+    try:
+        import mpmath as mp
+    except ImportError as exc:  # pragma: no cover - pySecDec already requires mpmath.
+        raise RuntimeError("mpmath is required to evaluate Gamma-series constants") from exc
+
+    mp.mp.dps = max(50, 10 * (int(max_order) + 2))
+    log_coeffs = [0.0 + 0.0j for _ in range(int(max_order) + 1)]
+    if max_order >= 1:
+        log_coeffs[1] = -float(mp.euler) * float(eps_coeff)
+    for order in range(2, int(max_order) + 1):
+        log_coeffs[order] = (
+            ((-1.0) ** order)
+            * float(mp.zeta(order))
+            * (float(eps_coeff) ** order)
+            / float(order)
+        )
+    return _regular_series_exp(log_coeffs, int(max_order))
+
+
+def _single_affine_gamma_series(text: str, max_order: int) -> tuple[int, list[complex]] | None:
+    """Analytically evaluate Symbolica's single affine-Gamma series.
+
+    Symbolica builds the correct series structure for ``gamma(2+eps)``, but in
+    the current development wheel its numerical evaluator gives an inaccurate
+    value for ``polygamma(1,2)``.  This helper only handles a single
+    ``gamma(a+b*eps)`` with non-negative integer ``a``; other prefactors still
+    use the generic Symbolica series fallback below.
+    """
+    match = _SINGLE_GAMMA_RE.match(text.replace(" ", ""))
+    if match is None:
+        return None
+    affine = _affine_epsilon(match.group(1))
+    base_rounded = round(affine.base)
+    if abs(affine.base - base_rounded) > 1.0e-12:
+        return None
+    if abs(affine.eps_coeff) <= 1.0e-15:
+        return None
+    base = int(base_rounded)
+    if base < 0:
+        return None
+
+    min_order = -1 if base == 0 else 0
+    regular_max_order = int(max_order) - min_order
+    coeffs = _gamma_one_plus_affine_eps_series(affine.eps_coeff, regular_max_order)
+    if base == 0:
+        return min_order, [value / affine.eps_coeff for value in coeffs]
+    for offset in range(1, base):
+        coeffs = _regular_series_multiply(
+            coeffs,
+            [float(offset) + 0.0j, float(affine.eps_coeff) + 0.0j],
+            regular_max_order,
+        )
+    return min_order, coeffs
+
+
 def _prefactor_series(expr: Any, max_order: int) -> tuple[int, list[complex]]:
     """Laurent-expand a pySecDec global prefactor around ``eps=0``.
 
@@ -157,6 +244,9 @@ def _prefactor_series(expr: Any, max_order: int) -> tuple[int, list[complex]]:
     ordered from ``min_order`` through ``max_order``.
     """
     text = _symbolica_text(expr).replace("EulerGamma", "γ")
+    analytic_gamma = _single_affine_gamma_series(text, int(max_order))
+    if analytic_gamma is not None:
+        return analytic_gamma
     series = E(text).series(S("eps"), 0, int(max_order))
     present_orders = [int(order) for order, _coeff in series]
     min_order = min(present_orders) if present_orders else 0

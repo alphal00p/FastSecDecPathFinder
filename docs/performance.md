@@ -57,40 +57,47 @@ Current topology overview:
 ## QMC Integration Probe
 
 FSD now has an experimental `--sampling-mode qmc` based on QMCPy's randomized
-shifted rank-1 lattices.  FSD applies the Korobov periodizing map in vectorized
-NumPy batches and then calls the usual batched Symbolica sector evaluators.
-Each random shift is treated as one sector estimate; errors are estimated from
-the shift-to-shift spread and combined across sectors in quadrature.
+shifted rank-1 lattices.  This path is implemented independently of pySecDec's
+QMC internals: FSD asks QMCPy for shifted lattice points, applies the Korobov
+periodizing map in vectorized NumPy batches, and then calls the usual batched
+Symbolica sector evaluators.  Each random shift is treated as one sector
+estimate; errors are estimated from the shift-to-shift spread and combined
+across sectors in quadrature.
 
-The one-loop DOT triangle was compared directly against pySecDec's generated
-QMC backend using:
+The one-loop DOT triangle and box were compared directly against pySecDec's
+generated QMC backend, with the physical target taken from OneLOopBridge at the
+same kinematic point and converted to the DOT sector convention:
 
 ```sh
 .venv/bin/python scripts/compare_qmc_pysecdec.py \
-  --sample-counts 1024 4096 16384 \
+  --run-file examples/runs/dot_box.yaml \
+  --kinematics-file examples/graphs/box_kinematics.yaml \
+  --target-source oneloop-sector \
+  --oneloop-integral box \
+  --fsd-prefactor-convention sector \
+  --pysecdec-shared .pysecdec_build/fsd_psd_box/fsd_psd_box_pylink.so \
+  --sample-counts 1024 4096 \
   --qmc-shifts 16 \
   --workers 10 \
-  --output-json /tmp/fsd_qmc_triangle_compare_latest.json
+  --output-json /tmp/fsd_qmc_box_compare_oneloop_sector_fixed.json
 ```
 
-The reference target was the stored pySecDec-convention DOT-triangle target in
-`examples/outputs/dot_triangle_pysecdec_target.json`.  The finite coefficient
-is shown below.  FSD raw samples are `sectors * N/shift * shifts`; pySecDec
-only exposes the public QMC `maxeval` budget through the pylink API, not the
-same per-sector accounting.
+The finite coefficient is shown below.  FSD raw samples are
+`sectors * N/shift * shifts`; pySecDec only exposes the public QMC `maxeval`
+budget through the pylink API, not the same per-sector accounting.
 
 | N/shift | FSD raw sector samples | FSD eps^0 diff | FSD eps^0 err | pySecDec maxeval | pySecDec eps^0 diff | pySecDec eps^0 err |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1,024 | 49,152 | 8.696e-10 | 4.281e-9 | 16,384 | 7.783e-14 | 2.348e-14 |
-| 4,096 | 196,608 | 2.675e-10 | 6.781e-9 | 65,536 | 7.561e-14 | 1.378e-14 |
-| 16,384 | 786,432 | 4.026e-13 | 5.267e-9 | 262,144 | 6.650e-14 | 8.530e-15 |
+| box, 1,024 | 196,608 | 6.626e-7 | 2.417e-6 | 16,384 | 6.710e-11 | 1.490e-10 |
+| box, 4,096 | 786,432 | 2.635e-10 | 1.542e-8 | 65,536 | 1.954e-14 | 1.212e-12 |
+| triangle, 4,096 | 196,608 | 2.768e-10 | 5.279e-9 | 65,536 | 2.220e-16 | 1.618e-14 |
 
-This confirms that the FSD QMC implementation converges to the same
-pySecDec-convention one-loop result.  It is not competitive with pySecDec on
-this simple generated-C++ case: pySecDec's mature QMC implementation and
-generated integrand are substantially more accurate at the same public lattice
-sizes.  The next useful test is therefore the two-loop double box, where FSD's
-generation/runtime trade-off is more relevant.
+This confirms that the independent FSD/QMCPy path converges to the same
+one-loop result.  The old box discrepancy at the `4.6e-3` level was a
+normalization bug in the stored `gamma(2+eps)` prefactor coefficient, not a QMC
+or subtraction failure.  pySecDec's generated C++ integrand remains faster for
+these small one-loop examples, but FSD's generation/runtime trade-off becomes
+more relevant for larger DOT inputs.
 
 For the two-loop DOT double box, a prepared explicit FSD bundle was integrated
 strictly from disk, so the timing below is runtime only:

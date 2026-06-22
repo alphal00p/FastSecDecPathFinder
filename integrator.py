@@ -29,6 +29,7 @@ from formatting import (
     summed_relative_error_percent,
 )
 from integrand import SectorProcessor, TopologyDefinition
+from qmc_lattice import qmcpy_shifted_lattice_points
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty
 
@@ -573,32 +574,19 @@ def qmc_batches_for_sector(
     iteration: int,
 ) -> list[QmcBatch]:
     """Generate Korobov-transformed shifted-lattice chunks for one sector."""
-    try:
-        from qmcpy import Lattice
-    except ImportError as exc:  # pragma: no cover - exercised only without dependency.
-        raise RuntimeError(
-            "--sampling-mode qmc requires the 'qmcpy' package; run "
-            "'.venv/bin/python -m pip install qmcpy'"
-        ) from exc
-
     n_points = int(request.samples_per_iter)
     shift_count = int(request.qmc_shifts)
+    seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
+    raw_points = qmcpy_shifted_lattice_points(
+        dimension=int(sector.integration_dim),
+        n_points=n_points,
+        shift_count=shift_count,
+        seed=seed,
+        order=str(request.qmc_order),
+    )
+
     step = n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
     step = max(step, 1)
-    seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
-    lattice = Lattice(
-        int(sector.integration_dim),
-        replications=shift_count,
-        seed=seed,
-        randomize="SHIFT",
-    )
-    raw_points = np.asarray(lattice(n_points), dtype=float)
-    if raw_points.ndim == 2:
-        raw_points = raw_points[np.newaxis, :, :]
-    if raw_points.shape[0] != shift_count:
-        raise RuntimeError(
-            f"QMCPy returned {raw_points.shape[0]} shift replicas, expected {shift_count}"
-        )
     flat_points = raw_points.reshape(shift_count * n_points, int(sector.integration_dim))
     coords, weights = korobov_transform(flat_points, int(request.qmc_korobov_alpha))
     shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), n_points)
@@ -1202,8 +1190,10 @@ def integrate_qmc(
     raw_samples_done = 0
     diagnostics: dict[str, Any] = {
         "sampling_mode": "qmc",
+        "qmc_lattice_backend": "qmcpy",
         "qmc_software": "qmcpy.Lattice",
         "qmc_randomization": "SHIFT",
+        "qmc_lattice_order": str(request.qmc_order),
         "qmc_lattice_points_per_shift": int(request.samples_per_iter),
         "qmc_shifts": int(request.qmc_shifts),
         "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
@@ -1217,9 +1207,7 @@ def integrate_qmc(
 
     progress_request = replace(
         request,
-        samples_per_iter=int(request.samples_per_iter)
-        * int(request.qmc_shifts)
-        * len(active_sector_ids),
+        samples_per_iter=int(request.samples_per_iter) * int(request.qmc_shifts) * len(active_sector_ids),
     )
     bar = make_progress_bar(progress_request)
     if bar is not None:

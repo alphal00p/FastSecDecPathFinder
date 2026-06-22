@@ -80,6 +80,7 @@ from kinematics import load_kinematics
 from kinematics import KinematicsDefinition
 from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
+from qmc_lattice import is_power_of_two, qmcpy_shifted_lattice_points
 from pysecdec_bridge import (
     _make_loop_integral,
     _prefactor_series,
@@ -165,6 +166,8 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "json": True,
         "mu": None,
         "onshell_threshold": None,
+        "qmc_lattice_backend": "qmcpy",
+        "qmc_order": "linear",
     }
     data.update(overrides)
     return IntegralRequest(**data)
@@ -3057,6 +3060,47 @@ def test_korobov_transform_alpha_three_is_normalized() -> None:
     assert np.trapezoid(weights, points[:, 0]) == pytest.approx(1.0, rel=1.0e-6)
 
 
+def test_qmcpy_qmc_lattice_requires_power_of_two_samples() -> None:
+    """The independent QMCPy backend should not silently resize lattices."""
+    assert is_power_of_two(1024)
+    assert not is_power_of_two(1123)
+
+    with pytest.raises(ValueError, match="power of two"):
+        qmcpy_shifted_lattice_points(
+            dimension=2,
+            n_points=1123,
+            shift_count=4,
+            seed=11,
+            order="linear",
+        )
+
+
+def test_qmcpy_shifted_rank1_lattice_shape_and_range() -> None:
+    """The QMCPy rank-1 lattice helper returns shift-major unit-cube points."""
+    points = qmcpy_shifted_lattice_points(
+        dimension=2,
+        n_points=8,
+        shift_count=4,
+        seed=11,
+        order="linear",
+    )
+
+    assert points.shape == (4, 8, 2)
+    assert np.all(points >= 0.0)
+    assert np.all(points < 1.0)
+    # The same seed must reproduce the same random shifts and lattice points.
+    assert np.allclose(
+        points,
+        qmcpy_shifted_lattice_points(
+            dimension=2,
+            n_points=8,
+            shift_count=4,
+            seed=11,
+            order="linear",
+        ),
+    )
+
+
 def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     """QMC mode estimates errors from random shifts and records raw samples."""
     request = make_request(
@@ -3068,6 +3112,7 @@ def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
         sampling_mode="qmc",
         qmc_shifts=4,
         qmc_korobov_alpha=3,
+        qmc_lattice_backend="qmcpy",
         samples_per_iter=32,
         max_iter=1,
         min_iter=1,
@@ -3089,12 +3134,49 @@ def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     assert result.samples == 4 * 32 * len(sectors)
     assert result.diagnostics["sampling_mode"] == "qmc"
     assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
+    assert result.diagnostics["qmc_lattice_backend"] == "qmcpy"
     assert result.diagnostics["qmc_korobov_alpha"] == 3
     for value in result.raw_sector_coeffs:
         assert_finite_complex(value)
     for sector_result in result.per_sector:
         assert sector_result.samples == 4 * 32
         assert sector_result.diagnostics["sampling_mode"] == "qmc"
+
+
+def test_qmc_qmcpy_backend_records_lattice_metadata() -> None:
+    """QMC diagnostics should expose the independent QMCPy lattice metadata."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="qmc",
+        qmc_shifts=2,
+        qmc_korobov_alpha=3,
+        samples_per_iter=1024,
+        max_iter=1,
+        min_iter=1,
+        batch_size=2048,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
+    assert result.diagnostics["qmc_lattice_backend"] == "qmcpy"
+    assert result.diagnostics["qmc_lattice_order"] == "linear"
+    assert result.diagnostics["qmc_lattice_points_per_shift"] == 1024
+    assert result.samples == 2 * 1024 * len(sectors)
 
 
 def test_result_table_marks_missing_dot_reference_as_na(capsys: pytest.CaptureFixture[str]) -> None:
@@ -3597,6 +3679,18 @@ def test_symbolica_global_prefactor_series_handles_gamma_pole() -> None:
     assert coeffs[0] == pytest.approx(1.0)
     assert coeffs[1] == pytest.approx(-0.5772156649015329)
     assert coeffs[2] == pytest.approx(0.9890559953279725)
+
+
+def test_symbolica_global_prefactor_series_handles_shifted_gamma() -> None:
+    """The pySecDec box prefactor ``gamma(2+eps)`` needs correct constants."""
+    min_order, coeffs = _prefactor_series("gamma(2+eps)", 2)
+
+    euler_gamma = 0.5772156649015329
+    expected_eps_2 = 0.5 * euler_gamma * euler_gamma - euler_gamma + math.pi**2 / 12.0
+    assert min_order == 0
+    assert coeffs[0] == pytest.approx(1.0)
+    assert coeffs[1] == pytest.approx(1.0 - euler_gamma)
+    assert coeffs[2] == pytest.approx(expected_eps_2)
 
 
 def test_laurent_global_prefactor_convolution_extends_displayed_pole_range() -> None:

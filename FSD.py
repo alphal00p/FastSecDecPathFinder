@@ -299,6 +299,12 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--qmc-shifts must be greater than 1 to estimate a randomized QMC error")
     if request.qmc_korobov_alpha < 1:
         raise ValueError("--qmc-korobov-alpha must be a positive integer")
+    if request.qmc_lattice_backend != "qmcpy":
+        raise ValueError("--qmc-lattice-backend currently supports only 'qmcpy'")
+    if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
+        raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
+    if request.sampling_mode == "qmc" and request.samples_per_iter & (request.samples_per_iter - 1):
+        raise ValueError("--sampling-mode qmc requires --samples-per-iter to be a power of two")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
     if request.stability_threshold < 0.0:
@@ -646,6 +652,26 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help=(
             "Korobov periodizing transform exponent used in QMC mode. "
             "The 2016 pySecDec-inspired setup uses alpha=3. Default: 3."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-lattice-backend",
+        choices=["qmcpy"],
+        default=str(defaults.get("qmc_lattice_backend", "qmcpy")),
+        help=(
+            "Rank-1 lattice source for --sampling-mode qmc. QMC integration "
+            "is implemented independently of pySecDec; the current backend is "
+            "QMCPy's shifted lattice. Default: qmcpy."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-order",
+        choices=["linear", "radical-inverse", "gray"],
+        default=str(defaults.get("qmc_order", "linear")),
+        help=(
+            "QMCPy lattice ordering. 'linear' is closest to pySecDec's direct "
+            "rank-1 lattice loop; 'radical-inverse' is QMCPy's historical "
+            "default. Default: linear."
         ),
     )
     parser.add_argument(
@@ -1268,6 +1294,8 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         democratic_samples_per_sector=args.democratic_samples_per_sector,
         qmc_shifts=int(args.qmc_shifts),
         qmc_korobov_alpha=int(args.qmc_korobov_alpha),
+        qmc_lattice_backend=str(args.qmc_lattice_backend),
+        qmc_order=str(args.qmc_order),
         target_rel_accuracy=args.target_rel_accuracy,
         min_error=args.min_error,
         bins=args.bins,

@@ -282,9 +282,12 @@ mode; the default adaptive mode remains the production integration path.
 
 QMC integration is also available through QMCPy's randomized shifted rank-1
 lattices with the Korobov periodizing transform used in the pySecDec/QMC
-literature.  In this mode `--samples-per-iter` is the number of lattice points
+literature.  This path is independent of pySecDec's QMC internals; pySecDec is
+only used for DOT sector finding or as an external generated-integrator
+baseline.  In this mode `--samples-per-iter` is the number of lattice points
 per sector and per random shift, while `--qmc-shifts` is the number of
-independent shifts used for the one-sigma error estimate:
+independent shifts used for the one-sigma error estimate.  The lattice point
+count must be a power of two for the current QMCPy backend:
 
 ```sh
 .venv/bin/python FSD.py \
@@ -301,15 +304,22 @@ For a direct one-loop comparison against pySecDec's generated QMC backend, use:
 
 ```sh
 .venv/bin/python scripts/compare_qmc_pysecdec.py \
-  --sample-counts 256 1024 4096 \
+  --run-file examples/runs/dot_box.yaml \
+  --kinematics-file examples/graphs/box_kinematics.yaml \
+  --target-source oneloop-sector \
+  --oneloop-integral box \
+  --fsd-prefactor-convention sector \
+  --pysecdec-shared .pysecdec_build/fsd_psd_box/fsd_psd_box_pylink.so \
+  --sample-counts 1024 4096 \
   --qmc-shifts 16 \
   --workers 10
 ```
 
-The comparison script defaults to the DOT triangle package
-`.pysecdec_build/fsd_psd_triangle/fsd_psd_triangle_pylink.so`.  It prints both
-the public pySecDec QMC budget and FSD's raw sector-sample count, because
-pySecDec does not expose the same per-sector accounting through the pylink API.
+With `--target-source oneloop-sector`, the comparison target is taken from
+OneLOopBridge at the matching built-in triangle/box kinematics and converted to
+the DOT sector convention.  The script prints both the public pySecDec QMC
+budget and FSD's raw sector-sample count, because pySecDec does not expose the
+same per-sector accounting through the pylink API.
 
 The transform is applied in vectorized NumPy before the existing batched
 Symbolica sector evaluator call.  The estimator treats each shifted lattice as
