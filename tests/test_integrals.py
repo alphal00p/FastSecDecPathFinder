@@ -3116,6 +3116,50 @@ def test_cbcpt_shifted_rank1_lattice_uses_prime_rule_size() -> None:
     assert np.all(points < 1.0)
 
 
+def test_qmc_support_groups_skip_zero_poles_and_promote_global_support() -> None:
+    """QMC support grouping should mirror pySecDec coefficient containers."""
+    topology = SimpleNamespace(coefficient_count=3, laurent_orders=[-2, -1, 0])
+    two_axis = SectorDefinition(
+        name="two_axis",
+        integration_dim=3,
+        variable_names=["x1", "x2", "x3"],
+        map_exprs=[E("x1"), E("x2"), E("x3")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[1, 1, 0],
+        jacobian_monomial_powers=[0, 0, 0],
+        singular_axes=[0, 1],
+        subtraction_type="test",
+        description="test",
+    )
+    one_axis = SectorDefinition(
+        name="one_axis",
+        integration_dim=3,
+        variable_names=["x1", "x2", "x3"],
+        map_exprs=[E("x1"), E("x2"), E("x3")],
+        regular_jacobian_expr=E("1"),
+        f_monomial_powers=[0, 1, 0],
+        jacobian_monomial_powers=[0, 0, 0],
+        singular_axes=[1],
+        subtraction_type="test",
+        description="test",
+    )
+
+    assert integrator_module.qmc_support_groups(topology, two_axis) == [
+        ((0,), (2,)),
+        ((1, 2), (0, 1, 2)),
+    ]
+    assert integrator_module.qmc_support_groups(topology, one_axis) == [
+        ((1,), (0, 2)),
+        ((2,), (0, 1, 2)),
+    ]
+
+    global_dims = integrator_module.qmc_global_support_dims(topology, [two_axis, one_axis])
+    assert global_dims == (1, 3, 3)
+    assert integrator_module.qmc_support_groups(topology, one_axis, global_dims) == [
+        ((1, 2), (0, 1, 2)),
+    ]
+
+
 def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     """QMC mode estimates errors from random shifts and records raw samples."""
     request = make_request(
