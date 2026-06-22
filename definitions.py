@@ -149,6 +149,7 @@ class IntegralRequest:
     qmc_korobov_alpha: int = 3
     qmc_lattice_backend: str = "qmcpy"
     qmc_order: str = "linear"
+    qmc_correlate_sectors: bool = True
 
 
 @dataclass(frozen=True)

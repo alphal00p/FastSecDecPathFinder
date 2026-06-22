@@ -80,7 +80,7 @@ from kinematics import load_kinematics
 from kinematics import KinematicsDefinition
 from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
-from qmc_lattice import is_power_of_two, qmcpy_shifted_lattice_points
+from qmc_lattice import cbcpt_dn1_shifted_lattice_points, is_power_of_two, qmcpy_shifted_lattice_points
 from pysecdec_bridge import (
     _make_loop_integral,
     _prefactor_series,
@@ -168,6 +168,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "onshell_threshold": None,
         "qmc_lattice_backend": "qmcpy",
         "qmc_order": "linear",
+        "qmc_correlate_sectors": True,
     }
     data.update(overrides)
     return IntegralRequest(**data)
@@ -3099,6 +3100,20 @@ def test_qmcpy_shifted_rank1_lattice_shape_and_range() -> None:
             order="linear",
         ),
     )
+
+
+def test_cbcpt_shifted_rank1_lattice_uses_prime_rule_size() -> None:
+    """The bundled CBC/PT backend treats n_points as a lower bound."""
+    points = cbcpt_dn1_shifted_lattice_points(
+        dimension=3,
+        n_points=4096,
+        shift_count=4,
+        seed=11,
+    )
+
+    assert points.shape == (4, 4261, 3)
+    assert np.all(points >= 0.0)
+    assert np.all(points < 1.0)
 
 
 def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:

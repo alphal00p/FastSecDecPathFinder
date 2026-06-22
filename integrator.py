@@ -29,7 +29,7 @@ from formatting import (
     summed_relative_error_percent,
 )
 from integrand import SectorProcessor, TopologyDefinition
-from qmc_lattice import qmcpy_shifted_lattice_points
+from qmc_lattice import shifted_lattice_points
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty
 
@@ -51,6 +51,10 @@ class RunningStats:
     sum_im: float = 0.0
     sumsq_re: float = 0.0
     sumsq_im: float = 0.0
+    mean_re_acc: float = 0.0
+    mean_im_acc: float = 0.0
+    m2_re: float = 0.0
+    m2_im: float = 0.0
 
     def add(self, value: complex) -> None:
         """Add one weighted sample."""
@@ -60,17 +64,24 @@ class RunningStats:
         self.sum_im += z.imag
         self.sumsq_re += z.real * z.real
         self.sumsq_im += z.imag * z.imag
+        delta_re = z.real - self.mean_re_acc
+        self.mean_re_acc += delta_re / self.count
+        self.m2_re += delta_re * (z.real - self.mean_re_acc)
+        delta_im = z.imag - self.mean_im_acc
+        self.mean_im_acc += delta_im / self.count
+        self.m2_im += delta_im * (z.imag - self.mean_im_acc)
 
     def add_many(self, values: np.ndarray) -> None:
         """Add a vector of weighted samples using NumPy reductions."""
         array = np.asarray(values, dtype=np.complex128)
         if array.size == 0:
             return
-        self.count += int(array.size)
-        self.sum_re += float(np.sum(array.real))
-        self.sum_im += float(np.sum(array.imag))
-        self.sumsq_re += float(np.sum(array.real * array.real))
-        self.sumsq_im += float(np.sum(array.imag * array.imag))
+        count = int(array.size)
+        sum_re = float(np.sum(array.real))
+        sum_im = float(np.sum(array.imag))
+        sumsq_re = float(np.sum(array.real * array.real))
+        sumsq_im = float(np.sum(array.imag * array.imag))
+        self.add_aggregate(count, sum_re, sum_im, sumsq_re, sumsq_im)
 
     def add_aggregate(
         self,
@@ -90,7 +101,32 @@ class RunningStats:
         """
         if count <= 0:
             return
-        self.count += int(count)
+        group_count = int(count)
+        group_sum_re = float(sum_re)
+        group_sum_im = float(sum_im)
+        group_sumsq_re = float(sumsq_re)
+        group_sumsq_im = float(sumsq_im)
+        group_mean_re = group_sum_re / group_count
+        group_mean_im = group_sum_im / group_count
+        group_m2_re = max(group_sumsq_re - group_count * group_mean_re * group_mean_re, 0.0)
+        group_m2_im = max(group_sumsq_im - group_count * group_mean_im * group_mean_im, 0.0)
+
+        previous_count = self.count
+        new_count = previous_count + group_count
+        if previous_count == 0:
+            self.mean_re_acc = group_mean_re
+            self.mean_im_acc = group_mean_im
+            self.m2_re = group_m2_re
+            self.m2_im = group_m2_im
+        else:
+            delta_re = group_mean_re - self.mean_re_acc
+            delta_im = group_mean_im - self.mean_im_acc
+            self.mean_re_acc += delta_re * group_count / new_count
+            self.mean_im_acc += delta_im * group_count / new_count
+            self.m2_re += group_m2_re + delta_re * delta_re * previous_count * group_count / new_count
+            self.m2_im += group_m2_im + delta_im * delta_im * previous_count * group_count / new_count
+
+        self.count = new_count
         self.sum_re += float(sum_re)
         self.sum_im += float(sum_im)
         self.sumsq_re += float(sumsq_re)
@@ -108,10 +144,8 @@ class RunningStats:
         """Return component-wise standard errors of the mean."""
         if self.count < 2:
             return complex(float("inf"), float("inf"))
-        mean_re = self.sum_re / self.count
-        mean_im = self.sum_im / self.count
-        var_re = max(self.sumsq_re / self.count - mean_re * mean_re, 0.0)
-        var_im = max(self.sumsq_im / self.count - mean_im * mean_im, 0.0)
+        var_re = max(self.m2_re / (self.count - 1), 0.0)
+        var_im = max(self.m2_im / (self.count - 1), 0.0)
         return complex(math.sqrt(var_re / self.count), math.sqrt(var_im / self.count))
 
 
@@ -572,24 +606,35 @@ def qmc_batches_for_sector(
     sector_id: int,
     sector: SectorDefinition,
     iteration: int,
+    raw_points: np.ndarray | None = None,
 ) -> list[QmcBatch]:
     """Generate Korobov-transformed shifted-lattice chunks for one sector."""
     n_points = int(request.samples_per_iter)
     shift_count = int(request.qmc_shifts)
-    seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
-    raw_points = qmcpy_shifted_lattice_points(
-        dimension=int(sector.integration_dim),
-        n_points=n_points,
-        shift_count=shift_count,
-        seed=seed,
-        order=str(request.qmc_order),
-    )
+    if raw_points is None:
+        seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
+        raw_points = shifted_lattice_points(
+            backend=str(request.qmc_lattice_backend),
+            dimension=int(sector.integration_dim),
+            n_points=n_points,
+            shift_count=shift_count,
+            seed=seed,
+            order=str(request.qmc_order),
+        )
+    else:
+        expected_prefix = (shift_count, int(sector.integration_dim))
+        if raw_points.ndim != 3 or raw_points.shape[0] != expected_prefix[0] or raw_points.shape[2] != expected_prefix[1]:
+            raise RuntimeError(
+                "shared QMC lattice has unexpected shape "
+                f"{tuple(raw_points.shape)}, expected shift/dimension {expected_prefix}"
+            )
 
-    step = n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
+    actual_n_points = int(raw_points.shape[1])
+    step = actual_n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
     step = max(step, 1)
-    flat_points = raw_points.reshape(shift_count * n_points, int(sector.integration_dim))
+    flat_points = raw_points.reshape(shift_count * actual_n_points, int(sector.integration_dim))
     coords, weights = korobov_transform(flat_points, int(request.qmc_korobov_alpha))
-    shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), n_points)
+    shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), actual_n_points)
     return [
         QmcBatch(
             sector_position=int(sector_position),
@@ -599,7 +644,7 @@ def qmc_batches_for_sector(
             shift_indices=shift_indices[start : start + step],
             shift_count=shift_count,
         )
-        for start in range(0, shift_count * n_points, step)
+        for start in range(0, shift_count * actual_n_points, step)
     ]
 
 
@@ -998,28 +1043,34 @@ def _stats_from_reduced_batches(
     start_time: float,
     interrupted: bool,
     diagnostics: dict[str, Any],
+    aggregate_stats_override: list[RunningStats] | None = None,
 ) -> IntegrationResult:
     """Materialize a democratic integration result from per-sector statistics."""
     coeff_count = topology.coefficient_count
     aggregate_coeffs: list[complex] = []
     aggregate_errors: list[complex] = []
-    for coeff_index in range(coeff_count):
-        coeff = sum(
-            sector_stats[sector_id][coeff_index].mean
-            for sector_id in active_sector_ids
-        )
-        err_re2 = sum(
-            sector_stats[sector_id][coeff_index].error.real ** 2
-            for sector_id in active_sector_ids
-            if math.isfinite(sector_stats[sector_id][coeff_index].error.real)
-        )
-        err_im2 = sum(
-            sector_stats[sector_id][coeff_index].error.imag ** 2
-            for sector_id in active_sector_ids
-            if math.isfinite(sector_stats[sector_id][coeff_index].error.imag)
-        )
-        aggregate_coeffs.append(coeff)
-        aggregate_errors.append(complex(math.sqrt(err_re2), math.sqrt(err_im2)))
+    if aggregate_stats_override is not None:
+        for stat in aggregate_stats_override:
+            aggregate_coeffs.append(stat.mean)
+            aggregate_errors.append(stat.error)
+    else:
+        for coeff_index in range(coeff_count):
+            coeff = sum(
+                sector_stats[sector_id][coeff_index].mean
+                for sector_id in active_sector_ids
+            )
+            err_re2 = sum(
+                sector_stats[sector_id][coeff_index].error.real ** 2
+                for sector_id in active_sector_ids
+                if math.isfinite(sector_stats[sector_id][coeff_index].error.real)
+            )
+            err_im2 = sum(
+                sector_stats[sector_id][coeff_index].error.imag ** 2
+                for sector_id in active_sector_ids
+                if math.isfinite(sector_stats[sector_id][coeff_index].error.imag)
+            )
+            aggregate_coeffs.append(coeff)
+            aggregate_errors.append(complex(math.sqrt(err_re2), math.sqrt(err_im2)))
 
     total_samples = sum(sector_hits[sector_id] for sector_id in active_sector_ids)
     timing_per_sector: list[dict[str, Any]] = []
@@ -1147,6 +1198,21 @@ def _qmc_live_stats(
     return out
 
 
+def _qmc_live_stats_from_aggregate(
+    aggregate_stats: list[RunningStats],
+    raw_samples: int,
+) -> list[_LiveAggregateStat]:
+    """Build live QMC stats from already-correlated shift-sum estimates."""
+    return [
+        _LiveAggregateStat(
+            mean=stat.mean,
+            error=stat.error,
+            count=int(raw_samples),
+        )
+        for stat in aggregate_stats
+    ]
+
+
 def integrate_qmc(
     request: IntegralRequest,
     topology: TopologyDefinition,
@@ -1184,6 +1250,10 @@ def integrate_qmc(
         np.zeros(topology.coefficient_count, dtype=float)
         for _sector in sectors
     ]
+    correlated_qmc = bool(request.qmc_correlate_sectors)
+    aggregate_shift_stats = [
+        RunningStats() for _coeff_index in range(topology.coefficient_count)
+    ]
     total_timing = HotPathTiming()
     start_time = time.perf_counter()
     interrupted = False
@@ -1197,9 +1267,14 @@ def integrate_qmc(
         "qmc_lattice_points_per_shift": int(request.samples_per_iter),
         "qmc_shifts": int(request.qmc_shifts),
         "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
+        "qmc_correlate_sectors": correlated_qmc,
         "active_sector_count": len(active_sector_ids),
         "note": (
-            "Each sector is integrated by randomized shifted lattices. "
+            "All sectors share the same randomized shifted lattice in each "
+            "iteration; aggregate QMC errors are estimated from the "
+            "shift-by-shift sector sum."
+            if correlated_qmc
+            else "Each sector is integrated by randomized shifted lattices. "
             "Errors are estimated from random-shift sector estimates and "
             "combined across sectors in quadrature."
         ),
@@ -1240,7 +1315,7 @@ def integrate_qmc(
         sector_id: int,
         sector_sums: np.ndarray,
         sector_counts: np.ndarray,
-    ) -> None:
+    ) -> np.ndarray:
         aggregate_start = time.perf_counter()
         if np.any(sector_counts <= 0):
             raise RuntimeError(f"sector {sector_id} has incomplete QMC shift estimates")
@@ -1250,14 +1325,21 @@ def integrate_qmc(
             for coeff_index, stat in enumerate(sector_stats[sector_id]):
                 stat.add(shift_values[coeff_index])
         total_timing.add_python(time.perf_counter() - aggregate_start)
+        return means
 
     def update_qmc_progress(iteration: int) -> None:
-        live_stats = _qmc_live_stats(
-            sector_stats,
-            active_sector_ids,
-            topology.coefficient_count,
-            raw_samples_done,
-        )
+        if correlated_qmc and aggregate_shift_stats[0].count > 0:
+            live_stats = _qmc_live_stats_from_aggregate(
+                aggregate_shift_stats,
+                raw_samples_done,
+            )
+        else:
+            live_stats = _qmc_live_stats(
+                sector_stats,
+                active_sector_ids,
+                topology.coefficient_count,
+                raw_samples_done,
+            )
         elapsed = time.perf_counter() - start_time
         avg_eval_us = avg_eval_us_per_sample_per_worker(total_timing, raw_samples_done)
         update_progress_bar_timed(
@@ -1290,13 +1372,35 @@ def integrate_qmc(
         iteration = 0
         while request.max_iter < 0 or iteration < request.max_iter:
             iteration += 1
+            shared_raw_points: np.ndarray | None = None
+            iteration_shift_totals = np.zeros(
+                (int(request.qmc_shifts), topology.coefficient_count),
+                dtype=np.complex128,
+            )
+            if correlated_qmc:
+                shared_seed = int(request.seed) + 97_003 * int(iteration)
+                shared_raw_points = shifted_lattice_points(
+                    backend=str(request.qmc_lattice_backend),
+                    dimension=int(continuous_dim),
+                    n_points=int(request.samples_per_iter),
+                    shift_count=int(request.qmc_shifts),
+                    seed=shared_seed,
+                    order=str(request.qmc_order),
+                )
             for sector_position, (sector_id, sector) in enumerate(zip(active_sector_ids, active_sectors)):
                 sector_sums = np.zeros(
                     (int(request.qmc_shifts), topology.coefficient_count),
                     dtype=np.complex128,
                 )
                 sector_counts = np.zeros(int(request.qmc_shifts), dtype=np.int64)
-                batches = qmc_batches_for_sector(request, sector_position, sector_id, sector, iteration)
+                batches = qmc_batches_for_sector(
+                    request,
+                    sector_position,
+                    sector_id,
+                    sector,
+                    iteration,
+                    raw_points=shared_raw_points,
+                )
                 if executor is None:
                     assert processor is not None
                     for batch in batches:
@@ -1312,14 +1416,27 @@ def integrate_qmc(
                     ]
                     for future in pending:
                         absorb_reduced(future.result(), sector_sums, sector_counts)
-                finish_sector_shift_estimates(sector_id, sector_sums, sector_counts)
+                sector_shift_means = finish_sector_shift_estimates(sector_id, sector_sums, sector_counts)
+                if correlated_qmc:
+                    iteration_shift_totals += sector_shift_means
                 update_qmc_progress(iteration)
-            live_stats = _qmc_live_stats(
-                sector_stats,
-                active_sector_ids,
-                topology.coefficient_count,
-                raw_samples_done,
-            )
+            if correlated_qmc:
+                aggregate_start = time.perf_counter()
+                for shift_values in iteration_shift_totals:
+                    for coeff_index, stat in enumerate(aggregate_shift_stats):
+                        stat.add(shift_values[coeff_index])
+                total_timing.add_python(time.perf_counter() - aggregate_start)
+                live_stats = _qmc_live_stats_from_aggregate(
+                    aggregate_shift_stats,
+                    raw_samples_done,
+                )
+            else:
+                live_stats = _qmc_live_stats(
+                    sector_stats,
+                    active_sector_ids,
+                    topology.coefficient_count,
+                    raw_samples_done,
+                )
             if target_accuracy_reached(
                 progress_request,
                 live_stats,  # type: ignore[arg-type]
@@ -1368,6 +1485,9 @@ def integrate_qmc(
         start_time,
         interrupted,
         diagnostics,
+        aggregate_stats_override=aggregate_shift_stats
+        if correlated_qmc and aggregate_shift_stats[0].count > 0
+        else None,
     )
 
 

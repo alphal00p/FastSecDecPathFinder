@@ -100,7 +100,7 @@ def _run_fsd(
         "--qmc-korobov-alpha",
         str(args.qmc_korobov_alpha),
         "--qmc-lattice-backend",
-        "qmcpy",
+        str(args.qmc_lattice_backend),
         "--qmc-order",
         str(args.qmc_order),
         "--samples-per-iter",
@@ -113,6 +113,7 @@ def _run_fsd(
         str(args.workers),
         "--prefactor-convention",
         str(args.fsd_prefactor_convention),
+        *list(args.fsd_extra_arg or []),
         *_target_cli_args(args, target_coeffs),
         "--stability-threshold",
         str(args.stability_threshold),
@@ -337,6 +338,12 @@ def main() -> int:
         help="QMCPy lattice order used by FSD. Linear is closest to pySecDec's direct lattice loop.",
     )
     parser.add_argument(
+        "--qmc-lattice-backend",
+        choices=["qmcpy", "cbcpt-dn1-100"],
+        default="qmcpy",
+        help="Independent FSD lattice backend used for the comparison.",
+    )
+    parser.add_argument(
         "--pysecdec-generatingvectors",
         choices=["default", "cbcpt_dn1_100", "cbcpt_dn2_6", "cbcpt_cfftw1_6", "cbcpt_cfftw2_10"],
         default="default",
@@ -344,6 +351,16 @@ def main() -> int:
     )
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=0)
+    parser.add_argument(
+        "--fsd-extra-arg",
+        action="append",
+        default=[],
+        help=(
+            "Additional single argument forwarded verbatim to FSD.py. Repeat "
+            "for flag-only options such as --explicit; valued options are best "
+            "kept in the run YAML used by --run-file."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--s", type=float, default=-1.0)
     parser.add_argument("--s12", type=float, default=-1.0)
@@ -429,7 +446,7 @@ def main() -> int:
             "order": order_label,
             "qmc_shifts": int(args.qmc_shifts),
             "qmc_korobov_alpha": int(args.qmc_korobov_alpha),
-            "qmc_lattice_backend": "qmcpy",
+            "qmc_lattice_backend": str(args.qmc_lattice_backend),
             "qmc_order": str(args.qmc_order),
             "fsd_prefactor_convention": str(args.fsd_prefactor_convention),
             "pysecdec_generatingvectors": str(args.pysecdec_generatingvectors),

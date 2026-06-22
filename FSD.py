@@ -299,11 +299,15 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--qmc-shifts must be greater than 1 to estimate a randomized QMC error")
     if request.qmc_korobov_alpha < 1:
         raise ValueError("--qmc-korobov-alpha must be a positive integer")
-    if request.qmc_lattice_backend != "qmcpy":
-        raise ValueError("--qmc-lattice-backend currently supports only 'qmcpy'")
+    if request.qmc_lattice_backend not in {"qmcpy", "cbcpt-dn1-100"}:
+        raise ValueError("--qmc-lattice-backend supports 'qmcpy' and 'cbcpt-dn1-100'")
     if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
         raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
-    if request.sampling_mode == "qmc" and request.samples_per_iter & (request.samples_per_iter - 1):
+    if (
+        request.sampling_mode == "qmc"
+        and request.qmc_lattice_backend == "qmcpy"
+        and request.samples_per_iter & (request.samples_per_iter - 1)
+    ):
         raise ValueError("--sampling-mode qmc requires --samples-per-iter to be a power of two")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
@@ -656,12 +660,13 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     )
     parser.add_argument(
         "--qmc-lattice-backend",
-        choices=["qmcpy"],
+        choices=["qmcpy", "cbcpt-dn1-100"],
         default=str(defaults.get("qmc_lattice_backend", "qmcpy")),
         help=(
             "Rank-1 lattice source for --sampling-mode qmc. QMC integration "
-            "is implemented independently of pySecDec; the current backend is "
-            "QMCPy's shifted lattice. Default: qmcpy."
+            "is implemented independently of pySecDec. 'qmcpy' uses QMCPy's "
+            "base-two lattice; 'cbcpt-dn1-100' uses a bundled CBC/PT rank-1 "
+            "vector table with pySecDec-like prime rule sizes. Default: qmcpy."
         ),
     )
     parser.add_argument(
@@ -672,6 +677,28 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
             "QMCPy lattice ordering. 'linear' is closest to pySecDec's direct "
             "rank-1 lattice loop; 'radical-inverse' is QMCPy's historical "
             "default. Default: linear."
+        ),
+    )
+    qmc_correlate_default = bool(defaults.get("qmc_correlate_sectors", True))
+    parser.add_argument(
+        "--qmc-correlate-sectors",
+        dest="qmc_correlate_sectors",
+        action="store_true",
+        default=qmc_correlate_default,
+        help=(
+            "Use the same randomized lattice shifts for all sectors and "
+            "estimate the total QMC error from the shift-by-shift sector sum. "
+            "This is the default and is closest to pySecDec's grouped QMC "
+            "estimator."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-independent-sector-errors",
+        dest="qmc_correlate_sectors",
+        action="store_false",
+        help=(
+            "Legacy QMC error mode: integrate sectors with independent "
+            "random shifts and combine sector errors in quadrature."
         ),
     )
     parser.add_argument(
@@ -1296,6 +1323,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         qmc_korobov_alpha=int(args.qmc_korobov_alpha),
         qmc_lattice_backend=str(args.qmc_lattice_backend),
         qmc_order=str(args.qmc_order),
+        qmc_correlate_sectors=bool(args.qmc_correlate_sectors),
         target_rel_accuracy=args.target_rel_accuracy,
         min_error=args.min_error,
         bins=args.bins,
