@@ -206,8 +206,10 @@ def summary_data(
         ),
         "sectors": list(request.sectors) if request.sectors is not None else "all",
         "stability_threshold": request.stability_threshold,
+        "medium_precision_stability_threshold": request.medium_precision_stability_threshold,
         "high_precision_stability_threshold": request.high_precision_stability_threshold,
         "stability_precision": request.stability_precision,
+        "medium_precision_stability_precision": request.medium_precision_stability_precision,
         "high_precision_stability_precision": request.high_precision_stability_precision,
     }
     if request.dot_file is not None:
@@ -438,6 +440,16 @@ def _short_table_text(value: Any, width: int = 72) -> str:
     if width <= 1:
         return "…"
     return text[: width - 1] + "…"
+
+
+def _ellipsis_table_text(value: Any, width: int = 50, marker: str = "[...]") -> str:
+    """Clip one-line table content to ``width`` with an explicit marker."""
+    text = " ".join(str(value).split())
+    if len(text) <= width:
+        return text
+    if width <= len(marker):
+        return marker[:width]
+    return text[: width - len(marker)] + marker
 
 
 def _wrapped_table_text(value: Any, width: int = 72) -> str:
@@ -747,7 +759,7 @@ def print_preintegration_summary(
     stats_table = PrettyTable()
     stats_table.field_names = [maybe_color("sector statistic", Fore.CYAN), maybe_color("value", Fore.CYAN)]
     for key, value in data["sector_stats"].items():
-        stats_table.add_row([maybe_color(str(key), Fore.MAGENTA), value])
+        stats_table.add_row([maybe_color(str(key), Fore.MAGENTA), _ellipsis_table_text(value, 50)])
     print(stats_table)
 
     validation = PrettyTable()
@@ -1133,6 +1145,12 @@ def precision_stats_summary(
             "threshold": request.stability_threshold,
             "precision_digits": request.stability_precision,
         },
+        "medium_precision": {
+            "samples": int(counts.get("medium_precision", 0)),
+            "fraction": fraction("medium_precision"),
+            "threshold": request.medium_precision_stability_threshold,
+            "precision_digits": request.medium_precision_stability_precision,
+        },
         "high_precision": {
             "samples": int(counts.get("high_precision", 0)),
             "fraction": fraction("high_precision"),
@@ -1380,6 +1398,7 @@ def print_result_table(output: JsonDict) -> None:
     precision = output.get("precision_stats", {})
     if precision:
         stability = precision.get("stability", {})
+        medium = precision.get("medium_precision", {})
         high = precision.get("high_precision", {})
         ordinary = precision.get("ordinary", {})
         print(
@@ -1395,6 +1414,12 @@ def print_result_table(output: JsonDict) -> None:
                 f"prec{stability.get('precision_digits', '?')}",
                 f"{stability.get('samples', 0)} ({format_percent(100.0 * float(stability.get('fraction', 0.0)))})",
                 Fore.YELLOW,
+            )
+            + "  "
+            + colored_kv(
+                f"prec{medium.get('precision_digits', '?')}",
+                f"{medium.get('samples', 0)} ({format_percent(100.0 * float(medium.get('fraction', 0.0)))})",
+                Fore.MAGENTA,
             )
             + "  "
             + colored_kv(

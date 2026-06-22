@@ -36,6 +36,7 @@ class SectorRuntimeRecord:
     python_seconds: float
     ordinary_samples: int
     stability_samples: int
+    medium_precision_samples: int
     high_precision_samples: int
 
     @property
@@ -69,6 +70,7 @@ class SectorRuntimeRecord:
             "python_percent": self.python_percent,
             "ordinary_samples": self.ordinary_samples,
             "stability_samples": self.stability_samples,
+            "medium_precision_samples": self.medium_precision_samples,
             "high_precision_samples": self.high_precision_samples,
         }
 
@@ -95,6 +97,7 @@ def _f64_request(request: IntegralRequest) -> IntegralRequest:
     """Return a request-like object with precision-rescue thresholds disabled."""
     changes = {
         "stability_threshold": 0.0,
+        "medium_precision_stability_threshold": 0.0,
         "high_precision_stability_threshold": 0.0,
     }
     if is_dataclass(request):
@@ -253,6 +256,7 @@ def run_sector_runtime_benchmark(
                     python_seconds=timing.python_seconds,
                     ordinary_samples=timing.ordinary_precision_samples,
                     stability_samples=timing.stability_precision_samples,
+                    medium_precision_samples=timing.medium_precision_samples,
                     high_precision_samples=timing.high_precision_samples,
                 )
             )
@@ -327,7 +331,7 @@ def _print_runtime_report(
         _color("μs/sample", Fore.CYAN),
         _color("eval%", Fore.CYAN),
         _color("python%", Fore.CYAN),
-        _color("prec O/S/H", Fore.CYAN),
+        _color("prec O/S/M/H", Fore.CYAN),
     ]
     for kind, record in extrema:
         if record is None:
@@ -343,6 +347,7 @@ def _print_runtime_report(
                 (
                     f"{record.ordinary_samples}/"
                     f"{record.stability_samples}/"
+                    f"{record.medium_precision_samples}/"
                     f"{record.high_precision_samples}"
                 ),
             ]
@@ -357,7 +362,7 @@ def _print_runtime_report(
             _color("wall", Fore.CYAN),
             _color("eval%", Fore.CYAN),
             _color("python%", Fore.CYAN),
-            _color("prec O/S/H", Fore.CYAN),
+            _color("prec O/S/M/H", Fore.CYAN),
         ]
         for record in sorted(records, key=lambda item: item.sector_id):
             table.add_row(
@@ -370,6 +375,7 @@ def _print_runtime_report(
                     (
                         f"{record.ordinary_samples}/"
                         f"{record.stability_samples}/"
+                        f"{record.medium_precision_samples}/"
                         f"{record.high_precision_samples}"
                     ),
                 ]

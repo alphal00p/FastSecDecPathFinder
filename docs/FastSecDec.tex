@@ -1807,8 +1807,10 @@ weight is cast back to double precision.  In the \texttt{PSD213} point probe
 with all singular coordinates set to \(10^{-12}\), ordinary double precision
 produced non-finite lower Laurent coefficients, \(32\) and \(80\) digits were
 still unstable for the deepest lower orders, and \(160\) and \(300\) digits
-agreed in the displayed coefficients.  The default high-precision tier of
-\(1000\) digits is therefore conservative for this endpoint-stability probe.
+agreed in the displayed coefficients.  The default runtime policy is therefore
+deliberately conservative: promote endpoint distances below \(10^{-3}\) to
+\(32\) digits, below \(10^{-6}\) to \(100\) digits, and below \(10^{-8}\) to
+\(1000\) digits for this endpoint-stability probe.
 
 \subsection{Havana sampling and stopping}
 

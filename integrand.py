@@ -8195,9 +8195,11 @@ class SectorProcessor:
         self,
         topology: TopologyDefinition,
         boundary_tol: float = 1.0e-14,
-        stability_threshold: float = 1.0e-8,
-        high_precision_stability_threshold: float = 1.0e-12,
+        stability_threshold: float = 1.0e-3,
+        medium_precision_stability_threshold: float = 1.0e-6,
+        high_precision_stability_threshold: float = 1.0e-8,
         stability_precision: int = 32,
+        medium_precision_stability_precision: int = 100,
         high_precision_stability_precision: int = 1000,
         subtraction_backend: str = "formula",
     ) -> None:
@@ -8205,8 +8207,10 @@ class SectorProcessor:
         self.topology = topology
         self.boundary_tol = boundary_tol
         self.stability_threshold = float(stability_threshold)
+        self.medium_precision_stability_threshold = float(medium_precision_stability_threshold)
         self.high_precision_stability_threshold = float(high_precision_stability_threshold)
         self.stability_precision = int(stability_precision)
+        self.medium_precision_stability_precision = int(medium_precision_stability_precision)
         self.high_precision_stability_precision = int(high_precision_stability_precision)
         if subtraction_backend not in {"formula", "recursive", "projector-formula"}:
             raise ValueError(f"unsupported subtraction backend {subtraction_backend!r}")
@@ -8272,6 +8276,8 @@ class SectorProcessor:
             timing.ordinary_precision_samples = max(timing.ordinary_precision_samples - amount, 0)
         elif tier == "stability":
             timing.stability_precision_samples = max(timing.stability_precision_samples - amount, 0)
+        elif tier == "medium_precision":
+            timing.medium_precision_samples = max(timing.medium_precision_samples - amount, 0)
         elif tier == "high_precision":
             timing.high_precision_samples = max(timing.high_precision_samples - amount, 0)
 
@@ -8299,6 +8305,8 @@ class SectorProcessor:
             timing.add_precision_samples(ordinary=chunk_size)
         elif precision_tier == "stability":
             timing.add_precision_samples(stability=chunk_size)
+        elif precision_tier == "medium_precision":
+            timing.add_precision_samples(medium=chunk_size)
         elif precision_tier == "high_precision":
             timing.add_precision_samples(high=chunk_size)
         else:
@@ -8404,11 +8412,16 @@ class SectorProcessor:
         singular_coords = rows[:, sector.singular_axes]
         min_endpoint_distance = np.min(singular_coords, axis=1)
         high_mask = min_endpoint_distance <= self.high_precision_stability_threshold
-        stable_mask = (
-            (min_endpoint_distance <= self.stability_threshold)
+        medium_mask = (
+            (min_endpoint_distance <= self.medium_precision_stability_threshold)
             & ~high_mask
         )
-        ordinary_mask = ~(high_mask | stable_mask)
+        stable_mask = (
+            (min_endpoint_distance <= self.stability_threshold)
+            & ~medium_mask
+            & ~high_mask
+        )
+        ordinary_mask = ~(high_mask | medium_mask | stable_mask)
         if np.all(ordinary_mask):
             return self._evaluate_precision_chunk(
                 sector,
@@ -8420,9 +8433,10 @@ class SectorProcessor:
         coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
         training = np.zeros(rows.shape[0], dtype=float)
         timing = HotPathTiming()
-        for mask, precision in (
-            (ordinary_mask, None),
-            (stable_mask, self.stability_precision),
+        for mask, precision, tier in (
+            (ordinary_mask, None, "ordinary"),
+            (stable_mask, self.stability_precision, "stability"),
+            (medium_mask, self.medium_precision_stability_precision, "medium_precision"),
         ):
             if not np.any(mask):
                 continue
@@ -8430,7 +8444,7 @@ class SectorProcessor:
                 sector,
                 rows[mask],
                 precision_digits=precision,
-                precision_tier="ordinary" if precision is None else "stability",
+                precision_tier=tier,
             )
             timing.absorb(chunk_timing)
             coeffs[mask] = chunk_coeffs
@@ -8446,6 +8460,29 @@ class SectorProcessor:
             coeffs[high_mask] = chunk_coeffs
             training[high_mask] = chunk_training
         return coeffs, training, timing
+
+    def evaluate_batch_at_precision(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        precision_digits: int,
+    ) -> tuple[np.ndarray, np.ndarray, HotPathTiming]:
+        """Force a sector batch through one explicit multiprecision tier.
+
+        The integrator uses this for dynamic large-weight rescues, where a
+        sample is not necessarily close enough to an endpoint to trigger the
+        static threshold-based precision tiers, but its weighted contribution
+        is large enough to be worth recomputing before accumulation.
+        """
+        rows = np.asarray(y_values, dtype=float)
+        if rows.ndim != 2 or rows.shape[1] != sector.integration_dim:
+            raise ValueError(f"{sector.name}: expected coordinate array with shape (n,{sector.integration_dim})")
+        return self._evaluate_precision_chunk(
+            sector,
+            rows,
+            precision_digits=int(precision_digits),
+            precision_tier="high_precision",
+        )
 
     def _evaluate_batch_impl(
         self,

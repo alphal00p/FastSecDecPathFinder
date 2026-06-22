@@ -6,6 +6,13 @@ prefactor-convention: pysecdec
 subtraction-backend: projector-formula
 ibp-reduce-to-log-endpoint: true
 symbolic-derivatives: true
+max-weight-precision-xi: 0.9
+stability-threshold: 1.0e-3
+medium-precision-stability-threshold: 1.0e-6
+high-precision-stability-threshold: 1.0e-8
+stability-precision: 32
+medium-precision-stability-precision: 100
+high-precision-stability-precision: 1000
 max-eps-order: 0
 target: ../outputs/dot_double_box_pysecdec_target.json
 samples-per-iter: 100000

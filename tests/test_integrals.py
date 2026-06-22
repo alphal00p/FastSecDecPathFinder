@@ -40,6 +40,7 @@ from definitions import EpsilonExpansion, ParametricRepresentation
 from dot_parser import parse_dot_file
 from dot_topology import GammaLoopDotTopologyBuilder, clear_dot_bundle_cache
 from formatting import (
+    _ellipsis_table_text,
     apply_global_convention,
     make_output,
     print_result_table,
@@ -74,7 +75,7 @@ from integrand import (
 from subtraction_formula import build_endpoint_projector_formula_symbolica
 from subtraction_formula import endpoint_projector_formula_has_curated_cache
 import integrator as integrator_module
-from integrator import integrate
+from integrator import EvaluationBatch, _evaluate_records, integrate
 from kinematics import load_kinematics
 from kinematics import KinematicsDefinition
 from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
@@ -149,10 +150,13 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "regular_taylor_formula_axis_limit": 6,
         "chain_rule_formula_signature_limit": 256,
         "chain_rule_formula_output_length_limit": 0,
-        "stability_threshold": 1.0e-8,
-        "high_precision_stability_threshold": 1.0e-12,
-        "stability_precision": 100,
+        "stability_threshold": 1.0e-3,
+        "medium_precision_stability_threshold": 1.0e-6,
+        "high_precision_stability_threshold": 1.0e-8,
+        "stability_precision": 32,
+        "medium_precision_stability_precision": 100,
         "high_precision_stability_precision": 1000,
+        "max_weight_precision_xi": 0.9,
         "show_stats": False,
         "no_progress": True,
         "quiet_summary": True,
@@ -169,6 +173,16 @@ def assert_finite_complex(value: complex) -> None:
     z = complex(value)
     assert math.isfinite(z.real)
     assert math.isfinite(z.imag)
+
+
+def test_sector_stat_table_values_are_ellipsized_to_fixed_width() -> None:
+    """Long sector-stat values should not widen the pre-integration table."""
+    long_value = {"sector_value": "x" * 120, "other": "y" * 120}
+    clipped = _ellipsis_table_text(long_value, width=50)
+
+    assert len(clipped) == 50
+    assert clipped.endswith("[...]")
+    assert "x" * 60 not in clipped
 
 
 def test_nonfinite_rows_are_retried_at_high_precision_before_training() -> None:
@@ -201,6 +215,91 @@ def test_nonfinite_rows_are_retried_at_high_precision_before_training() -> None:
     assert np.all(np.isfinite(coeffs))
     assert np.all(np.isfinite(training))
     assert timing.ordinary_precision_samples == 0
+    assert timing.high_precision_samples == 1
+
+
+def test_endpoint_precision_thresholds_select_three_rescue_tiers() -> None:
+    """Endpoint distance masks must separate 32-, 100-, and 1000-digit tiers."""
+
+    class CountingProcessor(SectorProcessor):
+        def __init__(self) -> None:
+            self.topology = SimpleNamespace(
+                coefficient_count=1,
+                laurent_max_order=0,
+                endpoint_power=lambda _sector, _axis: SimpleNamespace(base=-1.0),
+            )
+            self.stability_threshold = 1.0e-3
+            self.medium_precision_stability_threshold = 1.0e-6
+            self.high_precision_stability_threshold = 1.0e-8
+            self.stability_precision = 32
+            self.medium_precision_stability_precision = 100
+            self.high_precision_stability_precision = 1000
+
+        def _evaluate_batch_impl(self, _sector, rows, _timing):
+            return (
+                np.ones((rows.shape[0], 1), dtype=np.complex128),
+                np.ones(rows.shape[0], dtype=float),
+            )
+
+    processor = CountingProcessor()
+    sector = SimpleNamespace(name="toy-sector", integration_dim=1, singular_axes=[0])
+    _coeffs, _training, timing = processor.evaluate_batch(
+        sector,
+        np.array([[2.0e-3], [5.0e-4], [5.0e-7], [5.0e-9]], dtype=float),
+    )
+
+    assert timing.precision_counts == {
+        "ordinary": 1,
+        "stability": 1,
+        "medium_precision": 1,
+        "high_precision": 1,
+    }
+
+
+def test_large_weight_rows_are_retried_at_high_precision() -> None:
+    """Rows close to a sector's max weight are recomputed before accumulation."""
+
+    class LargeWeightProcessor:
+        def __init__(self) -> None:
+            self.topology = SimpleNamespace(coefficient_count=1)
+            self.high_precision_stability_precision = 100
+            self.precision_calls = 0
+
+        def evaluate_batch(self, _sector, rows):
+            timing = HotPathTiming()
+            timing.add_precision_samples(ordinary=rows.shape[0])
+            coeffs = np.array([[1.0 + 0.0j], [20.0 + 0.0j]], dtype=np.complex128)
+            return coeffs[: rows.shape[0]], np.abs(coeffs[: rows.shape[0], 0]), timing
+
+        def evaluate_batch_at_precision(self, _sector, rows, precision_digits):
+            self.precision_calls += 1
+            assert precision_digits == 100
+            timing = HotPathTiming(precision_digits=precision_digits)
+            timing.add_precision_samples(high=rows.shape[0])
+            coeffs = np.full((rows.shape[0], 1), 3.0 + 0.0j, dtype=np.complex128)
+            return coeffs, np.full(rows.shape[0], 3.0), timing
+
+    processor = LargeWeightProcessor()
+    sectors = [SimpleNamespace(name="S0", integration_dim=1)]
+    batch = EvaluationBatch(
+        indices=np.array([0, 1], dtype=int),
+        sector_indices=np.array([0, 0], dtype=int),
+        coords=np.array([[0.2], [0.4]], dtype=float),
+        weights=np.array([1.0, 1.0], dtype=float),
+        sector_max_abs=np.array([[10.0]], dtype=float),
+        max_weight_precision_xi=0.9,
+    )
+
+    _indices, weighted, training, precision_counts, timing = _evaluate_records(
+        processor,
+        sectors,
+        batch,
+    )
+
+    assert processor.precision_calls == 1
+    assert weighted[:, 0] == pytest.approx([1.0 + 0.0j, 3.0 + 0.0j])
+    assert training == pytest.approx([1.0, 3.0])
+    assert precision_counts[0].tolist() == [1, 0, 0, 1]
     assert timing.high_precision_samples == 1
 
 
@@ -4460,6 +4559,7 @@ def test_sector_selection_uses_canonical_sector_ids() -> None:
         samples_per_iter=64,
         batch_size=32,
         sectors=(1,),
+        max_weight_precision_xi=0.0,
     )
     topology = build_topology(request)
     sectors = generate_sectors(request)

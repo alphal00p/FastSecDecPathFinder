@@ -110,9 +110,12 @@ class IntegralRequest:
     chain_rule_formula_signature_limit: int
     chain_rule_formula_output_length_limit: int
     stability_threshold: float
+    medium_precision_stability_threshold: float
     high_precision_stability_threshold: float
     stability_precision: int
+    medium_precision_stability_precision: int
     high_precision_stability_precision: int
+    max_weight_precision_xi: float
     show_stats: bool
     no_progress: bool
     quiet_summary: bool
@@ -208,6 +211,7 @@ class HotPathTiming:
     precision_digits: int | None = None
     ordinary_precision_samples: int = 0
     stability_precision_samples: int = 0
+    medium_precision_samples: int = 0
     high_precision_samples: int = 0
 
     def add_eval(self, seconds: float) -> None:
@@ -229,6 +233,7 @@ class HotPathTiming:
         self.havana_seconds += other.havana_seconds
         self.ordinary_precision_samples += other.ordinary_precision_samples
         self.stability_precision_samples += other.stability_precision_samples
+        self.medium_precision_samples += other.medium_precision_samples
         self.high_precision_samples += other.high_precision_samples
 
     def add_precision_samples(
@@ -236,11 +241,13 @@ class HotPathTiming:
         *,
         ordinary: int = 0,
         stability: int = 0,
+        medium: int = 0,
         high: int = 0,
     ) -> None:
         """Accumulate how many rows used each evaluator precision tier."""
         self.ordinary_precision_samples += max(int(ordinary), 0)
         self.stability_precision_samples += max(int(stability), 0)
+        self.medium_precision_samples += max(int(medium), 0)
         self.high_precision_samples += max(int(high), 0)
 
     @property
@@ -249,6 +256,7 @@ class HotPathTiming:
         return {
             "ordinary": self.ordinary_precision_samples,
             "stability": self.stability_precision_samples,
+            "medium_precision": self.medium_precision_samples,
             "high_precision": self.high_precision_samples,
         }
 

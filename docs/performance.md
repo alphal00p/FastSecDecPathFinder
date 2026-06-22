@@ -15,8 +15,8 @@ pySecDec is used only at the DOT generation boundary.
 | Symbolica dev commit | `07f1de5fc119b01e2875c8d0163b25eacabadf21` |
 | pySecDec | 1.6.6 |
 | Normaliz | not found on `PATH`; iterative/geometric_ku paths used |
-| default precision thresholds | `1e-8` and `1e-12` |
-| default precision digits | 100 and 1000 |
+| default precision thresholds | `1e-3`, `1e-6`, and `1e-8` |
+| default precision digits | 32, 100, and 1000 |
 
 ## Symbolica Dev Dualization Check
 

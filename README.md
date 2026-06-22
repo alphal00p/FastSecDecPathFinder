@@ -576,12 +576,14 @@ Near endpoint points can be promoted to multiprecision evaluator calls:
 ```sh
 .venv/bin/python FSD.py \
   --run examples/runs/dot_double_box.yaml \
-  --stability-threshold 1e-8 \
-  --high-precision-stability-threshold 1e-12
+  --stability-threshold 1e-3 \
+  --medium-precision-stability-threshold 1e-6 \
+  --high-precision-stability-threshold 1e-8
 ```
 
-The defaults are `1e-8` at 100 digits and `1e-12` at 1000 digits.  The
-result JSON records global and per-sector precision-tier hit counts.
+The defaults are `1e-3` at 32 digits, `1e-6` at 100 digits, and `1e-8` at
+1000 digits.  The result JSON records global and per-sector precision-tier hit
+counts.
 
 Stop when the summed relative MC error reaches a percent target:
 

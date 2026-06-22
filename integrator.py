@@ -12,7 +12,7 @@ import math
 import multiprocessing as mp
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -122,6 +122,8 @@ class EvaluationBatch:
     sector_indices: np.ndarray
     coords: np.ndarray
     weights: np.ndarray
+    sector_max_abs: np.ndarray
+    max_weight_precision_xi: float
 
 
 @dataclass(frozen=True)
@@ -159,11 +161,35 @@ def _make_sector_processor(topology: TopologyDefinition, request: IntegralReques
     return SectorProcessor(
         topology,
         stability_threshold=request.stability_threshold,
+        medium_precision_stability_threshold=request.medium_precision_stability_threshold,
         high_precision_stability_threshold=request.high_precision_stability_threshold,
         stability_precision=request.stability_precision,
+        medium_precision_stability_precision=request.medium_precision_stability_precision,
         high_precision_stability_precision=request.high_precision_stability_precision,
         subtraction_backend=request.subtraction_backend,
     )
+
+
+def _move_timing_precision_counts_to_high(timing: HotPathTiming, count: int) -> None:
+    """Move already-counted rows to the high-precision tier.
+
+    A large-weight guard first evaluates a sector row at its normal precision,
+    then replaces selected rows with a forced high-precision value.  The lower
+    precision attempt still contributes to timing, but precision sample counts
+    should describe the final accepted precision tier.
+    """
+    remaining = max(int(count), 0)
+    take = min(timing.ordinary_precision_samples, remaining)
+    timing.ordinary_precision_samples -= take
+    remaining -= take
+    take = min(timing.stability_precision_samples, remaining)
+    timing.stability_precision_samples -= take
+    remaining -= take
+    take = min(timing.medium_precision_samples, remaining)
+    timing.medium_precision_samples -= take
+    remaining -= take
+    take = min(timing.high_precision_samples, remaining)
+    timing.high_precision_samples -= take
 
 
 def _terminate_executor_workers(executor: ProcessPoolExecutor) -> None:
@@ -223,7 +249,7 @@ def _evaluate_records(
             np.empty(0, dtype=int),
             np.empty((0, processor.topology.coefficient_count), dtype=np.complex128),
             np.empty(0, dtype=float),
-            np.zeros((len(sectors), 3), dtype=np.int64),
+            np.zeros((len(sectors), 4), dtype=np.int64),
             timing,
         )
 
@@ -233,23 +259,55 @@ def _evaluate_records(
     weights = batch.weights
     weighted = np.zeros((indices.size, processor.topology.coefficient_count), dtype=np.complex128)
     training = np.zeros(indices.size, dtype=float)
-    precision_counts = np.zeros((len(sectors), 3), dtype=np.int64)
+    precision_counts = np.zeros((len(sectors), 4), dtype=np.int64)
+    sector_max_abs = np.asarray(batch.sector_max_abs, dtype=float)
+    max_weight_precision_xi = float(batch.max_weight_precision_xi)
 
     for sector_index in np.unique(sector_indices):
         sector_index = int(sector_index)
         sector = sectors[sector_index]
         mask = sector_indices == sector_index
         coeffs, train, sector_timing = processor.evaluate_batch(sector, coords[mask])
+        sector_weights = weights[mask]
+        weighted_coeffs = coeffs * sector_weights[:, np.newaxis]
+        if (
+            max_weight_precision_xi > 0.0
+            and sector_max_abs.ndim == 2
+            and sector_index < sector_max_abs.shape[0]
+        ):
+            current_max = sector_max_abs[sector_index]
+            batch_max = np.max(np.abs(weighted_coeffs), axis=0) if weighted_coeffs.size else current_max
+            reference_max = np.maximum(current_max, batch_max)
+            active_orders = reference_max > 0.0
+            if np.any(active_orders):
+                row_abs = np.abs(weighted_coeffs[:, active_orders])
+                threshold = max_weight_precision_xi * reference_max[active_orders]
+                rescue_mask = np.any(row_abs >= threshold[np.newaxis, :], axis=1)
+                if np.any(rescue_mask):
+                    rescue_count = int(np.count_nonzero(rescue_mask))
+                    _move_timing_precision_counts_to_high(sector_timing, rescue_count)
+                    rescue_coeffs, rescue_train, rescue_timing = processor.evaluate_batch_at_precision(
+                        sector,
+                        coords[mask][rescue_mask],
+                        processor.high_precision_stability_precision,
+                    )
+                    sector_timing.absorb(rescue_timing)
+                    coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
+                    train = np.array(train, dtype=float, copy=True)
+                    coeffs[rescue_mask] = rescue_coeffs
+                    train[rescue_mask] = rescue_train
+                    weighted_coeffs = coeffs * sector_weights[:, np.newaxis]
         timing.absorb(sector_timing)
         precision_counts[sector_index, :] += np.asarray(
             [
                 sector_timing.ordinary_precision_samples,
                 sector_timing.stability_precision_samples,
+                sector_timing.medium_precision_samples,
                 sector_timing.high_precision_samples,
             ],
             dtype=np.int64,
         )
-        weighted[mask, :] = coeffs * weights[mask, np.newaxis]
+        weighted[mask, :] = weighted_coeffs
         training[mask] = train
 
     hot_elapsed = time.perf_counter() - hot_start
@@ -283,7 +341,7 @@ def _evaluate_democratic_batch(
             sumsq_re=np.zeros(coeff_count, dtype=float),
             sumsq_im=np.zeros(coeff_count, dtype=float),
             max_abs=np.zeros(coeff_count, dtype=float),
-            precision_counts=np.zeros(3, dtype=np.int64),
+            precision_counts=np.zeros(4, dtype=np.int64),
             timing=timing,
         )
     coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
@@ -301,6 +359,7 @@ def _evaluate_democratic_batch(
             [
                 sector_timing.ordinary_precision_samples,
                 sector_timing.stability_precision_samples,
+                sector_timing.medium_precision_samples,
                 sector_timing.high_precision_samples,
             ],
             dtype=np.int64,
@@ -332,6 +391,8 @@ def split_evaluation_batches(
             sector_indices=sector_indices[start : start + step],
             coords=coords[start : start + step, :],
             weights=weights[start : start + step],
+            sector_max_abs=np.zeros((0, 0), dtype=float),
+            max_weight_precision_xi=0.0,
         )
         for start in range(0, n_samples, step)
     ]
@@ -904,7 +965,7 @@ def integrate_democratic(
     ]
     sector_hits = [0 for _sector in sectors]
     sector_precision_counts = [
-        {"ordinary": 0, "stability": 0, "high_precision": 0}
+        {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
         for _sector in sectors
     ]
     sector_timing = [HotPathTiming() for _sector in sectors]
@@ -935,7 +996,8 @@ def integrate_democratic(
         sector_hits[sector_id] += int(reduced.count)
         sector_precision_counts[sector_id]["ordinary"] += int(reduced.precision_counts[0])
         sector_precision_counts[sector_id]["stability"] += int(reduced.precision_counts[1])
-        sector_precision_counts[sector_id]["high_precision"] += int(reduced.precision_counts[2])
+        sector_precision_counts[sector_id]["medium_precision"] += int(reduced.precision_counts[2])
+        sector_precision_counts[sector_id]["high_precision"] += int(reduced.precision_counts[3])
         sector_timing[sector_id].absorb(reduced.timing)
         total_timing.absorb(reduced.timing)
         sector_max_abs[sector_id] = np.maximum(sector_max_abs[sector_id], reduced.max_abs)
@@ -1046,7 +1108,11 @@ def integrate(
     ]
     per_sector_hits = [0 for _sector in sectors]
     per_sector_precision_counts = [
-        {"ordinary": 0, "stability": 0, "high_precision": 0}
+        {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
+        for _sector in sectors
+    ]
+    per_sector_max_abs = [
+        np.zeros(topology.coefficient_count, dtype=float)
         for _sector in sectors
     ]
 
@@ -1093,6 +1159,14 @@ def integrate(
                     raw_sector_coeffs=[stat.mean for stat in sector_stats],
                     raw_sector_errors=[stat.error for stat in sector_stats],
                     precision_counts=per_sector_precision_counts[sector_index].copy(),
+                    diagnostics={
+                        "max_abs_weight": float(np.max(per_sector_max_abs[sector_index]))
+                        if per_sector_hits[sector_index]
+                        else 0.0,
+                        "max_abs_by_order": [
+                            float(value) for value in per_sector_max_abs[sector_index]
+                        ],
+                    },
                 )
                 for sector_index, sector_stats in enumerate(per_sector_stats)
             ],
@@ -1144,6 +1218,20 @@ def integrate(
             )
             hot_timing.add_python(time.perf_counter() - master_start)
 
+            def with_current_max_weight_guard(batch: EvaluationBatch) -> EvaluationBatch:
+                """Attach the latest per-sector max-weight snapshot to a batch."""
+                if request.max_weight_precision_xi <= 0.0:
+                    return batch
+                snapshot = np.asarray(
+                    [per_sector_max_abs[sector_id] for sector_id in active_sector_ids],
+                    dtype=float,
+                )
+                return replace(
+                    batch,
+                    sector_max_abs=snapshot,
+                    max_weight_precision_xi=request.max_weight_precision_xi,
+                )
+
             def register_batch(
                 indices: np.ndarray,
                 w_part: np.ndarray,
@@ -1165,7 +1253,17 @@ def integrate(
                     counts = precision_part[local_sector_index]
                     per_sector_precision_counts[sector_id]["ordinary"] += int(counts[0])
                     per_sector_precision_counts[sector_id]["stability"] += int(counts[1])
-                    per_sector_precision_counts[sector_id]["high_precision"] += int(counts[2])
+                    per_sector_precision_counts[sector_id]["medium_precision"] += int(counts[2])
+                    per_sector_precision_counts[sector_id]["high_precision"] += int(counts[3])
+                if w_part.size:
+                    abs_part = np.abs(w_part)
+                    for local_sector_index, sector_id in enumerate(active_sector_ids):
+                        local_mask = local_sector_part == local_sector_index
+                        if np.any(local_mask):
+                            per_sector_max_abs[sector_id] = np.maximum(
+                                per_sector_max_abs[sector_id],
+                                np.max(abs_part[local_mask], axis=0),
+                            )
                 batch_count = int(indices.size)
                 for coeff_index in range(topology.coefficient_count):
                     values = np.asarray(w_part[:, coeff_index], dtype=np.complex128)
@@ -1234,7 +1332,7 @@ def integrate(
                     indices, w_part, t_part, precision_part, worker_timing = _evaluate_records(
                         processor,
                         active_sectors,
-                        batch,
+                        with_current_max_weight_guard(batch),
                     )
                     hot_timing.absorb(worker_timing)
                     if register_batch(indices, w_part, t_part, precision_part):
@@ -1254,7 +1352,12 @@ def integrate(
                         next_batch_index < len(batches)
                         and len(pending) < max(request.workers, 1)
                     ):
-                        pending.add(executor.submit(_evaluate_records_worker, batches[next_batch_index]))
+                        pending.add(
+                            executor.submit(
+                                _evaluate_records_worker,
+                                with_current_max_weight_guard(batches[next_batch_index]),
+                            )
+                        )
                         next_batch_index += 1
                     hot_timing.add_python(time.perf_counter() - submit_start)
 

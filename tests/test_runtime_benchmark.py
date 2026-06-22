@@ -20,6 +20,7 @@ class DummyProcessor:
             python_seconds=2.0e-6,
             ordinary_precision_samples=int(rows.shape[0]),
             stability_precision_samples=0,
+            medium_precision_samples=0,
             high_precision_samples=0,
         )
         return np.zeros((rows.shape[0], 1), dtype=np.complex128), np.zeros(rows.shape[0]), timing

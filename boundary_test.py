@@ -157,14 +157,20 @@ def _make_processor(topology: Any, request: IntegralRequest) -> Any:
     if request.command == "test" and request.test_boundary_distances:
         distances = [float(distance) for distance in request.test_boundary_distances]
         stability_threshold = max(float(request.stability_threshold), max(distances))
+        medium_precision_threshold = max(
+            float(request.medium_precision_stability_threshold),
+            min(distances),
+        )
+        medium_precision_threshold = min(medium_precision_threshold, stability_threshold)
         high_precision_threshold = max(
             float(request.high_precision_stability_threshold),
             min(distances),
         )
-        high_precision_threshold = min(high_precision_threshold, stability_threshold)
+        high_precision_threshold = min(high_precision_threshold, medium_precision_threshold)
         request = replace(
             request,
             stability_threshold=stability_threshold,
+            medium_precision_stability_threshold=medium_precision_threshold,
             high_precision_stability_threshold=high_precision_threshold,
         )
     return _make_sector_processor(topology, request)
@@ -1547,7 +1553,7 @@ def _summary_table(results: list[EndpointTestResult]) -> PrettyTable:
         "worst probe",
         "time [s]",
         "μs/probe",
-        "prec O/S/H",
+        "prec O/S/M/H",
     ]
     for result in sorted(results, key=lambda item: item.sector_id):
         color = Fore.GREEN if result.status == "ok" else Fore.RED
@@ -1568,6 +1574,7 @@ def _summary_table(results: list[EndpointTestResult]) -> PrettyTable:
                 (
                     f"{int(counts.get('ordinary', 0))}/"
                     f"{int(counts.get('stability', 0))}/"
+                    f"{int(counts.get('medium_precision', 0))}/"
                     f"{int(counts.get('high_precision', 0))}"
                 ),
             ]

@@ -213,6 +213,7 @@ def _precision_text(stats: JsonDict) -> str:
         return "n/a"
     ordinary = stats.get("ordinary", {})
     stability = stats.get("stability", {})
+    medium = stats.get("medium_precision", {})
     high = stats.get("high_precision", {})
 
     def piece(label: str, block: JsonDict) -> str:
@@ -224,6 +225,7 @@ def _precision_text(stats: JsonDict) -> str:
         [
             maybe_color(piece("ord", ordinary), Fore.GREEN),
             maybe_color(piece(f"p{stability.get('precision_digits', '?')}", stability), Fore.YELLOW),
+            maybe_color(piece(f"p{medium.get('precision_digits', '?')}", medium), Fore.MAGENTA),
             maybe_color(piece(f"p{high.get('precision_digits', '?')}", high), Fore.RED),
         ]
     )
@@ -329,6 +331,7 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
         for key, label, color in (
             ("ordinary", "ordinary", Fore.GREEN),
             ("stability", "stability", Fore.YELLOW),
+            ("medium_precision", "medium precision", Fore.MAGENTA),
             ("high_precision", "high precision", Fore.RED),
         ):
             block = precision.get(key, {})

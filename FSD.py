@@ -295,16 +295,27 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
     if request.stability_threshold < 0.0:
         raise ValueError("--stability-threshold must be non-negative")
+    if request.medium_precision_stability_threshold < 0.0:
+        raise ValueError("--medium-precision-stability-threshold must be non-negative")
     if request.high_precision_stability_threshold < 0.0:
         raise ValueError("--high-precision-stability-threshold must be non-negative")
-    if request.high_precision_stability_threshold > request.stability_threshold:
+    if request.medium_precision_stability_threshold > request.stability_threshold:
         raise ValueError(
-            "--high-precision-stability-threshold must be <= --stability-threshold"
+            "--medium-precision-stability-threshold must be <= --stability-threshold"
+        )
+    if request.high_precision_stability_threshold > request.medium_precision_stability_threshold:
+        raise ValueError(
+            "--high-precision-stability-threshold must be <= "
+            "--medium-precision-stability-threshold"
         )
     if request.stability_precision <= 0:
         raise ValueError("--stability-precision must be positive")
+    if request.medium_precision_stability_precision <= 0:
+        raise ValueError("--medium-precision-stability-precision must be positive")
     if request.high_precision_stability_precision <= 0:
         raise ValueError("--high-precision-stability-precision must be positive")
+    if not (0.0 <= request.max_weight_precision_xi <= 1.0):
+        raise ValueError("--max-weight-precision-xi must be between 0 and 1; use 0 to disable")
     if (
         request.sector_evaluator_backend in {"two-stage-explicit", "explicit"}
         and request.subtraction_backend != "projector-formula"
@@ -634,16 +645,25 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--stability-threshold",
         type=float,
-        default=1.0e-8,
+        default=1.0e-3,
         help=(
             "Endpoint-distance threshold on dimensionless sector coordinates below "
             "which Symbolica evaluators use evaluate_with_prec(..., --stability-precision)."
         ),
     )
     parser.add_argument(
+        "--medium-precision-stability-threshold",
+        type=float,
+        default=1.0e-6,
+        help=(
+            "Intermediate endpoint-distance threshold below which Symbolica evaluators "
+            "use evaluate_with_prec(..., --medium-precision-stability-precision)."
+        ),
+    )
+    parser.add_argument(
         "--high-precision-stability-threshold",
         type=float,
-        default=1.0e-12,
+        default=1.0e-8,
         help=(
             "Stronger endpoint-distance threshold below which Symbolica evaluators "
             "use evaluate_with_prec(..., --high-precision-stability-precision)."
@@ -652,8 +672,17 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--stability-precision",
         type=int,
-        default=100,
+        default=32,
         help="Decimal digits used for Symbolica evaluator calls below --stability-threshold.",
+    )
+    parser.add_argument(
+        "--medium-precision-stability-precision",
+        type=int,
+        default=100,
+        help=(
+            "Decimal digits used for Symbolica evaluator calls below "
+            "--medium-precision-stability-threshold."
+        ),
     )
     parser.add_argument(
         "--high-precision-stability-precision",
@@ -662,6 +691,17 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help=(
             "Decimal digits used for Symbolica evaluator calls below "
             "--high-precision-stability-threshold."
+        ),
+    )
+    parser.add_argument(
+        "--max-weight-precision-xi",
+        type=float,
+        default=float(defaults.get("max_weight_precision_xi", 0.9)),
+        help=(
+            "Safety guard for rare large weights.  If a weighted Laurent row is "
+            "at least xi times the current per-sector maximum in any coefficient, "
+            "the row is recomputed with --high-precision-stability-precision before "
+            "being accumulated.  Set to 0 to disable."
         ),
     )
     parser.add_argument(
@@ -1175,9 +1215,12 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         chain_rule_formula_signature_limit=chain_rule_formula_signature_limit,
         chain_rule_formula_output_length_limit=chain_rule_formula_output_length_limit,
         stability_threshold=args.stability_threshold,
+        medium_precision_stability_threshold=args.medium_precision_stability_threshold,
         high_precision_stability_threshold=args.high_precision_stability_threshold,
         stability_precision=args.stability_precision,
+        medium_precision_stability_precision=args.medium_precision_stability_precision,
         high_precision_stability_precision=args.high_precision_stability_precision,
+        max_weight_precision_xi=args.max_weight_precision_xi,
         show_stats=args.show_stats,
         no_progress=args.no_progress,
         quiet_summary=args.quiet_summary,
