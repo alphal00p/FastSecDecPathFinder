@@ -36,6 +36,19 @@ def _complex_json(value: complex) -> dict[str, float]:
     return {"re": float(value.real), "im": float(value.imag)}
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert complex-valued nested comparison data to JSON-safe objects."""
+    if isinstance(value, complex):
+        return _complex_json(value)
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return value
+
+
 def _complex_list_from_maybe_json(values: list[Any]) -> list[complex]:
     """Return complex numbers from plain complex values or result.json objects."""
     out: list[complex] = []
@@ -95,45 +108,68 @@ def _run_fsd(
     result_path: Path,
     target_coeffs: list[complex],
 ) -> dict[str, Any]:
-    cmd = [
-        sys.executable,
-        str(ROOT / "FSD.py"),
-        "--run",
-        str(args.run_file),
-        "--sampling-mode",
-        "qmc",
-        "--qmc-shifts",
-        str(args.qmc_shifts),
-        "--qmc-korobov-alpha",
-        str(args.qmc_korobov_alpha),
-        "--qmc-lattice-backend",
-        str(args.qmc_lattice_backend),
-        "--qmc-order",
-        str(args.qmc_order),
-        "--samples-per-iter",
-        str(n_points),
-        "--max-iter",
-        "1",
-        "--batch-size",
-        str(args.batch_size or n_points),
-        "--workers",
-        str(args.workers),
-        "--prefactor-convention",
-        str(args.fsd_prefactor_convention),
-        *list(args.fsd_extra_arg or []),
-        *_target_cli_args(args, target_coeffs),
-        "--stability-threshold",
-        str(args.stability_threshold),
-        "--medium-precision-stability-threshold",
-        str(args.medium_precision_stability_threshold),
-        "--high-precision-stability-threshold",
-        str(args.high_precision_stability_threshold),
-        "--no-progress",
-        "--quiet-summary",
-        "--json",
-        "--result-path",
-        str(result_path),
-    ]
+    if args.fsd_prepared_output is None:
+        cmd = [
+            sys.executable,
+            str(ROOT / "FSD.py"),
+            "--run",
+            str(args.run_file),
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            str(ROOT / "FSD.py"),
+            "integrate",
+            "--output",
+            str(args.fsd_prepared_output),
+        ]
+    cmd.extend(
+        [
+            "--sampling-mode",
+            "qmc",
+            "--qmc-shifts",
+            str(args.qmc_shifts),
+            "--qmc-korobov-alpha",
+            str(args.qmc_korobov_alpha),
+            "--qmc-lattice-backend",
+            str(args.qmc_lattice_backend),
+            "--qmc-order",
+            str(args.qmc_order),
+            "--samples-per-iter",
+            str(n_points),
+            "--max-iter",
+            "1",
+            "--batch-size",
+            str(args.batch_size or n_points),
+            "--workers",
+            str(args.workers),
+            "--prefactor-convention",
+            str(args.fsd_prefactor_convention),
+            *list(args.fsd_extra_arg or []),
+            *_target_cli_args(args, target_coeffs),
+            "--no-progress",
+            "--quiet-summary",
+            "--json",
+            "--result-path",
+            str(result_path),
+        ]
+    )
+    if args.stability_threshold is not None:
+        cmd.extend(["--stability-threshold", str(args.stability_threshold)])
+    if args.medium_precision_stability_threshold is not None:
+        cmd.extend(
+            [
+                "--medium-precision-stability-threshold",
+                str(args.medium_precision_stability_threshold),
+            ]
+        )
+    if args.high_precision_stability_threshold is not None:
+        cmd.extend(
+            [
+                "--high-precision-stability-threshold",
+                str(args.high_precision_stability_threshold),
+            ]
+        )
     start = time.perf_counter()
     subprocess.run(cmd, cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     elapsed = time.perf_counter() - start
@@ -278,7 +314,7 @@ def _parse_pysecdec_integral_records(verbose_log: str) -> dict[tuple[int, int], 
 def _sector_order_rows(
     fsd: dict[str, Any],
     pysecdec_records: dict[tuple[int, int], dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     labels = _labels_from_result(fsd)
     order_by_label = {
         label: int(label.replace("eps^", ""))
@@ -287,7 +323,25 @@ def _sector_order_rows(
     }
     rows: list[dict[str, Any]] = []
     sector_results = fsd.get("sector_results", [])
+    py_sector_ids = {int(sector_id) for sector_id, _order in pysecdec_records}
+    fsd_sector_ids = {
+        int(sector.get("sector_id", -1))
+        for sector in sector_results
+        if int(sector.get("sector_id", -1)) >= 0
+    }
+    if py_sector_ids and fsd_sector_ids and py_sector_ids != fsd_sector_ids:
+        return (
+            [],
+            (
+                "pySecDec verbose sector ids do not match FSD sector ids "
+                f"({len(py_sector_ids)} pySecDec sectors vs {len(fsd_sector_ids)} "
+                "FSD sectors). Raw sector/order rows are suppressed because "
+                "the generated pySecDec package used a different sector enumeration."
+            ),
+        )
     for sector in sector_results:
+        if int(sector.get("samples", 0)) <= 0:
+            continue
         sector_id = int(sector.get("sector_id", -1))
         raw = sector.get("raw_sector") or sector.get("raw") or {}
         coeffs = complex_list_from_json(raw.get("coefficients", []))
@@ -321,7 +375,7 @@ def _sector_order_rows(
                     "fsd_samples": int(sector.get("samples", 0)),
                 }
             )
-    return rows
+    return rows, None
 
 
 def _resolve_target(args: argparse.Namespace) -> tuple[list[complex], str]:
@@ -458,6 +512,12 @@ def _make_row(
         "fsd_observed_n_points": fsd_observed_n,
         "fsd_raw_sector_samples": fsd_raw_samples,
         "fsd_elapsed_seconds": float(fsd.get("_comparison_elapsed_seconds", fsd.get("elapsed_seconds", 0.0))),
+        "laurent_labels": list(_labels_from_result(fsd)),
+        "target_coefficients": list(target_coeffs),
+        "fsd_coefficients": list(fsd_coeffs),
+        "fsd_errors": list(fsd_errors),
+        "pysecdec_coefficients": list(py_coeffs),
+        "pysecdec_errors": list(py_errors),
         "fsd_coeff": fsd_coeffs[order_index],
         "fsd_error": fsd_errors[order_index],
         "fsd_diff": fsd_coeffs[order_index] - target,
@@ -475,6 +535,16 @@ def _make_row(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-file", type=Path, default=ROOT / "examples/runs/dot_triangle.yaml")
+    parser.add_argument(
+        "--fsd-prepared-output",
+        type=Path,
+        default=None,
+        help=(
+            "Prepared FSD bundle directory. When set, the FSD side is run as "
+            "'FSD.py integrate --output DIR' instead of the single-shot "
+            "'FSD.py --run RUN_FILE' path."
+        ),
+    )
     parser.add_argument("--kinematics-file", type=Path, default=ROOT / "examples/graphs/triangle_kinematics.yaml")
     parser.add_argument("--target-file", type=Path, default=ROOT / "examples/outputs/dot_triangle_pysecdec_target.json")
     parser.add_argument(
@@ -574,12 +644,31 @@ def main() -> int:
         action="store_true",
         help="Store the captured pySecDec verbose text in --output-json.",
     )
-    parser.add_argument("--stability-threshold", type=float, default=1.0e-12)
-    parser.add_argument("--medium-precision-stability-threshold", type=float, default=1.0e-14)
-    parser.add_argument("--high-precision-stability-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--stability-threshold",
+        type=float,
+        default=None,
+        help="Optional override forwarded to FSD; defaults come from --run-file/FSD.py.",
+    )
+    parser.add_argument(
+        "--medium-precision-stability-threshold",
+        type=float,
+        default=None,
+        help="Optional override forwarded to FSD; defaults come from --run-file/FSD.py.",
+    )
+    parser.add_argument(
+        "--high-precision-stability-threshold",
+        type=float,
+        default=None,
+        help="Optional override forwarded to FSD; defaults come from --run-file/FSD.py.",
+    )
     args = parser.parse_args()
 
     args.run_file = args.run_file.expanduser().resolve()
+    if args.fsd_prepared_output is not None:
+        args.fsd_prepared_output = args.fsd_prepared_output.expanduser().resolve()
+        if not args.fsd_prepared_output.exists():
+            raise FileNotFoundError(f"prepared FSD bundle not found: {args.fsd_prepared_output}")
     args.kinematics_file = args.kinematics_file.expanduser().resolve()
     args.target_file = args.target_file.expanduser().resolve()
     args.pysecdec_shared = args.pysecdec_shared.expanduser().resolve()
@@ -593,6 +682,7 @@ def main() -> int:
     first_result_labels: list[str] | None = None
     rows: list[dict[str, Any]] = []
     sector_order_rows: list[dict[str, Any]] = []
+    sector_order_warnings: list[str] = []
     with tempfile.TemporaryDirectory(prefix="fsd-qmc-compare-") as tmp:
         tmpdir = Path(tmp)
         for n_points in args.sample_counts:
@@ -605,10 +695,13 @@ def main() -> int:
             pysecdec = _run_pysecdec(args, n_points)
             rows.append(_make_row(n_points, args, fsd, pysecdec, target_coeffs, order_index))
             if int(args.sector_order_limit) != 0:
-                for sector_row in _sector_order_rows(
+                parsed_sector_rows, warning = _sector_order_rows(
                     fsd,
                     pysecdec.get("per_integral_records", {}),
-                ):
+                )
+                if warning is not None:
+                    sector_order_warnings.append(f"N/shift {n_points}: {warning}")
+                for sector_row in parsed_sector_rows:
                     sector_row["n_points_per_shift"] = int(n_points)
                     sector_order_rows.append(sector_row)
 
@@ -662,6 +755,8 @@ def main() -> int:
     )
 
     if int(args.sector_order_limit) != 0:
+        for warning in sector_order_warnings:
+            print(f"Sector/order comparison warning: {warning}")
         if args.sector_order_sort == "abs-diff":
             sorted_sector_rows = sorted(
                 sector_order_rows,
@@ -685,47 +780,49 @@ def main() -> int:
             )
         if int(args.sector_order_limit) > 0:
             sorted_sector_rows = sorted_sector_rows[: int(args.sector_order_limit)]
-        sector_table = PrettyTable()
-        sector_table.field_names = [
-            "N/shift",
-            "sector",
-            "order",
-            "FSD raw",
-            "FSD err",
-            "pySecDec raw",
-            "pySecDec err",
-            "diff",
-            "py n",
-            "FSD smpl",
-        ]
-        for row in sorted_sector_rows:
-            sector_table.add_row(
-                [
-                    row["n_points_per_shift"],
-                    row["sector_name"],
-                    row["label"].replace("eps^", ""),
-                    _fmt_real(row["fsd_coeff"]),
-                    _fmt_scientific(row["fsd_error"]),
-                    _fmt_real(row["pysecdec_coeff"]),
-                    _fmt_scientific(row["pysecdec_error"]),
-                    _fmt_scientific(row["diff"]),
-                    row["pysecdec_n"],
-                    row["fsd_samples"],
-                ]
+        if sorted_sector_rows:
+            sector_table = PrettyTable()
+            sector_table.field_names = [
+                "N/shift",
+                "sector",
+                "order",
+                "FSD raw",
+                "FSD err",
+                "pySecDec raw",
+                "pySecDec err",
+                "diff",
+                "py n",
+                "FSD smpl",
+            ]
+            for row in sorted_sector_rows:
+                sector_table.add_row(
+                    [
+                        row["n_points_per_shift"],
+                        row["sector_name"],
+                        row["label"].replace("eps^", ""),
+                        _fmt_real(row["fsd_coeff"]),
+                        _fmt_scientific(row["fsd_error"]),
+                        _fmt_real(row["pysecdec_coeff"]),
+                        _fmt_scientific(row["pysecdec_error"]),
+                        _fmt_scientific(row["diff"]),
+                        row["pysecdec_n"],
+                        row["fsd_samples"],
+                    ]
+                )
+            print()
+            print("Raw sector/order comparison before global prefactor convolution:")
+            print(sector_table)
+            print(
+                "Sector/order pySecDec values are parsed from its verbose text log, "
+                "which prints coefficients with limited decimal precision.  Treat "
+                "these rows as structural and variance checks; aggregate rows use "
+                "the full JSON series returned by pySecDec."
             )
-        print()
-        print("Raw sector/order comparison before global prefactor convolution:")
-        print(sector_table)
-        print(
-            "Sector/order pySecDec values are parsed from its verbose text log, "
-            "which prints coefficients with limited decimal precision.  Treat "
-            "these rows as structural and variance checks; aggregate rows use "
-            "the full JSON series returned by pySecDec."
-        )
 
     if args.output_json is not None:
         payload = {
             "run_file": str(args.run_file),
+            "fsd_prepared_output": str(args.fsd_prepared_output) if args.fsd_prepared_output is not None else None,
             "target_file": str(args.target_file),
             "target_source": str(args.target_source),
             "target_label": target_label,
@@ -738,19 +835,14 @@ def main() -> int:
             "fsd_prefactor_convention": str(args.fsd_prefactor_convention),
             "pysecdec_generatingvectors": str(args.pysecdec_generatingvectors),
             "rows": [
-                {
-                    key: (_complex_json(value) if isinstance(value, complex) else value)
-                    for key, value in row.items()
-                }
+                {key: _jsonable(value) for key, value in row.items()}
                 for row in rows
             ],
             "sector_order_rows": [
-                {
-                    key: (_complex_json(value) if isinstance(value, complex) else value)
-                    for key, value in row.items()
-                }
+                {key: _jsonable(value) for key, value in row.items()}
                 for row in sector_order_rows
             ],
+            "sector_order_warnings": sector_order_warnings,
         }
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
