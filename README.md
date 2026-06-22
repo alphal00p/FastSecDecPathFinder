@@ -148,7 +148,10 @@ override the YAML values:
 ```
 
 The corresponding DOT graphs and kinematics live in `examples/graphs`, while
-persistent targets and run outputs live in `examples/outputs`.
+persistent targets and run outputs live in `examples/outputs`.  The preset set
+also includes the off-shell Euclidean triple box,
+`examples/runs/dot_triple_box_offshell.yaml`, as the no-threshold three-loop
+triple-box case to keep in future performance and stability sweeps.
 
 Triangle massive:
 

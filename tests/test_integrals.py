@@ -303,6 +303,52 @@ def test_large_weight_rows_are_retried_at_high_precision() -> None:
     assert timing.high_precision_samples == 1
 
 
+def test_large_weight_guard_uses_previous_sector_maximum() -> None:
+    """The current batch maximum must not become its own replay threshold."""
+
+    class FirstBatchProcessor:
+        def __init__(self) -> None:
+            self.topology = SimpleNamespace(coefficient_count=1)
+            self.high_precision_stability_precision = 100
+            self.precision_calls = 0
+
+        def evaluate_batch(self, _sector, rows):
+            timing = HotPathTiming()
+            timing.add_precision_samples(ordinary=rows.shape[0])
+            coeffs = np.array([[1.0 + 0.0j], [20.0 + 0.0j]], dtype=np.complex128)
+            return coeffs[: rows.shape[0]], np.abs(coeffs[: rows.shape[0], 0]), timing
+
+        def evaluate_batch_at_precision(self, _sector, rows, precision_digits):
+            self.precision_calls += 1
+            timing = HotPathTiming(precision_digits=precision_digits)
+            timing.add_precision_samples(high=rows.shape[0])
+            coeffs = np.full((rows.shape[0], 1), 3.0 + 0.0j, dtype=np.complex128)
+            return coeffs, np.full(rows.shape[0], 3.0), timing
+
+    processor = FirstBatchProcessor()
+    sectors = [SimpleNamespace(name="S0", integration_dim=1)]
+    batch = EvaluationBatch(
+        indices=np.array([0, 1], dtype=int),
+        sector_indices=np.array([0, 0], dtype=int),
+        coords=np.array([[0.2], [0.4]], dtype=float),
+        weights=np.array([1.0, 1.0], dtype=float),
+        sector_max_abs=np.array([[0.0]], dtype=float),
+        max_weight_precision_xi=0.9,
+    )
+
+    _indices, weighted, training, precision_counts, timing = _evaluate_records(
+        processor,
+        sectors,
+        batch,
+    )
+
+    assert processor.precision_calls == 0
+    assert weighted[:, 0] == pytest.approx([1.0 + 0.0j, 20.0 + 0.0j])
+    assert training == pytest.approx([1.0, 20.0])
+    assert precision_counts[0].tolist() == [2, 0, 0, 0]
+    assert timing.high_precision_samples == 0
+
+
 def prepare_generated_evaluators(
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],

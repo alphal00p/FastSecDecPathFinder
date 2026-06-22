@@ -276,12 +276,17 @@ def _evaluate_records(
             and sector_index < sector_max_abs.shape[0]
         ):
             current_max = sector_max_abs[sector_index]
-            batch_max = np.max(np.abs(weighted_coeffs), axis=0) if weighted_coeffs.size else current_max
-            reference_max = np.maximum(current_max, batch_max)
-            active_orders = reference_max > 0.0
+            # Compare against the previously registered sector maximum.  Do not
+            # fold the current batch maximum into the reference here: doing so
+            # makes the largest row in every batch satisfy
+            # row >= xi * max(current_batch), which turns the guard into a
+            # near-deterministic high-precision replay for sparsely sampled
+            # sectors.  The first finite row establishes the reference; later
+            # rows that approach or exceed it are the ones worth replaying.
+            active_orders = current_max > 0.0
             if np.any(active_orders):
                 row_abs = np.abs(weighted_coeffs[:, active_orders])
-                threshold = max_weight_precision_xi * reference_max[active_orders]
+                threshold = max_weight_precision_xi * current_max[active_orders]
                 rescue_mask = np.any(row_abs >= threshold[np.newaxis, :], axis=1)
                 if np.any(rescue_mask):
                     rescue_count = int(np.count_nonzero(rescue_mask))
