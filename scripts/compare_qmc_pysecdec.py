@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -250,20 +252,61 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         epsabs=1.0e-99,
     )
     start = time.perf_counter()
-    series = library(
-        real_parameters=kinematics.parameter_values,
-        format="json",
-        verbose=False,
-        number_of_presamples=0,
-    )
+    verbose_log = ""
+    if bool(args.pysecdec_verbose):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        saved_stdout_fd = os.dup(1)
+        saved_stderr_fd = os.dup(2)
+        with tempfile.TemporaryFile(mode="w+b") as capture:
+            try:
+                os.dup2(capture.fileno(), 1)
+                os.dup2(capture.fileno(), 2)
+                series = library(
+                    real_parameters=kinematics.parameter_values,
+                    format="json",
+                    verbose=True,
+                    number_of_presamples=0,
+                )
+                sys.stdout.flush()
+                sys.stderr.flush()
+            finally:
+                os.dup2(saved_stdout_fd, 1)
+                os.dup2(saved_stderr_fd, 2)
+                os.close(saved_stdout_fd)
+                os.close(saved_stderr_fd)
+            capture.seek(0)
+            verbose_log = capture.read().decode("utf-8", errors="replace")
+    else:
+        series = library(
+            real_parameters=kinematics.parameter_values,
+            format="json",
+            verbose=False,
+            number_of_presamples=0,
+        )
     elapsed = time.perf_counter() - start
     orders, coeffs, errors = _parse_pysecdec_json_series(series)
+    refinement_pairs = [
+        (int(start_n), int(stop_n))
+        for start_n, stop_n in re.findall(r"\bn:\s*(\d+)\s*->\s*(\d+)", verbose_log)
+    ]
+    direct_nm = [
+        (int(n_value), int(m_value))
+        for n_value, m_value in re.findall(r"\bn\s+(\d+),\s*m\s+(\d+)", verbose_log)
+    ]
+    all_n_values = [n for n, _m in direct_nm] + [stop_n for _start_n, stop_n in refinement_pairs]
+    max_observed_n = max(all_n_values) if all_n_values else None
     return {
         "orders": orders,
         "coefficients": coeffs,
         "errors": errors,
         "elapsed_seconds": elapsed,
-        "maxeval_budget": int(n_points) * int(args.qmc_shifts),
+        "requested_maxeval_budget": int(n_points) * int(args.qmc_shifts),
+        "requested_n_points": int(n_points),
+        "observed_max_n_points": max_observed_n,
+        "observed_refinement_count": len(refinement_pairs),
+        "observed_refinements": refinement_pairs[:20],
+        "captured_verbose_log": verbose_log if bool(args.keep_pysecdec_verbose_log) else "",
     }
 
 
@@ -279,16 +322,28 @@ def _make_row(
     fsd_errors = complex_list_from_json(fsd.get("display", {}).get("errors", []))
     py_coeffs, py_errors = _pysecdec_coefficients_in_fsd_convention(args, fsd, pysecdec)
     target = target_coeffs[order_index]
+    fsd_diagnostics = fsd.get("integration_diagnostics") or fsd.get("diagnostics") or {}
+    fsd_group_count = int(fsd_diagnostics.get("qmc_sector_group_count", 0) or 0)
+    fsd_raw_samples = int(fsd.get("samples", 0))
+    fsd_observed_n = (
+        fsd_raw_samples // (fsd_group_count * int(args.qmc_shifts))
+        if fsd_group_count > 0 and int(args.qmc_shifts) > 0
+        else None
+    )
     return {
         "n_points_per_shift": int(n_points),
         "qmc_shifts": int(args.qmc_shifts),
-        "fsd_raw_sector_samples": int(fsd.get("samples", 0)),
+        "fsd_support_groups": fsd_group_count,
+        "fsd_observed_n_points": fsd_observed_n,
+        "fsd_raw_sector_samples": fsd_raw_samples,
         "fsd_elapsed_seconds": float(fsd.get("_comparison_elapsed_seconds", fsd.get("elapsed_seconds", 0.0))),
         "fsd_coeff": fsd_coeffs[order_index],
         "fsd_error": fsd_errors[order_index],
         "fsd_diff": fsd_coeffs[order_index] - target,
         "fsd_minus_pysecdec": fsd_coeffs[order_index] - py_coeffs[order_index],
-        "pysecdec_eval_budget": int(pysecdec["maxeval_budget"]),
+        "pysecdec_requested_eval_budget": int(pysecdec["requested_maxeval_budget"]),
+        "pysecdec_observed_max_n": pysecdec.get("observed_max_n_points"),
+        "pysecdec_observed_refinements": int(pysecdec.get("observed_refinement_count", 0)),
         "pysecdec_elapsed_seconds": float(pysecdec["elapsed_seconds"]),
         "pysecdec_coeff": py_coeffs[order_index],
         "pysecdec_error": py_errors[order_index],
@@ -369,6 +424,20 @@ def main() -> int:
     parser.add_argument("--mode", choices=["massless", "massive"], default="massless")
     parser.add_argument("--order", default="0", help="Laurent order to print, e.g. 0 or eps^0.")
     parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument(
+        "--pysecdec-verbose",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Capture pySecDec's verbose integration log so the table can report "
+            "whether it refined sector/order lattices beyond the requested minn."
+        ),
+    )
+    parser.add_argument(
+        "--keep-pysecdec-verbose-log",
+        action="store_true",
+        help="Store the captured pySecDec verbose text in --output-json.",
+    )
     parser.add_argument("--stability-threshold", type=float, default=1.0e-12)
     parser.add_argument("--medium-precision-stability-threshold", type=float, default=1.0e-14)
     parser.add_argument("--high-precision-stability-threshold", type=float, default=0.0)
@@ -403,11 +472,15 @@ def main() -> int:
     order_label = first_result_labels[_order_index(first_result_labels, args.order)] if first_result_labels else args.order
     table.field_names = [
         "N/shift",
+        "FSD groups",
+        "FSD max n",
         "FSD raw smpl",
         "FSD t [s]",
         f"FSD {order_label} diff",
         f"FSD {order_label} err",
-        "pySecDec maxeval",
+        "pySecDec req eval",
+        "pySecDec max n",
+        "pySecDec refs",
         "pySecDec t [s]",
         f"FSD-pySecDec {order_label}",
         f"pySecDec {order_label} diff",
@@ -417,11 +490,15 @@ def main() -> int:
         table.add_row(
             [
                 row["n_points_per_shift"],
+                row["fsd_support_groups"],
+                row["fsd_observed_n_points"] if row["fsd_observed_n_points"] is not None else "n/a",
                 row["fsd_raw_sector_samples"],
                 f"{row['fsd_elapsed_seconds']:.3f}",
                 _fmt_scientific(row["fsd_diff"]),
                 _fmt_scientific(row["fsd_error"]),
-                row["pysecdec_eval_budget"],
+                row["pysecdec_requested_eval_budget"],
+                row["pysecdec_observed_max_n"] if row["pysecdec_observed_max_n"] is not None else "n/a",
+                row["pysecdec_observed_refinements"],
                 f"{row['pysecdec_elapsed_seconds']:.3f}",
                 _fmt_scientific(row["fsd_minus_pysecdec"]),
                 _fmt_scientific(row["pysecdec_diff"]),
@@ -430,9 +507,13 @@ def main() -> int:
         )
     print(table)
     print(
-        "Note: FSD raw samples = sectors * N/shift * shifts. "
-        "pySecDec maxeval is the public QMC budget; FSD does not inspect or "
-        "depend on pySecDec's QMC internals. Target: "
+        "Note: FSD raw samples = support groups * observed lattice n * shifts. "
+        "Support groups split a sector by Laurent orders with different "
+        "effective endpoint support. "
+        "pySecDec req eval is the requested QMC budget, while pySecDec max n "
+        "and refs are parsed from its verbose refinement log when available; "
+        "pySecDec may refine hard sector/order integrals beyond the nominal "
+        "minn/maxeval request. Target: "
         f"{target_label}; displayed convention: {args.fsd_prefactor_convention}."
     )
 

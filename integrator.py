@@ -342,7 +342,22 @@ def _evaluate_records(
         sector_index = int(sector_index)
         sector = sectors[sector_index]
         mask = sector_indices == sector_index
-        coeffs, train, sector_timing = processor.evaluate_batch(sector, coords[mask])
+        active_indices = sector_active_coefficient_indices(processor.topology, sector)
+        if not active_indices:
+            sector_timing = HotPathTiming()
+            sector_timing.add_precision_samples(ordinary=int(np.count_nonzero(mask)))
+            coeffs = np.zeros(
+                (int(np.count_nonzero(mask)), processor.topology.coefficient_count),
+                dtype=np.complex128,
+            )
+            train = np.zeros(int(np.count_nonzero(mask)), dtype=float)
+        else:
+            coeffs, train, sector_timing = processor.evaluate_batch(sector, coords[mask])
+            if len(active_indices) != processor.topology.coefficient_count:
+                inactive = np.ones(processor.topology.coefficient_count, dtype=bool)
+                inactive[list(active_indices)] = False
+                coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
+                coeffs[:, inactive] = 0.0
         sector_weights = weights[mask]
         weighted_coeffs = coeffs * sector_weights[:, np.newaxis]
         if (
@@ -424,7 +439,18 @@ def _evaluate_democratic_batch(
             precision_counts=np.zeros(4, dtype=np.int64),
             timing=timing,
         )
-    coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+    active_indices = sector_active_coefficient_indices(processor.topology, sector)
+    if not active_indices:
+        sector_timing = HotPathTiming()
+        sector_timing.add_precision_samples(ordinary=int(coords.shape[0]))
+        coeffs = np.zeros((coords.shape[0], processor.topology.coefficient_count), dtype=np.complex128)
+    else:
+        coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+        if len(active_indices) != processor.topology.coefficient_count:
+            inactive = np.ones(processor.topology.coefficient_count, dtype=bool)
+            inactive[list(active_indices)] = False
+            coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
+            coeffs[:, inactive] = 0.0
     timing.absorb(sector_timing)
     hot_elapsed = time.perf_counter() - hot_start
     timing.add_python(hot_elapsed - timing.total_seconds)
@@ -474,7 +500,18 @@ def _evaluate_qmc_batch(
             timing=timing,
         )
 
-    coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+    active_indices = sector_active_coefficient_indices(processor.topology, sector)
+    if not active_indices:
+        sector_timing = HotPathTiming()
+        sector_timing.add_precision_samples(ordinary=int(coords.shape[0]))
+        coeffs = np.zeros((coords.shape[0], processor.topology.coefficient_count), dtype=np.complex128)
+    else:
+        coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+        if len(active_indices) != processor.topology.coefficient_count:
+            inactive = np.ones(processor.topology.coefficient_count, dtype=bool)
+            inactive[list(active_indices)] = False
+            coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
+            coeffs[:, inactive] = 0.0
     timing.absorb(sector_timing)
     weighted = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
     selected = np.asarray(batch.coefficient_indices, dtype=np.int64)
@@ -632,18 +669,19 @@ def qmc_support_groups(
     """
     full_axes = tuple(range(int(sector.integration_dim)))
     full_dim = len(full_axes)
-    endpoint_depth = len(sector.singular_axes)
+    endpoint_depth = sector_endpoint_pole_depth(topology, sector)
     sector_min_order = -endpoint_depth if endpoint_depth else 0
     local_support: dict[int, tuple[int, ...]] = {}
     for index, order in enumerate(topology.laurent_orders):
         if int(order) >= sector_min_order:
             local_support[index] = full_axes
-    if sector.singular_axes:
-        deepest_order = -len(sector.singular_axes)
+    if endpoint_depth:
+        deepest_order = -endpoint_depth
         if deepest_order in topology.laurent_orders:
             deepest_index = topology.laurent_orders.index(deepest_order)
+            endpoint_axes = set(sector_endpoint_axes(topology, sector))
             boundary_axes = tuple(
-                axis for axis in full_axes if axis not in set(int(a) for a in sector.singular_axes)
+                axis for axis in full_axes if axis not in endpoint_axes
             )
             if boundary_axes:
                 local_support[deepest_index] = boundary_axes
@@ -681,6 +719,77 @@ def qmc_global_support_dims(
             for index in coeff_indices:
                 dims[index] = max(dims[index], len(axes))
     return tuple(dim if dim > 0 else full_dim for dim in dims)
+
+
+def sector_endpoint_axes(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> tuple[int, ...]:
+    """Return sector axes that carry a genuine endpoint pole.
+
+    ``sector.singular_axes`` records where endpoint subtraction metadata is
+    available.  A few generated sectors can carry that metadata while a
+    particular requested Laurent range or IBP setup makes an axis effectively
+    regular.  Centralizing the predicate keeps QMC support grouping, Havana
+    diagnostics, and zero-coefficient masking in sync.
+    """
+    axes: list[int] = []
+    if not hasattr(topology, "endpoint_power"):
+        return tuple(int(axis) for axis in sector.singular_axes)
+    for axis in sector.singular_axes:
+        if topology.endpoint_power(sector, axis).base < -1.0e-12:
+            axes.append(int(axis))
+    return tuple(axes)
+
+
+def sector_endpoint_pole_depth(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> int:
+    """Return the deepest pole order this sector can produce by itself."""
+    return len(sector_endpoint_axes(topology, sector))
+
+
+def sector_active_coefficient_indices(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> tuple[int, ...]:
+    """Return Laurent coefficient slots that can be non-zero for a sector."""
+    min_order = -sector_endpoint_pole_depth(topology, sector)
+    return tuple(
+        index
+        for index, order in enumerate(topology.laurent_orders)
+        if int(order) >= min_order
+    )
+
+
+def sector_support_diagnostics(
+    topology: TopologyDefinition,
+    sectors: list[SectorDefinition],
+) -> list[dict[str, Any]]:
+    """Build compact per-sector endpoint/support metadata for result files."""
+    labels = topology.expected_laurent_orders
+    out: list[dict[str, Any]] = []
+    for sector_id, sector in enumerate(sectors):
+        active = sector_active_coefficient_indices(topology, sector)
+        groups = qmc_support_groups(topology, sector, None)
+        out.append(
+            {
+                "sector_id": int(sector_id),
+                "name": sector.name,
+                "endpoint_axes": [int(axis) for axis in sector_endpoint_axes(topology, sector)],
+                "endpoint_pole_depth": int(sector_endpoint_pole_depth(topology, sector)),
+                "active_laurent_orders": [labels[index] for index in active],
+                "qmc_local_support_groups": [
+                    {
+                        "orders": [labels[index] for index in coeff_indices],
+                        "support_axes": [int(axis) for axis in axes],
+                    }
+                    for coeff_indices, axes in groups
+                ],
+            }
+        )
+    return out
 
 
 def qmc_batches_for_sector(
@@ -1224,6 +1333,19 @@ def _stats_from_reduced_batches(
                 precision_counts=sector_precision_counts[sector_index].copy(),
                 diagnostics={
                     "sampling_mode": sampling_mode,
+                    "endpoint_pole_depth": sector_endpoint_pole_depth(
+                        topology, sectors[sector_index]
+                    ),
+                    "endpoint_axes": [
+                        int(axis)
+                        for axis in sector_endpoint_axes(topology, sectors[sector_index])
+                    ],
+                    "active_laurent_orders": [
+                        topology.expected_laurent_orders[index]
+                        for index in sector_active_coefficient_indices(
+                            topology, sectors[sector_index]
+                        )
+                    ],
                     "avg_eval_us_per_sample": avg_eval_us_per_sample_per_worker(
                         sector_timing[sector_index],
                         sector_hits[sector_index],
@@ -1662,6 +1784,7 @@ def integrate_democratic(
         "active_sector_count": len(active_sector_ids),
         "requested_total_samples": len(active_sector_ids)
         * int(request.democratic_samples_per_sector),
+        "sector_support": sector_support_diagnostics(topology, sectors),
         "note": (
             "Each active sector is sampled uniformly with equal statistics; "
             "the aggregate integral is the sum of per-sector means."
@@ -1797,6 +1920,20 @@ def integrate(
         np.zeros(topology.coefficient_count, dtype=float)
         for _sector in sectors
     ]
+    diagnostics: dict[str, Any] = {
+        "sampling_mode": "havana",
+        "active_sector_count": len(active_sector_ids),
+        "sector_support": sector_support_diagnostics(topology, sectors),
+        "qmc_global_support_dimensions_for_reference": [
+            int(value) for value in qmc_global_support_dims(topology, active_sectors)
+        ],
+        "lower_support_policy": (
+            "Havana keeps every sector contribution in the full continuous "
+            "dimension, with lower-support endpoint terms localized into the "
+            "same grid.  The QMC support diagnostics are recorded only for "
+            "cross-checking against pySecDec-style per-order transforms."
+        ),
+    }
 
     processor: SectorProcessor | None = None
     executor: ProcessPoolExecutor | None = None
@@ -1842,6 +1979,19 @@ def integrate(
                     raw_sector_errors=[stat.error for stat in sector_stats],
                     precision_counts=per_sector_precision_counts[sector_index].copy(),
                     diagnostics={
+                        "endpoint_pole_depth": sector_endpoint_pole_depth(
+                            topology, sectors[sector_index]
+                        ),
+                        "endpoint_axes": [
+                            int(axis)
+                            for axis in sector_endpoint_axes(topology, sectors[sector_index])
+                        ],
+                        "active_laurent_orders": [
+                            topology.expected_laurent_orders[index]
+                            for index in sector_active_coefficient_indices(
+                                topology, sectors[sector_index]
+                            )
+                        ],
                         "max_abs_weight": float(np.max(per_sector_max_abs[sector_index]))
                         if per_sector_hits[sector_index]
                         else 0.0,
@@ -1863,6 +2013,7 @@ def integrate(
             python_overhead_fraction=hot_timing.python_overhead_fraction,
             precision_counts=hot_timing.precision_counts,
             interrupted=interrupted,
+            diagnostics=diagnostics,
         )
 
     try:
