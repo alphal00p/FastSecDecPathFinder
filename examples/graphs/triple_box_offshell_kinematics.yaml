@@ -1,0 +1,15 @@
+values:
+  mext2: -1.0
+  s12: -2.0
+  s23: -2.0
+replacements:
+  p1*p1: mext2
+  p2*p2: mext2
+  p3*p3: mext2
+  p4*p4: mext2
+  p1*p2: (s12 - 2*mext2)/2
+  p2*p3: (s23 - 2*mext2)/2
+  p1*p3: (mext2 - 3*mext2 - 2*((s12 - 2*mext2)/2) - 2*((s23 - 2*mext2)/2))/2
+  p1*p4: -mext2 - ((s12 - 2*mext2)/2) - ((mext2 - 3*mext2 - 2*((s12 - 2*mext2)/2) - 2*((s23 - 2*mext2)/2))/2)
+  p2*p4: -((s12 - 2*mext2)/2) - mext2 - ((s23 - 2*mext2)/2)
+  p3*p4: -((mext2 - 3*mext2 - 2*((s12 - 2*mext2)/2) - 2*((s23 - 2*mext2)/2))/2) - ((s23 - 2*mext2)/2) - mext2

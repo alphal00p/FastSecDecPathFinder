@@ -35,6 +35,7 @@ from integrand import (
     TwoStageSectorFormulaDefinition,
 )
 from sectors_generator import SectorDefinition
+from subtraction_formula import _expression_cache_text
 
 
 SCHEMA_VERSION = 2
@@ -128,7 +129,7 @@ def _assert_evaluator_artifacts_exist(root: Path, *payloads: Any) -> None:
 
 def _expr_text(expr: Any) -> str:
     """Serialize a Symbolica expression as a parseable reference string."""
-    return str(expr)
+    return _expression_cache_text(expr)
 
 
 def _expr_from_text(text: str) -> Any:
