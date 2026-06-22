@@ -1,0 +1,28 @@
+# Off-shell Euclidean triple box with a rank-2 momentum-space numerator.
+#
+# The propagator routing in the DOT graph is chosen to reproduce the scalar
+# GammaLoop graph's U and F polynomial exactly while exposing loop momenta for
+# the numerator reducer.
+dot-file: ../graphs/triple_box_offshell_rank2_numerator.dot
+kinematics: ../graphs/triple_box_offshell_kinematics.yaml
+dot-engine: fsd
+sector-method: iterative
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+explicit: true
+symbolic-derivatives: true
+numerator-reducer: symbolica
+max-weight-precision-xi: 0.9
+stability-threshold: 1.0e-3
+medium-precision-stability-threshold: 1.0e-6
+high-precision-stability-threshold: 1.0e-8
+stability-precision: 32
+medium-precision-stability-precision: 100
+high-precision-stability-precision: 1000
+max-eps-order: 0
+samples-per-iter: 100000
+batch-size: 10000
+max-iter: 3
+min-iter: 1
+workers: 10
+result-path: ../outputs/dot_triple_box_offshell_rank2_numerator_result.json

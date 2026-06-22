@@ -1,0 +1,681 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-06-22T15:07:14.323032+00:00",
+  "command": [
+    "FSD.py",
+    "--run",
+    "examples/runs/dot_triangle.yaml",
+    "--sampling-mode",
+    "qmc",
+    "--qmc-shifts",
+    "16",
+    "--samples-per-iter",
+    "16384",
+    "--max-iter",
+    "1",
+    "--batch-size",
+    "8192",
+    "--workers",
+    "10",
+    "--stability-threshold",
+    "1e-12",
+    "--medium-precision-stability-threshold",
+    "1e-14",
+    "--high-precision-stability-threshold",
+    "0",
+    "--no-progress",
+    "--quiet-summary",
+    "--json",
+    "--result-path",
+    "examples/outputs/dot_triangle_qmc_result.json"
+  ],
+  "integral": "dot",
+  "mode": "massless",
+  "prefactor_convention": "pysecdec",
+  "request": {
+    "run_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/runs/dot_triangle.yaml",
+    "integral": "dot",
+    "dot_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/triangle.dot",
+    "kinematics_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/triangle_kinematics.yaml",
+    "graph_name": null,
+    "sector_method": "iterative",
+    "normaliz_executable": null,
+    "dot_engine": "fsd",
+    "numerator_reducer": "symbolica",
+    "sectors": null,
+    "pysecdec_workdir": ".pysecdec_build",
+    "pysecdec_epsrel": 0.01,
+    "pysecdec_maxeval": 100000,
+    "keep_pysecdec_workdir": false,
+    "progress_value_order": "eps^0",
+    "max_eps_order": 0,
+    "target_args": [
+      "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/outputs/dot_triangle_pysecdec_target.json"
+    ],
+    "refresh_target": false,
+    "show_results": null,
+    "sort_sector_results": "index",
+    "result_path": "examples/outputs/dot_triangle_qmc_result.json",
+    "log_level": "INFO",
+    "log_file": null,
+    "mode": "massless",
+    "s": null,
+    "s12": null,
+    "s23": null,
+    "m": 0.0,
+    "gamma_scheme": "oneloop",
+    "prefactor_convention": "pysecdec",
+    "seed": 1,
+    "max_iter": 1,
+    "min_iter": 1,
+    "samples_per_iter": 16384,
+    "batch_size": 8192,
+    "sampling_mode": "qmc",
+    "democratic_samples_per_sector": 1000,
+    "target_rel_accuracy": null,
+    "min_error": 0.0002,
+    "bins": 64,
+    "workers": 10,
+    "jit_compile_evaluators": false,
+    "dual_evaluator_mode": "symbolic-derivatives",
+    "subtraction_backend": "projector-formula",
+    "ibp_reduce_to_log_endpoint": false,
+    "ibp_power_goal": null,
+    "direct_projector_cache_term_threshold": 54,
+    "allow_fallback_for_missing_caches": false,
+    "force_regular_taylor_formulas": false,
+    "regular_taylor_signature_limit": 256,
+    "regular_taylor_formula_volume_limit": 8192,
+    "regular_taylor_formula_axis_limit": 6,
+    "chain_rule_formula_signature_limit": 256,
+    "chain_rule_formula_output_length_limit": 0,
+    "stability_threshold": 1e-12,
+    "medium_precision_stability_threshold": 1e-14,
+    "high_precision_stability_threshold": 0.0,
+    "stability_precision": 32,
+    "medium_precision_stability_precision": 100,
+    "high_precision_stability_precision": 1000,
+    "max_weight_precision_xi": 0.9,
+    "show_stats": false,
+    "no_progress": true,
+    "quiet_summary": true,
+    "json": true,
+    "mu": null,
+    "onshell_threshold": null,
+    "command": "run",
+    "sector_evaluator_backend": "projector",
+    "output": null,
+    "evaluator_lru_size": 128,
+    "dot_global_prefactor_coeffs": [
+      {
+        "re": -1.0,
+        "im": 0.0
+      },
+      {
+        "re": 0.5772156649015329,
+        "im": 0.0
+      },
+      {
+        "re": -0.9890559953279725,
+        "im": 0.0
+      }
+    ],
+    "dot_global_prefactor_min_order": 0,
+    "dot_sector_laurent_min_order": -2,
+    "dot_sector_laurent_max_order": 0,
+    "max_eps_order_explicit": true,
+    "cache_loop_counts": [
+      1,
+      2
+    ],
+    "cache_cases": null,
+    "cache_report_path": "docs/universal_cache_report.json",
+    "cache_workdir": ".cache_warm",
+    "cache_verify_samples_per_sector": 16,
+    "cache_estimate_3l": true,
+    "test_boundary_distances": [
+      1e-06,
+      1e-08
+    ],
+    "test_boundary_growth_power_tolerance": 0.5,
+    "test_report_path": null,
+    "test_boundary_retry_scales": [
+      0.01
+    ],
+    "test_boundary_max_simultaneous_endpoint_approaches": null,
+    "benchmark_samples_per_sector": 5,
+    "qmc_shifts": 16,
+    "qmc_korobov_alpha": 3
+  },
+  "environment": {
+    "python": "3.12.6 (main, Sep 30 2024, 14:08:47) [Clang 16.0.0 (clang-1600.0.26.3)]",
+    "platform": "macOS-15.0-arm64-arm-64bit",
+    "executable": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/.venv/bin/python"
+  },
+  "summary": {
+    "header": {
+      "integral": "dot",
+      "mode": "massless",
+      "family": "DOT[triangle]",
+      "s": null,
+      "s12": null,
+      "s23": null,
+      "m": 0.0,
+      "gamma_scheme": "oneloop",
+      "prefactor_convention": "pysecdec",
+      "benchmark": "unavailable",
+      "seed": 1,
+      "max_iter": 1,
+      "samples_per_iter": 16384,
+      "batch_size": 8192,
+      "sampling_mode": "qmc",
+      "qmc_shifts": 16,
+      "qmc_korobov_alpha": 3,
+      "target_rel_accuracy_percent": null,
+      "bins": 64,
+      "workers": 10,
+      "jit_compile_evaluators": false,
+      "dual_evaluator_mode": "symbolic-derivatives",
+      "subtraction_backend": "projector-formula",
+      "sector_evaluator_backend": "projector",
+      "IBP_reduce_to_log_endpoint": false,
+      "ibp_power_goal": null,
+      "direct_projector_cache_term_threshold": 54,
+      "direct_projector_cache_override_sectors": 0,
+      "direct_projector_cache_override_signatures": 0,
+      "force_regular_taylor_formulas": false,
+      "regular_taylor_signature_limit": 256,
+      "regular_taylor_formula_volume_limit": 8192,
+      "regular_taylor_formula_axis_limit": 6,
+      "chain_rule_formula_signature_limit": 256,
+      "chain_rule_formula_output_length_limit": 0,
+      "allow_fallback_for_missing_caches": false,
+      "runtime_ready": "all endpoint subtraction and coefficient evaluators pregenerated",
+      "sectors": "all",
+      "stability_threshold": 1e-12,
+      "medium_precision_stability_threshold": 1e-14,
+      "high_precision_stability_threshold": 0.0,
+      "stability_precision": 32,
+      "medium_precision_stability_precision": 100,
+      "high_precision_stability_precision": 1000,
+      "dot_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/triangle.dot"
+    },
+    "symanzik": {
+      "U": "x1+x0+x2",
+      "F": "x0\u00b7x2",
+      "parameter_order": [
+        "x0",
+        "x1",
+        "x2",
+        "s",
+        "mt"
+      ],
+      "parameter_values": [
+        -1.0,
+        0.0
+      ],
+      "dual_shape_summary": {
+        "sector_count_with_shape": 3,
+        "unique_shape_count": 2,
+        "max_entries": 4,
+        "max_rank": 2,
+        "max_total_degree": 2,
+        "preview": [
+          {
+            "rank": 1,
+            "entries": 2,
+            "max_orders": [
+              1
+            ],
+            "max_total_degree": 1,
+            "sector_count": 2
+          },
+          {
+            "rank": 2,
+            "entries": 4,
+            "max_orders": [
+              1,
+              1
+            ],
+            "max_total_degree": 2,
+            "sector_count": 1
+          }
+        ],
+        "preview_limit": 20
+      },
+      "dual_evaluator_mode": "symbolic-derivatives",
+      "formula_cache_dir": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/cache/subtraction_formulae",
+      "dual_evaluator_build_seconds": 0.0001498749479651451,
+      "chain_rule_formula_build_seconds": 0.0,
+      "chain_rule_formula_count": 5,
+      "chain_rule_formulas_from_cache": 5,
+      "chain_rule_formulas_generated": 0,
+      "chain_rule_formula_cache_seconds": 0.005584583850577474,
+      "chain_rule_formula_generation_seconds": 0.0,
+      "chain_rule_formulas_skipped": 0,
+      "chain_rule_formula_output_length_limit": 0,
+      "subtraction_formula_count": 0,
+      "endpoint_projector_formula_count": 2,
+      "endpoint_projector_formulas_from_cache": 2,
+      "endpoint_projector_formulas_generated": 0,
+      "endpoint_projector_formula_cache_seconds": 0.0005758738843724132,
+      "endpoint_projector_formula_generation_seconds": 0.0,
+      "direct_projector_cache_term_threshold": 54,
+      "direct_projector_cache_override_sectors": 0,
+      "direct_projector_cache_override_signatures": 0,
+      "regular_taylor_formula_count": 2,
+      "regular_taylor_formulas_from_cache": 2,
+      "regular_taylor_formulas_generated": 0,
+      "regular_taylor_formula_cache_seconds": 0.0011694170534610748,
+      "regular_taylor_formula_generation_seconds": 0.0,
+      "regular_taylor_formulas_from_curated_cache": 0,
+      "regular_taylor_formulas_skipped": 0,
+      "regular_taylor_formula_policy": "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded",
+      "two_stage_sector_formula_count": 0,
+      "two_stage_sector_formula_build_seconds": 0.0,
+      "explicit_sector_formula_count": 0,
+      "explicit_sector_formula_build_seconds": 0.0,
+      "subtraction_formula_build_seconds": 0.001745290937833488,
+      "parametric": {
+        "loops": 1,
+        "propagator_powers": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "D": "4-2\u00b7\u03b5",
+        "Gamma argument": "0",
+        "U exponent": "-1+2\u00b7\u03b5",
+        "F exponent": "-1-\u03b5",
+        "parameter weights": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "prefactor": "pySecDec Gamma/global factor: -gamma(eps + 1)",
+        "prefactor min order": 0,
+        "prefactor coefficients": [
+          {
+            "re": -1.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.5772156649015329,
+            "im": 0.0
+          },
+          {
+            "re": -0.9890559953279725,
+            "im": 0.0
+          }
+        ],
+        "convention": "FSD coefficients are before convolution with the pySecDec global prefactor"
+      }
+    },
+    "sectors": [
+      {
+        "id": 0,
+        "name": "PSD0",
+        "variables": [
+          "x1",
+          "x2"
+        ],
+        "map": [
+          "x0=1",
+          "x1=x1",
+          "x2=x2"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x2",
+        "u_monomial_powers": [
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          0,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 1,
+        "name": "PSD1",
+        "variables": [
+          "x0",
+          "x2"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=1",
+          "x2=x2"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x0\u00b7x2",
+        "u_monomial_powers": [
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 2,
+        "name": "PSD2",
+        "variables": [
+          "x0",
+          "x1"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=x1",
+          "x2=1"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x0",
+        "u_monomial_powers": [
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      }
+    ],
+    "sector_stats": {
+      "total_sector_count": 3,
+      "count_by_singular_axes": {
+        "1": 2,
+        "2": 1
+      },
+      "count_by_f_monomial": {
+        "(0, 1)": 1,
+        "(1, 1)": 1,
+        "(1, 0)": 1
+      },
+      "count_by_u_monomial": {
+        "(0, 0)": 3
+      },
+      "count_by_endpoint_pole_depth": {
+        "1": 2,
+        "2": 1
+      },
+      "max_integration_dimension": 2,
+      "max_laurent_pole_order": 2
+    },
+    "validation": {
+      "sector_count": 3,
+      "continuous_dimension": 2,
+      "expected_laurent_orders": [
+        "eps^-2",
+        "eps^-1",
+        "eps^0"
+      ],
+      "benchmark_available": false,
+      "kinematic_restrictions": "scalar Euclidean DOT topology; unit propagator powers; no FSD contour deformation",
+      "max_endpoint_taylor_order": 0
+    },
+    "generation_timings": {
+      "headline": [
+        {
+          "name": "Generation U and F polynomial",
+          "seconds": 0.1744825419737026
+        },
+        {
+          "name": "Generating sectors",
+          "seconds": 0.0005147089250385761
+        },
+        {
+          "name": "Generating Symbolica evaluators",
+          "seconds": 0.0024368318263441324
+        }
+      ],
+      "details": [
+        {
+          "name": "DOT parse",
+          "seconds": 0.14163579209707677,
+          "detail": ""
+        },
+        {
+          "name": "kinematics load/evaluation",
+          "seconds": 0.0017774999141693115,
+          "detail": ""
+        },
+        {
+          "name": "pySecDec LoopIntegralFromGraph",
+          "seconds": 0.01791187492199242,
+          "detail": ""
+        },
+        {
+          "name": "U/F extraction",
+          "seconds": 0.013157375040464103,
+          "detail": ""
+        },
+        {
+          "name": "Symbolica scalar evaluator build",
+          "seconds": 0.0004649159964174032,
+          "detail": ""
+        },
+        {
+          "name": "pySecDec sector decomposition",
+          "seconds": 0.00023358396720141172,
+          "detail": "iterative"
+        },
+        {
+          "name": "FSD SectorDefinition conversion",
+          "seconds": 0.0002811249578371644,
+          "detail": "3 sectors"
+        },
+        {
+          "name": "Symbolica sector evaluator build",
+          "seconds": 6.387499161064625e-05,
+          "detail": "3 sectors"
+        },
+        {
+          "name": "Symbolica Taylor evaluator build",
+          "seconds": 9.420898277312517e-05,
+          "detail": "symbolic-derivatives"
+        },
+        {
+          "name": "Symbolica subtraction formula build",
+          "seconds": 0.001745290937833488,
+          "detail": "2 endpoint projector signature(s), 2 regular Taylor signature(s), endpoint cache hits/generated=2/0, regular cache hits/generated=2/0"
+        },
+        {
+          "name": "Symbolica dual evaluator build",
+          "seconds": 6.85409177094698e-05,
+          "detail": "regular Taylor source shapes"
+        }
+      ],
+      "total": 0.17743408272508532
+    },
+    "pysecdec_timings": [
+      {
+        "name": "pySecDec package generation",
+        "seconds": 0.6089768749661744,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec package compile",
+        "seconds": 4.729102750075981,
+        "detail": "make pylink"
+      },
+      {
+        "name": "pySecDec package load",
+        "seconds": 0.0015566250076517463,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec integration",
+        "seconds": 0.04159891698509455,
+        "detail": ""
+      }
+    ]
+  },
+  "target": {
+    "source": "pysecdec",
+    "convention": "pysecdec",
+    "coefficients": [
+      {
+        "re": -1.0,
+        "im": 0.0
+      },
+      {
+        "re": 0.5772156649015208,
+        "im": 0.0
+      },
+      {
+        "re": 0.6558780715203316,
+        "im": 0.0
+      }
+    ],
+    "errors": [
+      {
+        "re": 5.4153706561117053e-17,
+        "im": 0.0
+      },
+      {
+        "re": 9.552462397240993e-15,
+        "im": 0.0
+      },
+      {
+        "re": 6.334985487447034e-14,
+        "im": 0.0
+      }
+    ],
+    "metadata": {
+      "workdir": ".pysecdec_build",
+      "orders": [
+        -2,
+        -1,
+        0
+      ],
+      "generated_path": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/outputs/dot_triangle_pysecdec_target.json"
+    }
+  },
+  "pysecdec": {
+    "coeffs": [
+      {
+        "re": -1.0,
+        "im": 0.0
+      },
+      {
+        "re": 0.5772156649015208,
+        "im": 0.0
+      },
+      {
+        "re": 0.6558780715203316,
+        "im": 0.0
+      }
+    ],
+    "errors": [
+      {
+        "re": 5.4153706561117053e-17,
+        "im": 0.0
+      },
+      {
+        "re": 9.552462397240993e-15,
+        "im": 0.0
+      },
+      {
+        "re": 6.334985487447034e-14,
+        "im": 0.0
+      }
+    ],
+    "orders": [
+      -2,
+      -1,
+      0
+    ],
+    "timings": [
+      {
+        "name": "pySecDec package generation",
+        "seconds": 0.6089768749661744,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec package compile",
+        "seconds": 4.729102750075981,
+        "detail": "make pylink"
+      },
+      {
+        "name": "pySecDec package load",
+        "seconds": 0.0015566250076517463,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec integration",
+        "seconds": 0.04159891698509455,
+        "detail": ""
+      }
+    ]
+  }
+}

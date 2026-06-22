@@ -20,6 +20,7 @@ import numpy as np
 from symbolica import E, S
 
 from definitions import HotPathTiming, IntegralRequest
+from evaluator_utils import build_evaluator, evaluate_f64
 from utils import decimal_complex_with_precision, decimal_with_precision
 
 
@@ -124,6 +125,8 @@ class SectorDefinition:
     subtraction_type: str
     description: str
     jit_compile_evaluators: bool = False
+    evaluator_compile_mode: str = "jit"
+    real_evaluator: bool = True
     u_monomial_powers: list[int] | None = None
     measure_monomial_powers: list[float] | None = None
     numerator_monomial_powers: list[float] | None = None
@@ -273,11 +276,21 @@ class SectorDefinition:
         # Runtime map/Jacobian evaluation is done through generated callbacks.
         # These expressions are never substituted into the U/F expressions.
         self._map_evaluators = [
-            expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
-            for expr in self.map_exprs
+            build_evaluator(
+                expr,
+                params,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.name}_map_{index}",
+            )
+            for index, expr in enumerate(self.map_exprs)
         ]
-        self._jacobian_evaluator = self.regular_jacobian_expr.evaluator(
-            params, jit_compile=self.jit_compile_evaluators
+        self._jacobian_evaluator = build_evaluator(
+            self.regular_jacobian_expr,
+            params,
+            evaluator_compile_mode=self.evaluator_compile_mode,
+            real_evaluator=self.real_evaluator,
+            name_hint=f"{self.name}_jacobian",
         )
         self._map_dual_evaluators = []
         self._map_dual_evaluators_by_shape = {}
@@ -289,16 +302,25 @@ class SectorDefinition:
         self._numerator_evaluator = None
         self._numerator_eps_evaluators = []
         if self.has_nontrivial_numerator():
-            self._numerator_evaluator = self.numerator_expr.evaluator(
+            self._numerator_evaluator = build_evaluator(
+                self.numerator_expr,
                 params,
-                jit_compile=self.jit_compile_evaluators,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.name}_numerator",
             )
         for expr in self.numerator_eps_exprs or [E("1")]:
             if str(expr) == "0":
                 self._numerator_eps_evaluators.append(None)
                 continue
             self._numerator_eps_evaluators.append(
-                expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+                build_evaluator(
+                    expr,
+                    params,
+                    evaluator_compile_mode=self.evaluator_compile_mode,
+                    real_evaluator=self.real_evaluator,
+                    name_hint=f"{self.name}_numerator_eps",
+                )
             )
         self._evaluators_prepared = True
         if include_dual:
@@ -335,7 +357,7 @@ class SectorDefinition:
     def _timed_evaluate_complex(self, evaluator: Any, rows: np.ndarray, timing: HotPathTiming | None) -> Any:
         """Evaluate a Symbolica callback with native complex inputs."""
         start = time.perf_counter()
-        values = evaluator.evaluate_complex(rows)
+        values = evaluate_f64(evaluator, rows, real_evaluator=self.real_evaluator)
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return values
@@ -349,7 +371,19 @@ class SectorDefinition:
     ) -> list[tuple[Any, Any]]:
         """Evaluate one complex row with Symbolica multiprecision arithmetic."""
         start = time.perf_counter()
-        values = evaluator.evaluate_complex_with_prec(row, precision_digits)
+        if self.real_evaluator:
+            real_row = [
+                decimal_with_precision(value[0], precision_digits)
+                if isinstance(value, tuple)
+                else decimal_with_precision(value, precision_digits)
+                for value in row
+            ]
+            values = [
+                (decimal_with_precision(value, precision_digits), _decimal_real(0.0, precision_digits))
+                for value in evaluator.evaluate_with_prec(real_row, precision_digits)
+            ]
+        else:
+            values = evaluator.evaluate_complex_with_prec(row, precision_digits)
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return [
@@ -544,9 +578,12 @@ class SectorDefinition:
         if self._numerator_evaluator is None:
             if self.strict_prepared_bundle:
                 raise RuntimeError(f"{self.name}: missing prepared numerator evaluator")
-            self._numerator_evaluator = self.numerator_expr.evaluator(
+            self._numerator_evaluator = build_evaluator(
+                self.numerator_expr,
                 _symbols(self.variable_names),
-                jit_compile=self.jit_compile_evaluators,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.name}_numerator",
             )
         values = self._timed_evaluate(self._numerator_evaluator, rows, timing)
         return np.asarray(values, dtype=np.complex128)[:, 0]
@@ -633,7 +670,13 @@ class SectorDefinition:
                 if str(expr) == "0":
                     evaluators.append(None)
                     continue
-                evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+                evaluator = build_evaluator(
+                    expr,
+                    params,
+                    evaluator_compile_mode="eager",
+                    real_evaluator=self.real_evaluator,
+                    name_hint=f"{self.name}_numerator_eps_dual",
+                )
                 evaluator.dualize([list(mi) for mi in dual_shape])
                 evaluators.append(evaluator)
             self._numerator_eps_dual_evaluators_by_shape[key] = evaluators
@@ -666,9 +709,12 @@ class SectorDefinition:
             if self._numerator_evaluator is None:
                 if self.strict_prepared_bundle:
                     raise RuntimeError(f"{self.name}: missing prepared numerator evaluator")
-                self._numerator_evaluator = self.numerator_expr.evaluator(
+                self._numerator_evaluator = build_evaluator(
+                    self.numerator_expr,
                     _symbols(self.variable_names),
-                    jit_compile=self.jit_compile_evaluators,
+                    evaluator_compile_mode=self.evaluator_compile_mode,
+                    real_evaluator=self.real_evaluator,
+                    name_hint=f"{self.name}_numerator",
                 )
             row = [_decimal_complex(value, precision_digits) for value in np.asarray(y, dtype=float)]
             return self._timed_evaluate_complex_with_prec(
@@ -749,7 +795,13 @@ class SectorDefinition:
                 if str(expr) == "0":
                     evaluators.append(None)
                     continue
-                evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+                evaluator = build_evaluator(
+                    expr,
+                    params,
+                    evaluator_compile_mode="eager",
+                    real_evaluator=self.real_evaluator,
+                    name_hint=f"{self.name}_numerator_eps_dual",
+                )
                 evaluator.dualize([list(mi) for mi in dual_shape])
                 evaluators.append(evaluator)
             self._numerator_eps_dual_evaluators_by_shape[key] = evaluators
@@ -861,7 +913,13 @@ class SectorDefinition:
         params = _symbols(self.variable_names)
         evaluators: list[Any] = []
         for expr in self.map_exprs:
-            evaluator = expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+            evaluator = build_evaluator(
+                expr,
+                params,
+                evaluator_compile_mode="eager",
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.name}_map_dual",
+            )
             evaluator.dualize([list(mi) for mi in dual_shape])
             evaluators.append(evaluator)
         self._map_dual_evaluators_by_shape[key] = evaluators
@@ -883,9 +941,12 @@ class SectorDefinition:
         if self.strict_prepared_bundle:
             raise RuntimeError(f"{self.name}: missing prepared Jacobian dual evaluator for shape {key}")
         params = _symbols(self.variable_names)
-        evaluator = self.regular_jacobian_expr.evaluator(
+        evaluator = build_evaluator(
+            self.regular_jacobian_expr,
             params,
-            jit_compile=self.jit_compile_evaluators,
+            evaluator_compile_mode="eager",
+            real_evaluator=self.real_evaluator,
+            name_hint=f"{self.name}_jacobian_dual",
         )
         evaluator.dualize([list(mi) for mi in dual_shape])
         if key == tuple(self.dual_shape):
@@ -907,9 +968,12 @@ class SectorDefinition:
         if self.strict_prepared_bundle:
             raise RuntimeError(f"{self.name}: missing prepared numerator dual evaluator for shape {key}")
         params = _symbols(self.variable_names)
-        evaluator = self.numerator_expr.evaluator(
+        evaluator = build_evaluator(
+            self.numerator_expr,
             params,
-            jit_compile=self.jit_compile_evaluators,
+            evaluator_compile_mode="eager",
+            real_evaluator=self.real_evaluator,
+            name_hint=f"{self.name}_numerator_dual",
         )
         evaluator.dualize([list(mi) for mi in dual_shape])
         if key == tuple(self.dual_shape):
@@ -1475,6 +1539,9 @@ def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
                 jit_compile_evaluators=request.jit_compile_evaluators,
             ),
         ]
+        for sector in sectors:
+            sector.evaluator_compile_mode = request.evaluator_compile_mode
+            sector.real_evaluator = request.real_evaluator
         prepare_sector_evaluators(sectors)
         return sectors
     if request.integral == "box":
@@ -1482,6 +1549,9 @@ def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
             sectors = _box_massless_sectors(request.jit_compile_evaluators)
         else:
             sectors = [_box_primary_sector(i, request.jit_compile_evaluators) for i in range(4)]
+        for sector in sectors:
+            sector.evaluator_compile_mode = request.evaluator_compile_mode
+            sector.real_evaluator = request.real_evaluator
         prepare_sector_evaluators(sectors)
         return sectors
     raise ValueError(f"unsupported integral {request.integral!r}")

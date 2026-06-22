@@ -194,6 +194,8 @@ def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
         request.prefactor_convention,
         request.numerator_reducer,
         request.jit_compile_evaluators,
+        request.evaluator_compile_mode,
+        request.real_evaluator,
         request.dual_evaluator_mode,
         request.subtraction_backend,
         request.sector_evaluator_backend,

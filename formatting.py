@@ -167,10 +167,17 @@ def summary_data(
         "max_iter": request.max_iter,
         "samples_per_iter": request.samples_per_iter,
         "batch_size": request.batch_size,
+        "sampling_mode": request.sampling_mode,
+        "qmc_shifts": request.qmc_shifts if request.sampling_mode == "qmc" else "n/a",
+        "qmc_korobov_alpha": request.qmc_korobov_alpha
+        if request.sampling_mode == "qmc"
+        else "n/a",
         "target_rel_accuracy_percent": request.target_rel_accuracy,
         "bins": request.bins,
         "workers": request.workers,
         "jit_compile_evaluators": request.jit_compile_evaluators,
+        "evaluator_compile_mode": request.evaluator_compile_mode,
+        "real_evaluator": request.real_evaluator,
         "dual_evaluator_mode": request.dual_evaluator_mode,
         "subtraction_backend": request.subtraction_backend,
         "sector_evaluator_backend": request.sector_evaluator_backend,

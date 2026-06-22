@@ -36,6 +36,12 @@ from cache_utils import (
     formula_cache_read_roots,
     mirror_cache_entry_to_primary,
 )
+from evaluator_utils import (
+    build_evaluator,
+    build_evaluator_multiple,
+    deserialize_evaluator,
+    evaluator_mode_from_jit,
+)
 from symbolica import E, Evaluator, Expression, Replacement, S
 
 
@@ -176,10 +182,14 @@ def _build_evaluator_multiple(
                 direct_translation=kwargs.get("direct_translation", False),
             )
         try:
-            evaluator = Expression.evaluator_multiple(
+            evaluator_kwargs = dict(kwargs)
+            mode = evaluator_mode_from_jit(bool(evaluator_kwargs.pop("jit_compile", False)))
+            evaluator = build_evaluator_multiple(
                 expressions,
                 input_symbols,
-                **kwargs,
+                evaluator_compile_mode=mode,
+                real_evaluator=True,
+                **evaluator_kwargs,
             )
             if monitor is not None:
                 monitor.emit(
@@ -284,7 +294,15 @@ def _build_evaluator_multiple(
         for attempt_index in range(preferred_attempt, len(scalar_attempts)):
             label, scalar_kwargs = scalar_attempts[attempt_index]
             try:
-                built_evaluator = expr.evaluator(input_symbols, **scalar_kwargs)
+                evaluator_kwargs = dict(scalar_kwargs)
+                mode = evaluator_mode_from_jit(bool(evaluator_kwargs.pop("jit_compile", False)))
+                built_evaluator = build_evaluator(
+                    expr,
+                    input_symbols,
+                    evaluator_compile_mode=mode,
+                    real_evaluator=True,
+                    **evaluator_kwargs,
+                )
                 if attempt_index != preferred_attempt:
                     preferred_attempt = attempt_index
                     if monitor is not None:
@@ -427,7 +445,7 @@ class _RegularCacheEvaluatorRef:
     def _load(self) -> Any:
         if self._evaluator is None:
             raw = self.path.read_bytes()
-            self._evaluator = Evaluator.load(
+            self._evaluator = deserialize_evaluator(
                 gzip.decompress(raw) if self.path.suffix == ".gz" else raw
             )
         return self._evaluator
@@ -459,7 +477,13 @@ def build_subtraction_formula_symbolica(
     ctx = _FormulaContext(topology, sector, signature)
     outputs = ctx.build_outputs()
     evaluators = [
-        expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
+        build_evaluator(
+            expr,
+            ctx.input_symbols,
+            evaluator_compile_mode=topology.evaluator_compile_mode,
+            real_evaluator=topology.real_evaluator,
+            name_hint="subtraction_formula",
+        )
         for expr in outputs
     ]
     return formula_class(
@@ -523,7 +547,13 @@ def build_endpoint_projector_formula_symbolica(
         )
         outputs = ctx.build_outputs()
         evaluators = [
-            expr.evaluator(ctx.input_symbols, jit_compile=topology.jit_compile_evaluators)
+            build_evaluator(
+                expr,
+                ctx.input_symbols,
+                evaluator_compile_mode=topology.evaluator_compile_mode,
+                real_evaluator=topology.real_evaluator,
+                name_hint="endpoint_projector",
+            )
             for expr in outputs
         ]
         formula = formula_class(
@@ -664,9 +694,12 @@ def _build_regular_taylor_dualized_formula(
         dual_shape.insert(0, zero)
     dual_index = {multi: index for index, multi in enumerate(dual_shape)}
     output_indices = [dual_index[target] for target in requested_dual_shape]
-    evaluator = expr.evaluator(
+    evaluator = build_evaluator(
+        expr,
         evaluator_symbols,
-        jit_compile=topology.jit_compile_evaluators,
+        evaluator_compile_mode="eager",
+        real_evaluator=topology.real_evaluator,
+        name_hint="regular_taylor_dual",
     )
     evaluator.dualize([list(mi) for mi in dual_shape])
     return formula_class(
@@ -1088,7 +1121,13 @@ def _load_endpoint_projector_formula_from_cache(
             input_symbols = [S(name) for name in input_names]
             outputs = [E(text) for text in data["output_expressions"]]
             evaluators = [
-                expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
+                build_evaluator(
+                    expr,
+                    input_symbols,
+                    evaluator_compile_mode=topology.evaluator_compile_mode,
+                    real_evaluator=topology.real_evaluator,
+                    name_hint="regular_taylor_cache",
+                )
                 for expr in outputs
             ]
             coefficient_layout = [
@@ -1214,9 +1253,12 @@ def _load_regular_taylor_formula_from_cache(
                                 "regular Taylor cache has no scalar expression fallback"
                             )
                         outputs = [E(str(data["scalar_expression"]))]
-                        evaluator = outputs[0].evaluator(
+                        evaluator = build_evaluator(
+                            outputs[0],
                             evaluator_input_symbols,
-                            jit_compile=topology.jit_compile_evaluators,
+                            evaluator_compile_mode="eager",
+                            real_evaluator=topology.real_evaluator,
+                            name_hint="regular_taylor_cache_dual",
                         )
                         evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
                         evaluators = [evaluator]
@@ -1382,7 +1424,9 @@ def _write_regular_evaluator_sidecars(path: Path, evaluators: list[Any]) -> list
         )
         try:
             with os.fdopen(fd, "wb") as handle:
-                handle.write(gzip.compress(evaluator.save(), compresslevel=6))
+                from evaluator_utils import serialize_evaluator
+
+                handle.write(gzip.compress(serialize_evaluator(evaluator), compresslevel=6))
             os.replace(tmp_name, destination)
         finally:
             if os.path.exists(tmp_name):

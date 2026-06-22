@@ -97,6 +97,8 @@ class IntegralRequest:
     bins: int
     workers: int
     jit_compile_evaluators: bool
+    evaluator_compile_mode: str
+    real_evaluator: bool
     dual_evaluator_mode: str
     subtraction_backend: str
     ibp_reduce_to_log_endpoint: bool
@@ -143,6 +145,8 @@ class IntegralRequest:
     test_boundary_retry_scales: tuple[float, ...] = (1.0e-2,)
     test_boundary_max_simultaneous_endpoint_approaches: int | None = None
     benchmark_samples_per_sector: int = 5
+    qmc_shifts: int = 16
+    qmc_korobov_alpha: int = 3
 
 
 @dataclass(frozen=True)

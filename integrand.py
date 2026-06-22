@@ -39,6 +39,15 @@ from cache_utils import (
     mirror_cache_entry_to_primary,
 )
 from definitions import EpsilonExpansion, HotPathTiming, IntegralRequest, ParametricRepresentation
+from evaluator_utils import (
+    build_evaluator,
+    build_evaluator_multiple,
+    evaluate_f64,
+    evaluate_precise,
+    evaluator_mode_from_jit,
+    deserialize_evaluator,
+    serialize_evaluator,
+)
 from sectors_generator import SectorDefinition
 from subtraction_formula import (
     build_endpoint_projector_formula_symbolica,
@@ -300,7 +309,9 @@ class _SerializedEvaluatorRef:
 
     def _evaluator(self) -> Any:
         if self._loaded is None:
-            self._loaded = Evaluator.load(self._raw_bytes())
+            from evaluator_utils import deserialize_evaluator
+
+            self._loaded = deserialize_evaluator(self._raw_bytes())
         return self._loaded
 
     def evaluate(self, *args: Any, **kwargs: Any) -> Any:
@@ -384,6 +395,8 @@ class TopologyDefinition:
     global_prefactor_coeffs: list[complex] | None = None
     global_prefactor_min_order: int = 0
     jit_compile_evaluators: bool = False
+    evaluator_compile_mode: str = "jit"
+    real_evaluator: bool = True
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
     ibp_power_goal: int | None = None
@@ -514,8 +527,20 @@ class TopologyDefinition:
             self._u_evaluator = None
             self._f_evaluator = None
         else:
-            self._u_evaluator = self.u_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
-            self._f_evaluator = self.f_expr.evaluator(params, jit_compile=self.jit_compile_evaluators)
+            self._u_evaluator = build_evaluator(
+                self.u_expr,
+                params,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.family}_U",
+            )
+            self._f_evaluator = build_evaluator(
+                self.f_expr,
+                params,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.family}_F",
+            )
         if self.parametric_representation is None:
             propagator_powers = tuple(1.0 for _ in self.x_names)
             self.parametric_representation = ParametricRepresentation(
@@ -682,7 +707,11 @@ class TopologyDefinition:
     ) -> Any:
         """Evaluate a Symbolica callback with native complex inputs."""
         start = time.perf_counter()
-        values = evaluator.evaluate_complex(np.ascontiguousarray(rows))
+        values = evaluate_f64(
+            evaluator,
+            np.ascontiguousarray(rows),
+            real_evaluator=self.real_evaluator,
+        )
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return values
@@ -696,7 +725,26 @@ class TopologyDefinition:
     ) -> list[ComplexPrecise]:
         """Evaluate one Symbolica callback with arbitrary-precision complex inputs."""
         start = time.perf_counter()
-        values = evaluator.evaluate_complex_with_prec(row, precision_digits)
+        if self.real_evaluator:
+            real_row = [
+                decimal_with_precision(value[0], precision_digits)
+                if isinstance(value, tuple)
+                else decimal_with_precision(value, precision_digits)
+                for value in row
+            ]
+            raw_values = evaluate_precise(
+                evaluator,
+                real_row,
+                precision_digits,
+                real_evaluator=True,
+            )
+            values = [
+                (decimal_with_precision(value, precision_digits), Decimal(0))
+                for result_row in raw_values
+                for value in (result_row if isinstance(result_row, (list, tuple)) else [result_row])
+            ]
+        else:
+            values = evaluator.evaluate_complex_with_prec(row, precision_digits)
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return [
@@ -747,7 +795,7 @@ class TopologyDefinition:
                     cache[key] = evaluator
                     return evaluator
             start = time.perf_counter()
-            evaluator = copy.copy(scalar_evaluator)
+            evaluator = copy.copy(getattr(scalar_evaluator, "source_evaluator", scalar_evaluator))
             evaluator.dualize([list(mi) for mi in dual_shape])
             if self.streaming_evaluator_cache_dir:
                 path = self._stream_dual_evaluator(evaluator, label, key)
@@ -778,7 +826,7 @@ class TopologyDefinition:
         path = self._stream_dual_evaluator_path(label, dual_shape)
         if not path.is_file():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(gzip.compress(evaluator.save(), compresslevel=6))
+            path.write_bytes(gzip.compress(serialize_evaluator(evaluator), compresslevel=6))
         return path
 
     def _stream_dual_evaluator_path(
@@ -2347,10 +2395,12 @@ class TopologyDefinition:
             expressions.append(derivative_expr)
         indices_by_order[max_total] = prepared
         if prepared:
-            multi_cache[tuple(prepared)] = Expression.evaluator_multiple(
+            multi_cache[tuple(prepared)] = build_evaluator_multiple(
                 expressions,
                 params,
-                jit_compile=self.jit_compile_evaluators,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.family}_{polynomial}_derivatives_{max_total}",
             )
         self.dual_evaluator_build_seconds += time.perf_counter() - start
 
@@ -2397,9 +2447,12 @@ class TopologyDefinition:
                     raise KeyError(f"{polynomial} derivative {multi_index} is zero")
                 expr_cache[multi_index] = derivative_expr
             params = [S(name) for name in [*self.x_names, *self.parameter_names]]
-            evaluator = derivative_expr.evaluator(
+            evaluator = build_evaluator(
+                derivative_expr,
                 params,
-                jit_compile=self.jit_compile_evaluators,
+                evaluator_compile_mode=self.evaluator_compile_mode,
+                real_evaluator=self.real_evaluator,
+                name_hint=f"{self.family}_{polynomial}_derivative",
             )
             cache[multi_index] = evaluator
         return evaluator
@@ -2439,10 +2492,12 @@ class TopologyDefinition:
                 expr_cache[multi_index] = derivative_expr
             expressions.append(derivative_expr)
         params = [S(name) for name in [*self.x_names, *self.parameter_names]]
-        evaluator = Expression.evaluator_multiple(
+        evaluator = build_evaluator_multiple(
             expressions,
             params,
-            jit_compile=self.jit_compile_evaluators,
+            evaluator_compile_mode=self.evaluator_compile_mode,
+            real_evaluator=self.real_evaluator,
+            name_hint=f"{self.family}_{polynomial}_derivative_multi",
         )
         multi_cache[key] = evaluator
         return evaluator
@@ -2491,7 +2546,11 @@ class TopologyDefinition:
             evaluator = self._symbolic_derivative_multi_evaluator(polynomial, derivative_indices)
         start = time.perf_counter()
         matrix = np.asarray(
-            evaluator.evaluate_complex(np.ascontiguousarray(rows)),
+            evaluate_f64(
+                evaluator,
+                np.ascontiguousarray(rows),
+                real_evaluator=self.real_evaluator,
+            ),
             dtype=np.complex128,
         )
         if timing is not None:
@@ -2934,17 +2993,23 @@ class TopologyDefinition:
                 f"jit_compile={evaluator_kwargs.get('jit_compile')}",
                 build_start=build_start,
             )
-            evaluators = (
-                [
-                    Expression.evaluator_multiple(
+            if output_expressions:
+                evaluator_kwargs_for_build = dict(evaluator_kwargs)
+                mode = evaluator_mode_from_jit(
+                    bool(evaluator_kwargs_for_build.pop("jit_compile", False))
+                )
+                evaluators = [
+                    build_evaluator_multiple(
                         output_expressions,
                         input_symbols,
-                        **evaluator_kwargs,
+                        evaluator_compile_mode=mode,
+                        real_evaluator=self.real_evaluator,
+                        name_hint=f"{self.family}_chain_rule",
+                        **evaluator_kwargs_for_build,
                     )
                 ]
-                if output_expressions
-                else []
-            )
+            else:
+                evaluators = []
             evaluator_seconds = time.perf_counter() - evaluator_start
             _chain_rule_monitor(
                 f"{signature_id} evaluator_done source={source} "
@@ -3469,18 +3534,20 @@ class TopologyDefinition:
         """Evaluate shared x-space derivative callbacks at one precise point."""
         row: ComplexPreciseRow = list(x0)
         row.extend(_decimal_complex(value, precision_digits) for value in self.parameter_values)
-        values: dict[tuple[int, ...], ComplexPrecise] = {}
-        for multi_index in derivative_indices:
-            evaluator = self._symbolic_derivative_evaluator(polynomial, multi_index)
-            start = time.perf_counter()
-            result = evaluator.evaluate_complex_with_prec(row, precision_digits)[0]
-            if timing is not None:
-                timing.add_eval(time.perf_counter() - start)
-            values[multi_index] = (
+        if not derivative_indices:
+            return {}
+        evaluator = self._symbolic_derivative_multi_evaluator(polynomial, derivative_indices)
+        start = time.perf_counter()
+        results = evaluator.evaluate_complex_with_prec(row, precision_digits)
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return {
+            tuple(multi_index): (
                 decimal_with_precision(result[0], precision_digits),
                 decimal_with_precision(result[1], precision_digits),
             )
-        return values
+            for multi_index, result in zip(derivative_indices, results, strict=True)
+        }
 
     def _symbolic_derivative_taylor_complex_prec(
         self,
@@ -3881,6 +3948,8 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
                 convention_description="sector integrals are accumulated before the global prefactor/convention shift",
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
+            evaluator_compile_mode=request.evaluator_compile_mode,
+            real_evaluator=request.real_evaluator,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,
@@ -3913,6 +3982,8 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
                 convention_description="sector integrals are accumulated before the global prefactor/convention shift",
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
+            evaluator_compile_mode=request.evaluator_compile_mode,
+            real_evaluator=request.real_evaluator,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,
@@ -5951,7 +6022,7 @@ def _write_chain_rule_formula_to_cache(formula: ChainRuleFormulaDefinition) -> N
             start = time.perf_counter()
             _chain_rule_monitor(f"{signature_id} evaluator_save_start index={index}")
             name = _chain_rule_evaluator_cache_name(path, index)
-            raw_bytes = evaluator.save()
+            raw_bytes = serialize_evaluator(evaluator)
             (path.parent / name).write_bytes(gzip.compress(raw_bytes, compresslevel=6))
             sidecar_names.append(name)
             _chain_rule_monitor(
@@ -6060,7 +6131,7 @@ def _load_chain_rule_formula_from_cache(
                 continue
             evaluators = (
                 [
-                    Evaluator.load(
+                    deserialize_evaluator(
                         gzip.decompress(path.read_bytes())
                         if path.suffix == ".gz"
                         else path.read_bytes()
@@ -6979,8 +7050,8 @@ def _write_two_stage_sector_formula_to_cache(
         path.parent.mkdir(parents=True, exist_ok=True)
         source_path = _two_stage_sector_cache_sidecar(path, "source")
         assembler_path = _two_stage_sector_cache_sidecar(path, "assembler")
-        source_path.write_bytes(gzip.compress(formula.source_evaluator.save(), compresslevel=6))
-        assembler_path.write_bytes(gzip.compress(formula.assembler_evaluator.save(), compresslevel=6))
+        source_path.write_bytes(gzip.compress(serialize_evaluator(formula.source_evaluator), compresslevel=6))
+        assembler_path.write_bytes(gzip.compress(serialize_evaluator(formula.assembler_evaluator), compresslevel=6))
         payload = {
             "signature": _chain_rule_jsonable(signature),
             "sector_name": sector.name,
@@ -7062,10 +7133,12 @@ def build_two_stage_sector_formula(
             total=int(progress_total) if progress_total else 1,
             detail=f"{sector.name} assembler evaluator",
         )
-    assembler_evaluator = Expression.evaluator_multiple(
+    assembler_evaluator = build_evaluator_multiple(
         assembler_outputs,
         [S(name) for name in assembler_input_names],
-        jit_compile=topology.jit_compile_evaluators,
+        evaluator_compile_mode=topology.evaluator_compile_mode,
+        real_evaluator=topology.real_evaluator,
+        name_hint=f"{sector.name}_two_stage_assembler",
     )
     assembler_eval_seconds = time.perf_counter() - assembler_eval_start
 
@@ -7078,14 +7151,16 @@ def build_two_stage_sector_formula(
             total=int(progress_total) if progress_total else 1,
             detail=f"{sector.name} source evaluator",
         )
-    source_evaluator = Expression.evaluator_multiple(
+    source_evaluator = build_evaluator_multiple(
         source_outputs,
         [S(f"y{axis}") for axis in range(sector.integration_dim)],
-        jit_compile=topology.jit_compile_evaluators,
+        evaluator_compile_mode=topology.evaluator_compile_mode,
+        real_evaluator=topology.real_evaluator,
+        name_hint=f"{sector.name}_two_stage_source",
     )
     source_eval_seconds = time.perf_counter() - source_eval_start
-    source_bytes = source_evaluator.save()
-    assembler_bytes = assembler_evaluator.save()
+    source_bytes = serialize_evaluator(source_evaluator)
+    assembler_bytes = serialize_evaluator(assembler_evaluator)
     formula = TwoStageSectorFormulaDefinition(
         sector_name=sector.name,
         source_input_names=[f"y{axis}" for axis in range(sector.integration_dim)],
@@ -7248,13 +7323,15 @@ def build_explicit_sector_formula(
             total=int(progress_total) if progress_total else 1,
             detail=f"{sector.name} explicit evaluator",
         )
-    evaluator = Expression.evaluator_multiple(
+    evaluator = build_evaluator_multiple(
         outputs,
         [S(f"y{axis}") for axis in range(sector.integration_dim)],
-        jit_compile=topology.jit_compile_evaluators,
+        evaluator_compile_mode=topology.evaluator_compile_mode,
+        real_evaluator=topology.real_evaluator,
+        name_hint=f"{sector.name}_explicit",
     )
     eval_seconds = time.perf_counter() - eval_start
-    evaluator_bytes = evaluator.save()
+    evaluator_bytes = serialize_evaluator(evaluator)
     return ExplicitSectorFormulaDefinition(
         sector_name=sector.name,
         input_names=[f"y{axis}" for axis in range(sector.integration_dim)],
@@ -8168,8 +8245,14 @@ def build_subtraction_formula_legacy(
                             )
 
     evaluators = [
-        expr.evaluator(input_symbols, jit_compile=topology.jit_compile_evaluators)
-        for expr in outputs
+        build_evaluator(
+            expr,
+            input_symbols,
+            evaluator_compile_mode=topology.evaluator_compile_mode,
+            real_evaluator=topology.real_evaluator,
+            name_hint=f"{topology.family}_subtraction_{index}",
+        )
+        for index, expr in enumerate(outputs)
     ]
     return SubtractionFormulaDefinition(
         signature=signature,

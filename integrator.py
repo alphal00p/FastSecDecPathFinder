@@ -149,6 +149,36 @@ class DemocraticReducedBatch:
     timing: HotPathTiming
 
 
+@dataclass(frozen=True)
+class QmcBatch:
+    """One Korobov-transformed lattice chunk for one sector.
+
+    ``shift_indices`` labels which randomized lattice shift produced each row.
+    A QMC error estimate must be formed from full shift estimates rather than
+    from the deterministic lattice points themselves.
+    """
+
+    sector_position: int
+    sector_id: int
+    coords: np.ndarray
+    weights: np.ndarray
+    shift_indices: np.ndarray
+    shift_count: int
+
+
+@dataclass(frozen=True)
+class QmcReducedBatch:
+    """Per-shift sums for one QMC sector chunk returned by a worker."""
+
+    sector_id: int
+    count: int
+    counts_by_shift: np.ndarray
+    sums_by_shift: np.ndarray
+    max_abs: np.ndarray
+    precision_counts: np.ndarray
+    timing: HotPathTiming
+
+
 _WORKER_SECTORS: list[SectorDefinition] | None = None
 _WORKER_PROCESSOR: SectorProcessor | None = None
 _PARENT_TOPOLOGY: TopologyDefinition | None = None
@@ -234,6 +264,13 @@ def _evaluate_democratic_batch_worker(batch: DemocraticBatch) -> DemocraticReduc
     if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
         raise RuntimeError("worker processor not initialized")
     return _evaluate_democratic_batch(_WORKER_PROCESSOR, _WORKER_SECTORS, batch)
+
+
+def _evaluate_qmc_batch_worker(batch: QmcBatch) -> QmcReducedBatch:
+    """Evaluate one QMC sector chunk in a worker process."""
+    if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
+        raise RuntimeError("worker processor not initialized")
+    return _evaluate_qmc_batch(_WORKER_PROCESSOR, _WORKER_SECTORS, batch)
 
 
 def _evaluate_records(
@@ -373,6 +410,63 @@ def _evaluate_democratic_batch(
     )
 
 
+def _evaluate_qmc_batch(
+    processor: SectorProcessor,
+    sectors: list[SectorDefinition],
+    batch: QmcBatch,
+) -> QmcReducedBatch:
+    """Evaluate and reduce one Korobov-transformed QMC sector chunk."""
+    hot_start = time.perf_counter()
+    timing = HotPathTiming()
+    sector = sectors[int(batch.sector_position)]
+    coords = np.asarray(batch.coords, dtype=float)
+    weights = np.asarray(batch.weights, dtype=float)
+    shift_indices = np.asarray(batch.shift_indices, dtype=np.int64)
+    coeff_count = processor.topology.coefficient_count
+    shift_count = int(batch.shift_count)
+    if coords.size == 0:
+        return QmcReducedBatch(
+            sector_id=int(batch.sector_id),
+            count=0,
+            counts_by_shift=np.zeros(shift_count, dtype=np.int64),
+            sums_by_shift=np.zeros((shift_count, coeff_count), dtype=np.complex128),
+            max_abs=np.zeros(coeff_count, dtype=float),
+            precision_counts=np.zeros(4, dtype=np.int64),
+            timing=timing,
+        )
+
+    coeffs, _training, sector_timing = processor.evaluate_batch(sector, coords)
+    timing.absorb(sector_timing)
+    weighted = np.asarray(coeffs, dtype=np.complex128) * weights[:, np.newaxis]
+    sums_by_shift = np.zeros((shift_count, coeff_count), dtype=np.complex128)
+    counts_by_shift = np.bincount(shift_indices, minlength=shift_count).astype(np.int64)
+    for coeff_index in range(coeff_count):
+        values = weighted[:, coeff_index]
+        sums_by_shift[:, coeff_index] = (
+            np.bincount(shift_indices, weights=values.real, minlength=shift_count)
+            + 1j * np.bincount(shift_indices, weights=values.imag, minlength=shift_count)
+        )
+    hot_elapsed = time.perf_counter() - hot_start
+    timing.add_python(hot_elapsed - timing.total_seconds)
+    return QmcReducedBatch(
+        sector_id=int(batch.sector_id),
+        count=int(coords.shape[0]),
+        counts_by_shift=counts_by_shift,
+        sums_by_shift=sums_by_shift,
+        max_abs=np.max(np.abs(weighted), axis=0),
+        precision_counts=np.asarray(
+            [
+                sector_timing.ordinary_precision_samples,
+                sector_timing.stability_precision_samples,
+                sector_timing.medium_precision_samples,
+                sector_timing.high_precision_samples,
+            ],
+            dtype=np.int64,
+        ),
+        timing=timing,
+    )
+
+
 def split_evaluation_batches(
     indices: np.ndarray,
     sector_indices: np.ndarray,
@@ -444,6 +538,81 @@ def democratic_batches(
             )
             remaining_by_sector[sector_position] -= count
     return batches
+
+
+def korobov_transform(points: np.ndarray, alpha: int) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the product Korobov periodization map to QMC points.
+
+    For integer ``alpha`` the one-dimensional map is the polynomial
+
+      phi(y) = C int_0^y u^alpha (1-u)^alpha du,
+
+    with ``C = 1/B(alpha+1, alpha+1)``.  The returned weight is the product of
+    ``phi'(y_j)`` over dimensions, which must multiply the sector integrand.
+    """
+    a = int(alpha)
+    if a < 1:
+        raise ValueError("Korobov alpha must be positive")
+    y = np.asarray(points, dtype=float)
+    y_clipped = np.clip(y, 0.0, 1.0)
+    norm = float(math.factorial(2 * a + 1) / (math.factorial(a) * math.factorial(a)))
+    phi = np.zeros_like(y_clipped)
+    for k in range(a + 1):
+        coefficient = norm * ((-1.0) ** k) * math.comb(a, k) / float(a + k + 1)
+        phi += coefficient * np.power(y_clipped, a + k + 1)
+    omega = norm * np.power(y_clipped, a) * np.power(1.0 - y_clipped, a)
+    jacobian = np.prod(omega, axis=1)
+    return phi, jacobian
+
+
+def qmc_batches_for_sector(
+    request: IntegralRequest,
+    sector_position: int,
+    sector_id: int,
+    sector: SectorDefinition,
+    iteration: int,
+) -> list[QmcBatch]:
+    """Generate Korobov-transformed shifted-lattice chunks for one sector."""
+    try:
+        from qmcpy import Lattice
+    except ImportError as exc:  # pragma: no cover - exercised only without dependency.
+        raise RuntimeError(
+            "--sampling-mode qmc requires the 'qmcpy' package; run "
+            "'.venv/bin/python -m pip install qmcpy'"
+        ) from exc
+
+    n_points = int(request.samples_per_iter)
+    shift_count = int(request.qmc_shifts)
+    step = n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
+    step = max(step, 1)
+    seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
+    lattice = Lattice(
+        int(sector.integration_dim),
+        replications=shift_count,
+        seed=seed,
+        randomize="SHIFT",
+    )
+    raw_points = np.asarray(lattice(n_points), dtype=float)
+    if raw_points.ndim == 2:
+        raw_points = raw_points[np.newaxis, :, :]
+    if raw_points.shape[0] != shift_count:
+        raise RuntimeError(
+            f"QMCPy returned {raw_points.shape[0]} shift replicas, expected {shift_count}"
+        )
+    flat_points = raw_points.reshape(shift_count * n_points, int(sector.integration_dim))
+    coords, weights = korobov_transform(flat_points, int(request.qmc_korobov_alpha))
+    shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), n_points)
+    return [
+        QmcBatch(
+            sector_position=int(sector_position),
+            sector_id=int(sector_id),
+            coords=coords[start : start + step, :],
+            weights=weights[start : start + step],
+            shift_indices=shift_indices[start : start + step],
+            shift_count=shift_count,
+        )
+        for start in range(0, shift_count * n_points, step)
+    ]
 
 
 def format_progress_scalar(value: float | None) -> str:
@@ -902,6 +1071,7 @@ def _stats_from_reduced_batches(
             }
         )
     diagnostics["sector_timing_summary"] = timing_per_sector
+    sampling_mode = str(diagnostics.get("sampling_mode", "democratic"))
     return IntegrationResult(
         raw_sector_coeffs=aggregate_coeffs,
         raw_sector_errors=aggregate_errors,
@@ -914,7 +1084,7 @@ def _stats_from_reduced_batches(
                 raw_sector_errors=[stat.error for stat in coeff_stats],
                 precision_counts=sector_precision_counts[sector_index].copy(),
                 diagnostics={
-                    "sampling_mode": "democratic",
+                    "sampling_mode": sampling_mode,
                     "avg_eval_us_per_sample": avg_eval_us_per_sample_per_worker(
                         sector_timing[sector_index],
                         sector_hits[sector_index],
@@ -944,6 +1114,272 @@ def _stats_from_reduced_batches(
         precision_counts=total_timing.precision_counts,
         interrupted=interrupted,
         diagnostics=diagnostics,
+    )
+
+
+@dataclass(frozen=True)
+class _LiveAggregateStat:
+    """Duck-typed statistic used only for QMC progress display."""
+
+    mean: complex
+    error: complex
+    count: int
+
+
+def _qmc_live_stats(
+    sector_stats: list[list[RunningStats]],
+    active_sector_ids: list[int],
+    coeff_count: int,
+    raw_samples: int,
+) -> list[_LiveAggregateStat]:
+    """Build aggregate sector-sum stats with quadrature errors for QMC progress."""
+    out: list[_LiveAggregateStat] = []
+    for coeff_index in range(coeff_count):
+        coeff = sum(
+            sector_stats[sector_id][coeff_index].mean
+            for sector_id in active_sector_ids
+        )
+        err_re2 = sum(
+            sector_stats[sector_id][coeff_index].error.real ** 2
+            for sector_id in active_sector_ids
+            if math.isfinite(sector_stats[sector_id][coeff_index].error.real)
+        )
+        err_im2 = sum(
+            sector_stats[sector_id][coeff_index].error.imag ** 2
+            for sector_id in active_sector_ids
+            if math.isfinite(sector_stats[sector_id][coeff_index].error.imag)
+        )
+        out.append(
+            _LiveAggregateStat(
+                mean=coeff,
+                error=complex(math.sqrt(err_re2), math.sqrt(err_im2)),
+                count=int(raw_samples),
+            )
+        )
+    return out
+
+
+def integrate_qmc(
+    request: IntegralRequest,
+    topology: TopologyDefinition,
+    sectors: list[SectorDefinition],
+    target: TargetDefinition | None,
+) -> IntegrationResult:
+    """Run randomized shifted-lattice QMC with Korobov periodization.
+
+    ``samples_per_iter`` is interpreted as the number of lattice points per
+    random shift and sector.  Each random shift produces one sector-integral
+    estimate, and the QMC error is estimated from the distribution of these
+    shift estimates.
+    """
+    if not sectors:
+        raise ValueError("no sectors generated")
+    active_sector_ids = list(request.sectors) if request.sectors is not None else list(range(len(sectors)))
+    if not active_sector_ids:
+        raise ValueError("no active sectors selected")
+    active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
+    continuous_dim = active_sectors[0].integration_dim
+    if any(sector.integration_dim != continuous_dim for sector in active_sectors):
+        raise ValueError("all sectors must have the same integration dimension for QMC mode")
+
+    sector_stats = [
+        [RunningStats() for _ in range(topology.coefficient_count)]
+        for _sector in sectors
+    ]
+    sector_hits = [0 for _sector in sectors]
+    sector_precision_counts = [
+        {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
+        for _sector in sectors
+    ]
+    sector_timing = [HotPathTiming() for _sector in sectors]
+    sector_max_abs = [
+        np.zeros(topology.coefficient_count, dtype=float)
+        for _sector in sectors
+    ]
+    total_timing = HotPathTiming()
+    start_time = time.perf_counter()
+    interrupted = False
+    raw_samples_done = 0
+    diagnostics: dict[str, Any] = {
+        "sampling_mode": "qmc",
+        "qmc_software": "qmcpy.Lattice",
+        "qmc_randomization": "SHIFT",
+        "qmc_lattice_points_per_shift": int(request.samples_per_iter),
+        "qmc_shifts": int(request.qmc_shifts),
+        "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
+        "active_sector_count": len(active_sector_ids),
+        "note": (
+            "Each sector is integrated by randomized shifted lattices. "
+            "Errors are estimated from random-shift sector estimates and "
+            "combined across sectors in quadrature."
+        ),
+    }
+
+    progress_request = replace(
+        request,
+        samples_per_iter=int(request.samples_per_iter)
+        * int(request.qmc_shifts)
+        * len(active_sector_ids),
+    )
+    bar = make_progress_bar(progress_request)
+    if bar is not None:
+        bar.start()
+
+    executor: ProcessPoolExecutor | None = None
+    processor: SectorProcessor | None = None
+
+    def absorb_reduced(
+        reduced: QmcReducedBatch,
+        sector_sums: np.ndarray,
+        sector_counts: np.ndarray,
+    ) -> None:
+        nonlocal raw_samples_done
+        aggregate_start = time.perf_counter()
+        sector_id = int(reduced.sector_id)
+        sector_sums += reduced.sums_by_shift
+        sector_counts += reduced.counts_by_shift
+        sector_precision_counts[sector_id]["ordinary"] += int(reduced.precision_counts[0])
+        sector_precision_counts[sector_id]["stability"] += int(reduced.precision_counts[1])
+        sector_precision_counts[sector_id]["medium_precision"] += int(reduced.precision_counts[2])
+        sector_precision_counts[sector_id]["high_precision"] += int(reduced.precision_counts[3])
+        sector_timing[sector_id].absorb(reduced.timing)
+        total_timing.absorb(reduced.timing)
+        sector_max_abs[sector_id] = np.maximum(sector_max_abs[sector_id], reduced.max_abs)
+        raw_samples_done += int(reduced.count)
+        total_timing.add_python(time.perf_counter() - aggregate_start)
+
+    def finish_sector_shift_estimates(
+        sector_id: int,
+        sector_sums: np.ndarray,
+        sector_counts: np.ndarray,
+    ) -> None:
+        aggregate_start = time.perf_counter()
+        if np.any(sector_counts <= 0):
+            raise RuntimeError(f"sector {sector_id} has incomplete QMC shift estimates")
+        sector_hits[sector_id] += int(np.sum(sector_counts))
+        means = sector_sums / sector_counts[:, np.newaxis]
+        for shift_values in means:
+            for coeff_index, stat in enumerate(sector_stats[sector_id]):
+                stat.add(shift_values[coeff_index])
+        total_timing.add_python(time.perf_counter() - aggregate_start)
+
+    def update_qmc_progress(iteration: int) -> None:
+        live_stats = _qmc_live_stats(
+            sector_stats,
+            active_sector_ids,
+            topology.coefficient_count,
+            raw_samples_done,
+        )
+        elapsed = time.perf_counter() - start_time
+        avg_eval_us = avg_eval_us_per_sample_per_worker(total_timing, raw_samples_done)
+        update_progress_bar_timed(
+            bar,
+            progress_request,
+            live_stats,  # type: ignore[arg-type]
+            target,
+            iteration,
+            elapsed,
+            avg_eval_us,
+            total_timing,
+        )
+
+    try:
+        if request.workers > 1:
+            if "fork" not in mp.get_all_start_methods():
+                raise RuntimeError("QMC multi-worker integration requires a fork-capable Python runtime")
+            global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
+            _PARENT_TOPOLOGY = topology
+            _PARENT_SECTORS = active_sectors
+            _PARENT_REQUEST = request
+            executor = ProcessPoolExecutor(
+                max_workers=request.workers,
+                mp_context=mp.get_context("fork"),
+                initializer=_init_worker_from_parent,
+            )
+        else:
+            processor = _make_sector_processor(topology, request)
+
+        iteration = 0
+        while request.max_iter < 0 or iteration < request.max_iter:
+            iteration += 1
+            for sector_position, (sector_id, sector) in enumerate(zip(active_sector_ids, active_sectors)):
+                sector_sums = np.zeros(
+                    (int(request.qmc_shifts), topology.coefficient_count),
+                    dtype=np.complex128,
+                )
+                sector_counts = np.zeros(int(request.qmc_shifts), dtype=np.int64)
+                batches = qmc_batches_for_sector(request, sector_position, sector_id, sector, iteration)
+                if executor is None:
+                    assert processor is not None
+                    for batch in batches:
+                        absorb_reduced(
+                            _evaluate_qmc_batch(processor, active_sectors, batch),
+                            sector_sums,
+                            sector_counts,
+                        )
+                else:
+                    pending = [
+                        executor.submit(_evaluate_qmc_batch_worker, batch)
+                        for batch in batches
+                    ]
+                    for future in pending:
+                        absorb_reduced(future.result(), sector_sums, sector_counts)
+                finish_sector_shift_estimates(sector_id, sector_sums, sector_counts)
+                update_qmc_progress(iteration)
+            live_stats = _qmc_live_stats(
+                sector_stats,
+                active_sector_ids,
+                topology.coefficient_count,
+                raw_samples_done,
+            )
+            if target_accuracy_reached(
+                progress_request,
+                live_stats,  # type: ignore[arg-type]
+                target,
+                iteration,
+            ):
+                break
+            if (
+                request.target_rel_accuracy is None
+                and request.max_iter >= 0
+                and iteration >= request.min_iter
+                and max(live_stats[topology.training_index].error.real, live_stats[topology.training_index].error.imag)
+                < request.min_error
+            ):
+                break
+        diagnostics["qmc_completed_iterations"] = int(iteration)
+    except KeyboardInterrupt:
+        interrupted = True
+        if executor is not None:
+            _terminate_executor_workers(executor)
+        if not request.json:
+            print(
+                f"\n{Fore.YELLOW}Keyboard interrupt received; writing partial QMC result "
+                f"with {raw_samples_done} raw lattice samples.{Style.RESET_ALL}"
+            )
+    finally:
+        if bar is not None:
+            bar.finish(dirty=True)
+        if executor is not None:
+            executor.shutdown(wait=not interrupted, cancel_futures=True)
+        if request.workers > 1:
+            _PARENT_TOPOLOGY = None
+            _PARENT_SECTORS = None
+            _PARENT_REQUEST = None
+
+    return _stats_from_reduced_batches(
+        sectors,
+        active_sector_ids,
+        topology,
+        sector_stats,
+        sector_hits,
+        sector_precision_counts,
+        sector_timing,
+        sector_max_abs,
+        total_timing,
+        start_time,
+        interrupted,
+        diagnostics,
     )
 
 
@@ -1086,6 +1522,8 @@ def integrate(
     target: TargetDefinition | None,
 ) -> IntegrationResult:
     """Run the adaptive Monte Carlo integration and return raw coefficients."""
+    if request.sampling_mode == "qmc":
+        return integrate_qmc(request, topology, sectors, target)
     if request.sampling_mode == "democratic":
         return integrate_democratic(request, topology, sectors, target)
     if not sectors:

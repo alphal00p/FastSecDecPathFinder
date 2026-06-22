@@ -221,11 +221,14 @@ For heavier DOT topologies, prefer the two-stage prepared-bundle workflow:
 
 `generate` is DOT-only.  It writes `manifest.json`, topology/sector metadata,
 reference Symbolica expression strings, generation timings, and serialized
-Symbolica evaluator bytes under the selected `--output` directory.  `integrate`
-is strict: it loads evaluator bytes from that bundle and does not call
-pySecDec, rebuild Symanzik polynomials, or generate Symbolica formula/evaluator
-artifacts.  In other words, the integration process is a disk-only consumer of
-the prepared bundle, apart from lazy loading the serialized evaluator files.
+Symbolica evaluator bytes under the selected `--output` directory.  Hot
+JIT/compiled evaluator artifacts are stored together with an eager evaluator
+fallback, because arbitrary-precision endpoint rescue uses Symbolica's eager
+`evaluate_with_prec`/`evaluate_complex_with_prec` APIs.  `integrate` is strict:
+it loads evaluator bytes from that bundle and does not call pySecDec, rebuild
+Symanzik polynomials, or generate Symbolica formula/evaluator artifacts.  In
+other words, the integration process is a disk-only consumer of the prepared
+bundle, apart from lazy loading the serialized evaluator files.
 The default result path for `integrate` is
 `<output>/result.json`; use `--result-path` to override it.  Evaluator artifacts
 are loaded lazily through an LRU cache controlled by `--evaluator-lru-size`
@@ -276,6 +279,42 @@ This forces the same number of uniform points in every selected sector and
 records per-sector sample counts, timing, precision-rescue fractions, and
 maximum observed weights in `result.json`.  It is intended as a diagnostic
 mode; the default adaptive mode remains the production integration path.
+
+QMC integration is also available through QMCPy's randomized shifted rank-1
+lattices with the Korobov periodizing transform used in the pySecDec/QMC
+literature.  In this mode `--samples-per-iter` is the number of lattice points
+per sector and per random shift, while `--qmc-shifts` is the number of
+independent shifts used for the one-sigma error estimate:
+
+```sh
+.venv/bin/python FSD.py \
+  --run examples/runs/dot_box.yaml \
+  --sampling-mode qmc \
+  --qmc-shifts 16 \
+  --qmc-korobov-alpha 3 \
+  --samples-per-iter 8192 \
+  --batch-size 8192 \
+  --workers 10
+```
+
+For a direct one-loop comparison against pySecDec's generated QMC backend, use:
+
+```sh
+.venv/bin/python scripts/compare_qmc_pysecdec.py \
+  --sample-counts 256 1024 4096 \
+  --qmc-shifts 16 \
+  --workers 10
+```
+
+The comparison script defaults to the DOT triangle package
+`.pysecdec_build/fsd_psd_triangle/fsd_psd_triangle_pylink.so`.  It prints both
+the public pySecDec QMC budget and FSD's raw sector-sample count, because
+pySecDec does not expose the same per-sector accounting through the pylink API.
+
+The transform is applied in vectorized NumPy before the existing batched
+Symbolica sector evaluator call.  The estimator treats each shifted lattice as
+one sector estimate and combines sector errors in quadrature; deterministic
+lattice points are not treated as independent Monte Carlo samples.
 
 Run pySecDec’s generated integrator instead:
 
@@ -624,19 +663,20 @@ result.json` reads a previous result file in the same displayed prefactor
 convention.  In DOT mode, `--target pysecdec` first runs pySecDec using the
 configured pySecDec controls and uses that result as the live comparison.
 
-Enable Symbolica evaluator JIT compilation experimentally:
+Choose the Symbolica evaluator backend:
 
 ```sh
-.venv/bin/python FSD.py --s 1.0 --m 1.0 --jit-compile-evaluators
+.venv/bin/python FSD.py --s 1.0 --m 1.0 --jit-compile
+.venv/bin/python FSD.py --s 1.0 --m 1.0 --eager-evaluator
+.venv/bin/python FSD.py --run examples/runs/dot_triangle.yaml --compile
 ```
 
-This is disabled by default because the currently tested Symbolica batch JIT
-path can mis-evaluate simple row-wise expressions.  The standalone
-`jit_compile_MRE.py` script demonstrates the issue:
-
-```sh
-.venv/bin/python jit_compile_MRE.py
-```
+`--jit-compile --real-evaluator` is the default.  `--eager-evaluator` disables
+JIT and keeps plain eager evaluators.  `--compile` builds a shared-library f64
+hot path where Symbolica supports it; FSD still stores the eager evaluator next
+to the compiled artifact so precision rescue remains available when strict
+prepared bundles are loaded later.  `--complex-evaluator` can be used to force
+complex-valued f64 evaluator calls even for real kinematics.
 
 ## Output
 
@@ -693,7 +733,9 @@ During integration, `progressbar2` reports compact coloured labels:
 - `eval μs/smpl/wkr`: average evaluator time per sample per worker in `μs`;
   `EvalT` is worker-summed, so this is normalized by the total sample count,
 - `prof py|eval|hav`: live profile `(python | evaluator | havana)`, where Havana includes grid
-  sampling, cloned-grid training accumulation, merge, and update time.
+  sampling, cloned-grid training accumulation, merge, and update time.  In
+  `--sampling-mode qmc`, `hav` is zero because QMCPy sampling is accounted for
+  in the Python timing bucket.
 
 When `--target-rel-accuracy` is enabled, the target check is performed after
 each accumulated batch, not only at full iteration boundaries.  The final result

@@ -24,6 +24,7 @@ from typing import Any
 from symbolica import E, Evaluator, S
 
 from definitions import EpsilonExpansion, IntegralRequest, ParametricRepresentation
+from evaluator_utils import deserialize_evaluator, serialize_evaluator
 from integrand import (
     ChainRuleFormulaDefinition,
     EndpointProjectorFormulaDefinition,
@@ -196,7 +197,7 @@ class PreparedEvaluatorStore:
         if not path.is_file():
             raise RuntimeError(f"prepared evaluator artifact is missing: {path}")
         raw = path.read_bytes()
-        evaluator = Evaluator.load(gzip.decompress(raw) if path.suffix == ".gz" else raw)
+        evaluator = deserialize_evaluator(gzip.decompress(raw) if path.suffix == ".gz" else raw)
         self._cache[key] = evaluator
         if self.lru_size > 0:
             while len(self._cache) > self.lru_size:
@@ -252,7 +253,7 @@ class _BundleWriter:
         rel = Path("evaluators") / f"{safe_group}_{digest}.bin.gz"
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(gzip.compress(evaluator.save(), compresslevel=6))
+        path.write_bytes(gzip.compress(serialize_evaluator(evaluator), compresslevel=6))
         return str(rel)
 
     def copy_evaluator_file(self, source: str | Path, group: str, key: Any) -> str:
@@ -308,6 +309,8 @@ def _topology_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[
         "global_prefactor_coeffs": _encode(topology.global_prefactor_coeffs or []),
         "global_prefactor_min_order": int(getattr(topology, "global_prefactor_min_order", 0)),
         "jit_compile_evaluators": topology.jit_compile_evaluators,
+        "evaluator_compile_mode": topology.evaluator_compile_mode,
+        "real_evaluator": topology.real_evaluator,
         "dual_evaluator_mode": topology.dual_evaluator_mode,
         "ibp_reduce_to_log_endpoint": topology.ibp_reduce_to_log_endpoint,
         "ibp_power_goal": topology.ibp_power_goal,
@@ -399,6 +402,13 @@ def _load_topology(data: dict[str, Any], store: PreparedEvaluatorStore) -> Topol
         global_prefactor_coeffs=[complex(value) for value in _decode(data.get("global_prefactor_coeffs", []))],
         global_prefactor_min_order=int(data.get("global_prefactor_min_order", 0)),
         jit_compile_evaluators=bool(data.get("jit_compile_evaluators", False)),
+        evaluator_compile_mode=str(
+            data.get(
+                "evaluator_compile_mode",
+                "jit" if bool(data.get("jit_compile_evaluators", False)) else "eager",
+            )
+        ),
+        real_evaluator=bool(data.get("real_evaluator", True)),
         dual_evaluator_mode=str(data.get("dual_evaluator_mode", "pregenerate")),
         ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
         ibp_power_goal=(
@@ -471,6 +481,8 @@ def _load_topology(data: dict[str, Any], store: PreparedEvaluatorStore) -> Topol
     zero_multi = tuple(0 for _ in topology.x_names)
     topology._u_derivative_indices_by_order.setdefault(0, [zero_multi])
     topology._f_derivative_indices_by_order.setdefault(0, [zero_multi])
+    topology._u_derivative_evaluators.setdefault(zero_multi, topology._u_evaluator)
+    topology._f_derivative_evaluators.setdefault(zero_multi, topology._f_evaluator)
     topology._u_derivative_multi_evaluators.setdefault((zero_multi,), topology._u_evaluator)
     topology._f_derivative_multi_evaluators.setdefault((zero_multi,), topology._f_evaluator)
     _fill_missing_derivative_orders(topology._u_derivative_indices_by_order)
@@ -516,6 +528,8 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         "subtraction_type": sector.subtraction_type,
         "description": sector.description,
         "jit_compile_evaluators": sector.jit_compile_evaluators,
+        "evaluator_compile_mode": sector.evaluator_compile_mode,
+        "real_evaluator": sector.real_evaluator,
         "u_monomial_powers": sector.u_monomial_powers,
         "measure_monomial_powers": sector.measure_monomial_powers,
         "numerator_monomial_powers": sector.numerator_monomial_powers,
@@ -606,6 +620,13 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
         subtraction_type=str(data["subtraction_type"]),
         description=str(data["description"]),
         jit_compile_evaluators=bool(data.get("jit_compile_evaluators", False)),
+        evaluator_compile_mode=str(
+            data.get(
+                "evaluator_compile_mode",
+                "jit" if bool(data.get("jit_compile_evaluators", False)) else "eager",
+            )
+        ),
+        real_evaluator=bool(data.get("real_evaluator", True)),
         u_monomial_powers=[int(value) for value in data.get("u_monomial_powers", [])],
         measure_monomial_powers=[float(value) for value in data.get("measure_monomial_powers", [])],
         numerator_monomial_powers=[float(value) for value in data.get("numerator_monomial_powers", [])],
@@ -1066,6 +1087,8 @@ def save_prepared_bundle(
         "generation_options": {
             "sector_method": request.sector_method,
             "dual_evaluator_mode": request.dual_evaluator_mode,
+            "evaluator_compile_mode": request.evaluator_compile_mode,
+            "real_evaluator": request.real_evaluator,
             "subtraction_backend": request.subtraction_backend,
             "sector_evaluator_backend": request.sector_evaluator_backend,
             "ibp_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,

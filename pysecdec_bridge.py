@@ -611,6 +611,8 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
         subtraction_type=subtraction,
         description="pySecDec-generated DOT sector",
         jit_compile_evaluators=request.jit_compile_evaluators,
+        evaluator_compile_mode=request.evaluator_compile_mode,
+        real_evaluator=request.real_evaluator,
         endpoint_taylor_orders=endpoint_taylor_orders,
     )
 
@@ -660,6 +662,8 @@ def build_dot_bundle(
                 convention_description="FSD coefficients are before convolution with the pySecDec global prefactor",
             ),
             jit_compile_evaluators=request.jit_compile_evaluators,
+            evaluator_compile_mode=request.evaluator_compile_mode,
+            real_evaluator=request.real_evaluator,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,

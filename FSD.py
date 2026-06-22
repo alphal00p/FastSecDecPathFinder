@@ -287,10 +287,18 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--samples-per-iter must be positive")
     if request.batch_size < 0:
         raise ValueError("--batch-size must be >= 0, where 0 means one batch per worker chunk")
-    if request.sampling_mode not in {"havana", "democratic"}:
-        raise ValueError("--sampling-mode must be 'havana' or 'democratic'")
+    if request.evaluator_compile_mode not in {"jit", "eager", "compile"}:
+        raise ValueError("--evaluator compile mode must be one of: jit, eager, compile")
+    if request.evaluator_compile_mode == "compile" and not request.real_evaluator:
+        raise ValueError("--compile currently requires --real-evaluator")
+    if request.sampling_mode not in {"havana", "democratic", "qmc"}:
+        raise ValueError("--sampling-mode must be 'havana', 'democratic', or 'qmc'")
     if request.democratic_samples_per_sector <= 0:
         raise ValueError("--democratic-samples-per-sector must be positive")
+    if request.qmc_shifts <= 1:
+        raise ValueError("--qmc-shifts must be greater than 1 to estimate a randomized QMC error")
+    if request.qmc_korobov_alpha < 1:
+        raise ValueError("--qmc-korobov-alpha must be a positive integer")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
     if request.stability_threshold < 0.0:
@@ -598,12 +606,14 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--samples-per-iter", type=int, default=50000)
     parser.add_argument(
         "--sampling-mode",
-        choices=["havana", "democratic"],
+        choices=["havana", "democratic", "qmc"],
         default="havana",
         help=(
             "Sector sampling policy. 'havana' uses the adaptive discrete sector "
             "dimension; 'democratic' gives every active sector the same number "
-            "of uniform samples and records per-sector diagnostics."
+            "of uniform samples and records per-sector diagnostics; 'qmc' "
+            "uses randomized shifted QMCPy rank-1 lattices per sector with "
+            "Korobov periodization."
         ),
     )
     parser.add_argument(
@@ -618,6 +628,25 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         type=int,
         default=1000,
         help="Uniform sample count assigned to each active sector in democratic mode.",
+    )
+    parser.add_argument(
+        "--qmc-shifts",
+        type=int,
+        default=int(defaults.get("qmc_shifts", 16)),
+        help=(
+            "Number of independent random shifts for --sampling-mode qmc. "
+            "The QMC one-sigma error is estimated from these shifted lattice "
+            "replicates. Default: 16."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-korobov-alpha",
+        type=int,
+        default=int(defaults.get("qmc_korobov_alpha", 3)),
+        help=(
+            "Korobov periodizing transform exponent used in QMC mode. "
+            "The 2016 pySecDec-inspired setup uses alpha=3. Default: 3."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -704,13 +733,56 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
             "being accumulated.  Set to 0 to disable."
         ),
     )
-    parser.add_argument(
+    default_evaluator_mode = str(
+        defaults.get(
+            "evaluator_compile_mode",
+            "jit" if bool(defaults.get("jit_compile_evaluators", True)) else "eager",
+        )
+    )
+    evaluator_mode_group = parser.add_mutually_exclusive_group()
+    evaluator_mode_group.add_argument(
+        "--jit-compile",
         "--jit-compile-evaluators",
-        action="store_true",
+        dest="evaluator_compile_mode",
+        action="store_const",
+        const="jit",
+        default=default_evaluator_mode,
         help=(
-            "Enable Symbolica jit_compile=True for generated evaluators. "
-            "Disabled by default because current Symbolica batch JIT can mis-evaluate simple row-wise expressions."
+            "Build Symbolica evaluators with jit_compile=True. This is the default."
         ),
+    )
+    evaluator_mode_group.add_argument(
+        "--compile",
+        dest="evaluator_compile_mode",
+        action="store_const",
+        const="compile",
+        help=(
+            "Build Symbolica evaluators and compile their f64 hot path to a shared "
+            "library. Multiprecision rescue keeps a source-evaluator fallback."
+        ),
+    )
+    evaluator_mode_group.add_argument(
+        "--eager-evaluator",
+        "--no-jit-compile",
+        dest="evaluator_compile_mode",
+        action="store_const",
+        const="eager",
+        help="Build eager Symbolica evaluators without JIT or compiled f64 code.",
+    )
+    real_default = bool(defaults.get("real_evaluator", True))
+    real_group = parser.add_mutually_exclusive_group()
+    real_group.add_argument(
+        "--real-evaluator",
+        dest="real_evaluator",
+        action="store_true",
+        default=real_default,
+        help="Use real-valued Symbolica evaluator APIs for f64 real kinematics. Default.",
+    )
+    real_group.add_argument(
+        "--complex-evaluator",
+        dest="real_evaluator",
+        action="store_false",
+        help="Force complex-valued Symbolica evaluator APIs for f64 batches.",
     )
     dual_group = parser.add_mutually_exclusive_group()
     dual_group.add_argument(
@@ -1194,11 +1266,15 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         batch_size=args.batch_size,
         sampling_mode=args.sampling_mode,
         democratic_samples_per_sector=args.democratic_samples_per_sector,
+        qmc_shifts=int(args.qmc_shifts),
+        qmc_korobov_alpha=int(args.qmc_korobov_alpha),
         target_rel_accuracy=args.target_rel_accuracy,
         min_error=args.min_error,
         bins=args.bins,
         workers=args.workers,
-        jit_compile_evaluators=args.jit_compile_evaluators,
+        jit_compile_evaluators=args.evaluator_compile_mode == "jit",
+        evaluator_compile_mode=str(args.evaluator_compile_mode),
+        real_evaluator=bool(args.real_evaluator),
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
         sector_evaluator_backend=args.sector_evaluator_backend,

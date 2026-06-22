@@ -138,6 +138,8 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "bins": 32,
         "workers": 1,
         "jit_compile_evaluators": False,
+        "evaluator_compile_mode": "eager",
+        "real_evaluator": True,
         "dual_evaluator_mode": "pregenerate",
         "subtraction_backend": "formula",
         "ibp_reduce_to_log_endpoint": False,
@@ -781,6 +783,29 @@ def test_ibp_power_goal_cli_and_aliases() -> None:
     assert alias_request.ibp_reduce_to_log_endpoint is True
 
 
+def test_evaluator_backend_cli_defaults_and_validation() -> None:
+    """Evaluator backend flags normalize to explicit request metadata."""
+    default_request = build_request(parse_args(["--no-progress"]))
+    eager_request = build_request(parse_args(["--eager-evaluator", "--no-progress"]))
+    compile_request = build_request(parse_args(["--compile", "--no-progress"]))
+    complex_request = build_request(parse_args(["--complex-evaluator", "--no-progress"]))
+    invalid_request = build_request(
+        parse_args(["--compile", "--complex-evaluator", "--no-progress"])
+    )
+
+    assert default_request.evaluator_compile_mode == "jit"
+    assert default_request.jit_compile_evaluators is True
+    assert default_request.real_evaluator is True
+    assert eager_request.evaluator_compile_mode == "eager"
+    assert eager_request.jit_compile_evaluators is False
+    assert compile_request.evaluator_compile_mode == "compile"
+    assert compile_request.real_evaluator is True
+    assert complex_request.evaluator_compile_mode == "jit"
+    assert complex_request.real_evaluator is False
+    with pytest.raises(ValueError, match="--compile"):
+        validate_request(invalid_request)
+
+
 def test_all_example_run_presets_parse_and_resolve_paths() -> None:
     """Every shipped run preset remains wired to the reorganized examples tree."""
     run_files = sorted((PROJECT_ROOT / "examples/runs").glob("*.yaml"))
@@ -792,6 +817,8 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
         "dot_double_box.yaml",
         "dot_triangle.yaml",
         "dot_triple_box.yaml",
+        "dot_triple_box_offshell.yaml",
+        "dot_triple_box_offshell_rank2_numerator.yaml",
     }
     for run_file in run_files:
         request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
@@ -3016,6 +3043,58 @@ def test_democratic_batches_are_round_robin() -> None:
     assert first_round == list(range(len(sectors)))
     assert second_round == list(range(len(sectors)))
     assert [batch.coords.shape[0] for batch in batches] == [1] * (3 * len(sectors))
+
+
+def test_korobov_transform_alpha_three_is_normalized() -> None:
+    """The QMC Korobov map fixes endpoints and has unit average Jacobian."""
+    points = np.linspace(0.0, 1.0, 1001, dtype=float)[:, np.newaxis]
+    coords, weights = integrator_module.korobov_transform(points, 3)
+
+    assert coords[0, 0] == pytest.approx(0.0)
+    assert coords[-1, 0] == pytest.approx(1.0)
+    assert np.all(coords[:, 0] >= -1.0e-15)
+    assert np.all(coords[:, 0] <= 1.0 + 1.0e-15)
+    assert np.trapezoid(weights, points[:, 0]) == pytest.approx(1.0, rel=1.0e-6)
+
+
+def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
+    """QMC mode estimates errors from random shifts and records raw samples."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="qmc",
+        qmc_shifts=4,
+        qmc_korobov_alpha=3,
+        samples_per_iter=32,
+        max_iter=1,
+        min_iter=1,
+        batch_size=32,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.samples == 4 * 32 * len(sectors)
+    assert result.diagnostics["sampling_mode"] == "qmc"
+    assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
+    assert result.diagnostics["qmc_korobov_alpha"] == 3
+    for value in result.raw_sector_coeffs:
+        assert_finite_complex(value)
+    for sector_result in result.per_sector:
+        assert sector_result.samples == 4 * 32
+        assert sector_result.diagnostics["sampling_mode"] == "qmc"
 
 
 def test_result_table_marks_missing_dot_reference_as_na(capsys: pytest.CaptureFixture[str]) -> None:

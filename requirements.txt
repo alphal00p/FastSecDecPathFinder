@@ -1,4 +1,5 @@
 symbolica
+qmcpy
 numpy
 colorama
 prettytable
