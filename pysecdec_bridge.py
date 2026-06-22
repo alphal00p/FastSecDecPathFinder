@@ -662,6 +662,7 @@ def build_dot_bundle(
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
+            ibp_power_goal=request.ibp_power_goal,
         )
     numerator_polynomials = _numerator_polynomials(
         li,
@@ -729,7 +730,7 @@ def build_dot_bundle(
         progress=progress,
     ):
         prepare_sector_evaluators(sectors, progress=progress, include_dual=False)
-    if request.sector_evaluator_backend != "two-stage-explicit":
+    if request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}:
         with timings.measure(
             "Symbolica Taylor evaluator build",
             request.dual_evaluator_mode,
@@ -740,7 +741,10 @@ def build_dot_bundle(
         timings.add(
             "Symbolica Taylor evaluator build",
             0.0,
-            detail="skipped: two-stage-explicit sector evaluator backend uses source+assembler evaluators",
+            detail=(
+                "skipped: sector evaluator backend prepares explicit sector "
+                "integrand evaluators"
+            ),
         )
     return DotBuildBundle(
         topology=topology,

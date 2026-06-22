@@ -235,6 +235,18 @@ artifacts at their stored range and trims the displayed/persisted coefficients;
 it does not rebuild smaller formulas.  Requesting an order above the prepared
 range fails strictly.
 
+Two sector-evaluator comparison backends are available for DOT prepared
+bundles:
+
+- `--sector-evaluator-backend two-stage-explicit` keeps FSD's derivative-source
+  evaluator and endpoint assembler as two prepared Symbolica calls per
+  singular sector.
+- `--explicit` is shorthand for `--sector-evaluator-backend explicit`; it
+  builds one fully substituted multi-output Symbolica evaluator per sector,
+  closer to the pySecDec generation/runtime trade-off.  This path is intended
+  for generation-speed versus runtime-speed studies, not as the default FSD
+  black-box strategy.
+
 Current 3-loop triple-box status: a full `eps^-6..eps^0` prepared bundle was
 generated under a 30 GiB process-tree memory cap.  The bundle contains 1972
 sectors and 22996 serialized evaluator artifacts, occupies about 4.1 GiB on
@@ -424,6 +436,15 @@ For sectors with higher endpoint powers, enable the IBP-lowered projector path:
   --run examples/runs/dot_triple_box.yaml \
   --IBP_reduce_to_log_endpoint
 ```
+
+The legacy flag above is equivalent to `--ibp-power-goal -1`, which lowers
+higher endpoint powers to logarithmic `y^(-1+c eps)` projectors.  A numeric
+goal can stop the lowering earlier; for example `--ibp-power-goal -3` lowers
+only until every endpoint base power is at least `-3`, then applies the usual
+projector subtraction to the remaining endpoint powers.  This is useful when
+the fully logarithmic IBP tree is more complex than the residual projector.
+Goals greater than `-1` are rejected for now; omit the option, or pass
+`--no-ibp-reduce-to-log-endpoint`, to disable IBP lowering.
 
 Run files can be overridden from the CLI.  The triple-box preset enables IBP
 lowering, but a selected-sector comparison can disable it explicitly:
@@ -701,9 +722,12 @@ prototype.
 
 Experimental DOT scope:
 
-- scalar Euclidean topologies only,
+- Euclidean denominator topologies only, with optional momentum-space
+  dot-product numerators reduced to Feynman-parameter numerator polynomials,
 - unit propagator powers only,
-- no tensor numerator support in the FSD processor,
+- numerator support is currently restricted to dot products of loop/external
+  momenta; non-polynomial numerator callbacks and unreduced tensor structures
+  are outside this phase,
 - endpoint powers must be negative integers regulated by epsilon.  The generic
   processor applies localized Taylor subtraction, with logarithmic plus
   distributions as the `N=0` special case,

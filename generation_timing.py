@@ -89,7 +89,10 @@ class GenerationTimings:
                 "DOT parse",
                 "kinematics load/evaluation",
                 "pySecDec LoopIntegralFromGraph",
+                "pySecDec LoopIntegralFromPropagators",
                 "U/F extraction",
+                "FSD Symbolica numerator reduction",
+                "FSD numerator Polynomial conversion",
             }:
                 buckets[UF_TIMING_BUCKET] += record.seconds
             elif record.name in {
@@ -103,6 +106,8 @@ class GenerationTimings:
                 "Symbolica dual evaluator build",
                 "Symbolica Taylor evaluator build",
                 "Symbolica subtraction formula build",
+                "Symbolica two-stage sector build",
+                "Symbolica explicit sector build",
             }:
                 buckets[SYMBOLICA_TIMING_BUCKET] += record.seconds
         return buckets
@@ -159,6 +164,7 @@ _STAGE_SHORT_NAMES = {
     "Symbolica chain-rule build": "chain rule",
     "Symbolica subtraction formula build": "subtraction",
     "Symbolica two-stage sector build": "two-stage",
+    "Symbolica explicit sector build": "explicit",
 }
 
 

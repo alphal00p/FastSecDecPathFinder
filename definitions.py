@@ -100,6 +100,7 @@ class IntegralRequest:
     dual_evaluator_mode: str
     subtraction_backend: str
     ibp_reduce_to_log_endpoint: bool
+    ibp_power_goal: int | None
     direct_projector_cache_term_threshold: int
     allow_fallback_for_missing_caches: bool
     force_regular_taylor_formulas: bool

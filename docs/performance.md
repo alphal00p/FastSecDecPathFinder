@@ -1,7 +1,7 @@
 # FSD Performance Notes
 
 These are development measurements for the DOT-backed FSD path as of
-2026-06-17.  They are performance and stability diagnostics, not final
+2026-06-22.  They are performance and stability diagnostics, not final
 precision benchmarks.  FSD-owned code remains free of SciPy and SymPy imports;
 pySecDec is used only at the DOT generation boundary.
 
@@ -53,6 +53,85 @@ Current topology overview:
 | box | DOT | 12 | `eps^-2..eps^0` | 0.240 | 9.075 | avg 7.00 us/smpl/wkr |
 | double box | DOT | 140 | `eps^-4..eps^0` | 0.615 | 272.81 | avg 18.23 us/smpl/wkr |
 | triple box | DOT iterative | 1972 | `eps^-6..eps^0` | 38.46 recorded generation + 30.61 serialization | not completed | compressed prepared bundle, 30 GiB guard |
+
+## Explicit Backend And Numerator Timing
+
+The `--explicit` backend substitutes the sector maps into each sector
+integrand and builds one multi-output Symbolica evaluator per sector.  This is
+the pySecDec-like comparison path: it deliberately gives up the FSD black-box
+U/F derivative construction in exchange for a faster runtime evaluator.
+
+The table below compares the explicit FSD path against pySecDec's generated
+integrator on one-loop scalar and numerator examples.  All pySecDec runs were
+launched through `run_with_memory_watch.py --limit-gb 30`.  The pySecDec
+runtime column is computed as the recorded pySecDec integration wall time
+divided by `--pysecdec-maxeval 1000`; pySecDec's public result JSON does not
+expose the exact number of integrand calls, so this should be read as a
+normalized wall-time proxy rather than a strict per-call profiler.
+
+| case | sectors | FSD explicit generation [s] | FSD explicit avg [us/sample] | FSD explicit min/max [us/sample] | pySecDec package generation [s] | pySecDec setup incl. compile [s] | pySecDec integration/maxeval [us] |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| triangle | 3 | 0.190 | 5.58 | 2.42 / 10.21 | 0.651 | 5.524 | 42.15 |
+| box | 12 | 0.199 | 2.68 | 1.45 / 9.71 | 0.588 | 5.707 | 64.66 |
+| triangle numerator | 4 | 0.169 | 4.06 | 1.94 / 8.24 | 0.593 | 5.872 | 47.58 |
+| box numerator | 12 | 0.325 | 2.95 | 1.66 / 10.80 | 0.798 | 8.558 | 173.15 |
+| box rank-2 numerator | 12 | 0.227 | 3.05 | 1.74 / 10.35 | 0.809 | 7.912 | 156.73 |
+| box high-rank numerator | 12 | 0.398 | 3.05 | 2.02 / 8.90 | 414.177 | 424.298 | 344.88 |
+
+The high-rank box numerator is intentionally exaggerated.  It is still below
+the 10-minute pySecDec-generation cutoff requested for this comparison, but it
+already shows the generation/runtime trade-off: FSD explicit generation stays
+sub-second because it asks Symbolica to build eager sector evaluators directly,
+while pySecDec spends most of its time producing and compiling a generated C++
+package.
+
+The corresponding FSD projector timings on the same examples are much slower
+at one loop, because the projector path is intentionally factored into
+black-box U/F source evaluation plus universal endpoint algebra:
+
+| case | FSD projector generation [s] | FSD projector avg [us/sample] | FSD projector min/max [us/sample] |
+|---|---:|---:|---:|
+| triangle | 0.179 | 372.91 | 64.13 / 789.38 |
+| box | 0.196 | 217.15 | 63.79 / 1280.44 |
+| triangle numerator | 0.171 | 213.89 | 18.82 / 719.78 |
+| box numerator | 0.184 | 186.17 | 64.11 / 851.43 |
+| box rank-2 numerator | 0.200 | 190.85 | 65.13 / 921.13 |
+| box high-rank numerator | 0.390 | 183.42 | 65.62 / 882.12 |
+
+This confirms that the explicit backend is the right comparison point when the
+question is pySecDec-style runtime speed.  It is not the default FSD strategy,
+because it relies on explicitly substituting sector maps into U/F, whereas the
+projector backend preserves the path-finder goal of treating U/F as numerical
+black-box evaluators.
+
+## Scalar Double-Box Three-Way Timing
+
+The scalar Euclidean double box was rerun on 2026-06-22 with a 30 GiB watchdog
+and no wall-time timeout.  FSD runtimes use the `benchmark` subcommand with 5
+ordinary f64 interior samples per sector.  pySecDec was run through
+`--dot-engine pysecdec` with `--keep-pysecdec-workdir`, then the generated
+shared library was loaded directly for an independent verbose timing pass.
+
+| method | sectors / generated integrals | generation setup [s] | compile [s] | integration/runtime metric |
+|---|---:|---:|---:|---|
+| FSD projector | 140 sectors | 0.445 | n/a | avg 583.43 us/FSD-sector sample; median 254.71; min/max 18.21 / 4501.27 |
+| FSD explicit | 140 sectors | 12.583 | n/a | avg 3.99 us/FSD-sector sample; median 2.54; min/max 1.49 / 18.27 |
+| pySecDec generated | 302 sector/order integrals | 7.837 | 338.752 | 3.682 s recorded integration wall time |
+
+The pySecDec direct-library cross-check is more informative than simply
+dividing by `--pysecdec-maxeval`.  A verbose direct call reported 302
+generated sector/order integrals, each with `n = 10061`, for 3,038,422
+generated-integrand evaluations.  The measured wall time was 3.552 s, giving
+about 1.17 us per generated sector/order integrand evaluation.  The summed
+per-integral timings gave 3.426 s, or 1.13 us/evaluation.  Per-integral timing
+spread was 0.33 to 11.78 us/evaluation, with a median of 0.56 us.
+
+An auxiliary sweep at `maxeval = 100, 300, 1000, 3000` remained nearly flat at
+about 3.5 s per pySecDec call.  This shows that `integration wall time /
+maxeval` is not a reliable per-sample metric for this double-box package:
+pySecDec enforces a minimum-work floor (`mineval`/QMC refinement) and the
+actual exposed work count is the verbose `n = 10061` per generated
+sector/order integral.
 
 The latest completed compressed triple-box bundle was generated with
 pregenerated dual evaluators, IBP endpoint lowering, and no chain-rule formula

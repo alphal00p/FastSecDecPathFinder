@@ -37,7 +37,7 @@ from definitions import IntegralRequest, TargetDefinition
 from definitions import HotPathTiming
 from definitions import EpsilonExpansion, ParametricRepresentation
 from dot_parser import parse_dot_file
-from dot_topology import GammaLoopDotTopologyBuilder
+from dot_topology import GammaLoopDotTopologyBuilder, clear_dot_bundle_cache
 from formatting import (
     apply_global_convention,
     make_output,
@@ -54,6 +54,11 @@ from integrand import (
     SectorProcessor,
     TopologyDefinition,
     _multi_set_cache_key,
+    _decimal_complex,
+    _expr_derivative_coefficient,
+    _expr_series_mul,
+    _expr_series_pow_real,
+    _multi_indices,
     _regular_taylor_signature_axis_count,
     _regular_taylor_signature_volume,
     _series_log_allowed,
@@ -134,6 +139,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "dual_evaluator_mode": "pregenerate",
         "subtraction_backend": "formula",
         "ibp_reduce_to_log_endpoint": False,
+        "ibp_power_goal": None,
         "direct_projector_cache_term_threshold": 54,
         "allow_fallback_for_missing_caches": True,
         "force_regular_taylor_formulas": False,
@@ -239,6 +245,151 @@ def test_two_stage_sector_backend_matches_projector_box(
         checked += 1
     assert checked == 12
     assert max_diff < 1.0e-12
+
+
+def test_explicit_sector_backend_matches_projector_triangle() -> None:
+    """The single-evaluator explicit path must reproduce projector subtraction."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        sector_evaluator_backend="explicit",
+    )
+    explicit_topology = build_topology(request)
+    explicit_sectors = generate_sectors(request)
+    explicit_topology.prepare_endpoint_projector_formulas(explicit_sectors)
+    explicit_topology.prepare_explicit_sector_formulas(explicit_sectors)
+
+    projector_request = replace(request, sector_evaluator_backend="projector")
+    projector_topology = build_topology(projector_request)
+    projector_sectors = generate_sectors(projector_request)
+    prepare_generated_evaluators(
+        projector_topology,
+        projector_sectors,
+        mode="pregenerate",
+        subtraction_backend="projector-formula",
+    )
+
+    explicit_processor = SectorProcessor(
+        explicit_topology,
+        subtraction_backend="projector-formula",
+    )
+    projector_processor = SectorProcessor(
+        projector_topology,
+        subtraction_backend="projector-formula",
+    )
+    max_diff = 0.0
+    checked = 0
+    for explicit_sector, projector_sector in zip(explicit_sectors, projector_sectors):
+        point = np.full((1, explicit_sector.integration_dim), 0.37)
+        explicit_coeffs, _training, _timing = explicit_processor.evaluate_batch(
+            explicit_sector,
+            point,
+        )
+        projector_coeffs, _training, _timing = projector_processor.evaluate_batch(
+            projector_sector,
+            point,
+        )
+        max_diff = max(max_diff, float(np.max(np.abs(explicit_coeffs - projector_coeffs))))
+        checked += 1
+
+    assert checked == len(explicit_sectors)
+    assert max_diff < 1.0e-12
+
+
+def test_explicit_sector_backend_matches_projector_box_with_numerator() -> None:
+    """Explicit singular sectors include numerator epsilon-polynomial Taylor data."""
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/box_rank2_numerator.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/box_kinematics.yaml"),
+        mode="massless",
+        subtraction_backend="projector-formula",
+        sector_evaluator_backend="explicit",
+        prefactor_convention="pysecdec",
+    )
+    explicit_topology = build_topology(request)
+    explicit_sectors = generate_sectors(request)
+    configure_laurent_range(request, explicit_topology, explicit_sectors)
+    explicit_topology.prepare_endpoint_projector_formulas(explicit_sectors)
+    explicit_topology.prepare_explicit_sector_formulas(explicit_sectors)
+
+    projector_request = replace(request, sector_evaluator_backend="projector")
+    projector_topology = build_topology(projector_request)
+    projector_sectors = generate_sectors(projector_request)
+    configure_laurent_range(projector_request, projector_topology, projector_sectors)
+    prepare_generated_evaluators(
+        projector_topology,
+        projector_sectors,
+        mode="pregenerate",
+        subtraction_backend="projector-formula",
+    )
+
+    explicit_processor = SectorProcessor(
+        explicit_topology,
+        subtraction_backend="projector-formula",
+        stability_threshold=0.0,
+        high_precision_stability_threshold=0.0,
+    )
+    projector_processor = SectorProcessor(
+        projector_topology,
+        subtraction_backend="projector-formula",
+        stability_threshold=0.0,
+        high_precision_stability_threshold=0.0,
+    )
+    max_diff = 0.0
+    for index, (explicit_sector, projector_sector) in enumerate(
+        zip(explicit_sectors, projector_sectors)
+    ):
+        rng = np.random.default_rng(1701 + index)
+        point = 0.2 + 0.6 * rng.random((2, explicit_sector.integration_dim))
+        explicit_coeffs, _training, _timing = explicit_processor.evaluate_batch(
+            explicit_sector,
+            point,
+        )
+        projector_coeffs, _training, _timing = projector_processor.evaluate_batch(
+            projector_sector,
+            point,
+        )
+        max_diff = max(max_diff, float(np.max(np.abs(explicit_coeffs - projector_coeffs))))
+
+    assert max_diff < 1.0e-12
+
+
+def test_dot_explicit_bundle_cache_does_not_contaminate_projector_backend() -> None:
+    """DOT bundle reuse must not make normal projector mode dispatch through explicit formulas."""
+    clear_dot_bundle_cache()
+    request = make_request(
+        integral="dot",
+        dot_file=str(PROJECT_ROOT / "examples/graphs/double_box.dot"),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/double_box_kinematics.yaml"),
+        sector_method="iterative",
+        subtraction_backend="projector-formula",
+        sector_evaluator_backend="explicit",
+        prefactor_convention="pysecdec",
+    )
+    explicit_topology = build_topology(request)
+    explicit_sectors = generate_sectors(request)
+    configure_laurent_range(request, explicit_topology, explicit_sectors)
+    explicit_topology.prepare_endpoint_projector_formulas(explicit_sectors)
+    explicit_topology.prepare_explicit_sector_formulas(explicit_sectors)
+    assert len(explicit_topology._explicit_sector_formulas) == len(explicit_sectors)
+
+    projector_request = replace(request, sector_evaluator_backend="projector")
+    projector_topology = build_topology(projector_request)
+    projector_sectors = generate_sectors(projector_request)
+    configure_laurent_range(projector_request, projector_topology, projector_sectors)
+    prepare_generated_evaluators(
+        projector_topology,
+        projector_sectors,
+        mode="pregenerate",
+        subtraction_backend="projector-formula",
+    )
+
+    assert len(projector_topology._explicit_sector_formulas) == 0
+    assert projector_topology.explicit_sector_formula_for(projector_sectors[0]) is None
 
 
 def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,6 +564,7 @@ def test_run_yaml_ibp_can_be_disabled_from_cli() -> None:
     )
 
     assert request.ibp_reduce_to_log_endpoint is False
+    assert request.ibp_power_goal is None
 
 
 def test_direct_projector_cache_threshold_cli_option() -> None:
@@ -428,6 +580,26 @@ def test_direct_projector_cache_threshold_cli_option() -> None:
     )
 
     assert request.direct_projector_cache_term_threshold == 64
+
+
+def test_explicit_backend_cli_shortcut() -> None:
+    """The comparison backend has a compact CLI alias."""
+    request = build_request(parse_args(["--explicit", "--no-progress"]))
+
+    assert request.sector_evaluator_backend == "explicit"
+
+
+def test_ibp_power_goal_cli_and_aliases() -> None:
+    """Numeric IBP goals and the legacy log-endpoint alias normalize consistently."""
+    goal_request = build_request(
+        parse_args(["--ibp-power-goal", "-3", "--no-progress"])
+    )
+    alias_request = build_request(parse_args(["--ibp-reduce-to-log-endpoint", "--no-progress"]))
+
+    assert goal_request.ibp_power_goal == -3
+    assert goal_request.ibp_reduce_to_log_endpoint is False
+    assert alias_request.ibp_power_goal == -1
+    assert alias_request.ibp_reduce_to_log_endpoint is True
 
 
 def test_all_example_run_presets_parse_and_resolve_paths() -> None:
@@ -665,7 +837,7 @@ def test_curated_direct_projector_threshold_zero_keeps_ibp(
         endpoint_taylor_orders=[1],
     )
 
-    assert topology.endpoint_projector_signature(sector)[2] is True
+    assert topology.endpoint_projector_signature(sector)[2] == -1
 
 
 def test_promote_subtraction_formula_asset_script(tmp_path: Path) -> None:
@@ -1737,6 +1909,41 @@ def test_ibp_endpoint_projector_formula_builds_for_higher_endpoint_power(
     assert any(key[0] == (0,) for key in formula.coefficient_layout)
     assert any(key[2] == (1,) for key in formula.coefficient_layout)
     assert list(tmp_path.glob("endpoint_projector_*.json"))
+
+
+def test_expression_series_integer_inverse_cancels_endpoint_monomial() -> None:
+    """Expression-side monomial division must not use float log/exp powers.
+
+    The explicit IBP sector path builds residuals such as ``F/M_F`` as
+    Symbolica Taylor series.  A previous implementation used ``exp(-log(M))``
+    for the integer inverse of ``M``.  Near multi-axis corners this introduced
+    tiny floating coefficient errors in huge inverse-monomial coefficients,
+    which survived cancellation and looked like real endpoint power growth.
+    """
+    y_symbols = [S(f"toy_y{index}") for index in range(4)]
+    monomial = y_symbols[0] * (y_symbols[1] ** 2) * y_symbols[2] * y_symbols[3]
+    max_orders = [1, 1, 1, 1]
+    monomial_series = {
+        multi: _expr_derivative_coefficient(monomial, y_symbols, multi)
+        for multi in _multi_indices(max_orders)
+    }
+    unity_series = _expr_series_mul(
+        monomial_series,
+        _expr_series_pow_real(monomial_series, -1.0, max_orders),
+        max_orders,
+    )
+    probe_multi = (1, 1, 1, 1)
+    evaluator = integrand_module.Expression.evaluator_multiple(
+        [unity_series.get(probe_multi, E("0"))],
+        y_symbols,
+    )
+    value = evaluator.evaluate_complex_with_prec(
+        [_decimal_complex(1.0e-4, 1000) for _ in y_symbols],
+        1000,
+    )[0]
+
+    assert value[0] == 0
+    assert value[1] == 0
 
 
 def test_ibp_shared_taylor_envelopes_cover_child_projectors(

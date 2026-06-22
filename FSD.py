@@ -158,13 +158,24 @@ def validate_request(request: IntegralRequest) -> None:
     if request.high_precision_stability_precision <= 0:
         raise ValueError("--high-precision-stability-precision must be positive")
     if (
-        request.ibp_reduce_to_log_endpoint
+        request.sector_evaluator_backend in {"two-stage-explicit", "explicit"}
         and request.subtraction_backend != "projector-formula"
     ):
         raise ValueError(
-            "--IBP_reduce_to_log_endpoint is only supported with "
+            "--sector-evaluator-backend two-stage-explicit/explicit requires "
             "--subtraction-backend projector-formula"
         )
+    if (
+        (request.ibp_power_goal is not None or request.ibp_reduce_to_log_endpoint)
+        and request.subtraction_backend != "projector-formula"
+        and request.sector_evaluator_backend != "explicit"
+    ):
+        raise ValueError(
+            "--ibp-power-goal/--IBP_reduce_to_log_endpoint is only supported with "
+            "--subtraction-backend projector-formula or --explicit"
+        )
+    if request.ibp_power_goal is not None and request.ibp_power_goal > -1:
+        raise ValueError("--ibp-power-goal must be <= -1; use no IBP flag to disable lowering")
     if (
         request.force_regular_taylor_formulas
         and request.subtraction_backend != "projector-formula"
@@ -560,15 +571,23 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     )
     parser.add_argument(
         "--sector-evaluator-backend",
-        choices=["projector", "two-stage-explicit"],
+        choices=["projector", "two-stage-explicit", "explicit"],
         default="projector",
         help=(
             "Singular-sector runtime evaluator layout. 'projector' keeps the "
             "current endpoint-projector path. 'two-stage-explicit' prepares "
             "one source-coefficient evaluator and one assembler evaluator per "
             "singular sector; this is an experimental PSD2-derived path for "
-            "prepared DOT bundles."
+            "prepared DOT bundles. 'explicit' builds one fully substituted "
+            "multi-output Symbolica evaluator per sector."
         ),
+    )
+    parser.add_argument(
+        "--explicit",
+        dest="sector_evaluator_backend",
+        action="store_const",
+        const="explicit",
+        help="Shortcut for --sector-evaluator-backend explicit.",
     )
     parser.add_argument(
         "--regular-taylor-signature-limit",
@@ -843,8 +862,19 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         dest="ibp_reduce_to_log_endpoint",
         action="store_true",
         help=(
-            "For --subtraction-backend projector-formula, lower y^(-n+c eps) "
-            "endpoints to logarithmic y^(-1+c eps) endpoints by integration by parts."
+            "For endpoint-projector generation, lower y^(-n+c eps) endpoints "
+            "to logarithmic y^(-1+c eps) endpoints by integration by parts. "
+            "Equivalent to --ibp-power-goal -1."
+        ),
+    )
+    parser.add_argument(
+        "--ibp-power-goal",
+        type=int,
+        default=defaults.get("ibp_power_goal"),
+        help=(
+            "Numeric IBP endpoint lowering goal. For example -3 lowers "
+            "endpoints only until their base power is >= -3; -1 reproduces "
+            "--ibp-reduce-to-log-endpoint. Omit to disable IBP lowering."
         ),
     )
     parser.add_argument(
@@ -880,6 +910,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-eps-order" in raw_argv
         or "max_eps_order" in defaults
         or "max-eps-order" in defaults
+    )
+    parsed.ibp_power_goal_explicit = "--ibp-power-goal" in raw_argv
+    parsed.ibp_reduce_disabled_explicit = (
+        "--no-IBP_reduce_to_log_endpoint" in raw_argv
+        or "--no-ibp-reduce-to-log-endpoint" in raw_argv
     )
     return parsed
 
@@ -921,6 +956,17 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         regular_taylor_signature_limit = max(regular_taylor_signature_limit, 1_000_000)
         regular_taylor_formula_volume_limit = max(regular_taylor_formula_volume_limit, 1_000_000)
         regular_taylor_formula_axis_limit = max(regular_taylor_formula_axis_limit, 32)
+    if bool(getattr(args, "ibp_power_goal_explicit", False)):
+        ibp_power_goal = None if args.ibp_power_goal is None else int(args.ibp_power_goal)
+    elif bool(getattr(args, "ibp_reduce_disabled_explicit", False)):
+        ibp_power_goal = None
+    elif args.ibp_power_goal is not None:
+        ibp_power_goal = int(args.ibp_power_goal)
+    elif bool(args.ibp_reduce_to_log_endpoint):
+        ibp_power_goal = -1
+    else:
+        ibp_power_goal = None
+    ibp_reduce_to_log_endpoint = ibp_power_goal == -1
 
     return IntegralRequest(
         run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
@@ -968,7 +1014,8 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
         sector_evaluator_backend=args.sector_evaluator_backend,
-        ibp_reduce_to_log_endpoint=args.ibp_reduce_to_log_endpoint,
+        ibp_reduce_to_log_endpoint=ibp_reduce_to_log_endpoint,
+        ibp_power_goal=ibp_power_goal,
         direct_projector_cache_term_threshold=args.direct_projector_cache_term_threshold,
         allow_fallback_for_missing_caches=bool(
             args.allow_fallback_for_missing_caches or command == "cache"
@@ -1440,10 +1487,10 @@ def _prepare_sector_runtime_artifacts(
     topology.allow_fallback_for_missing_caches = request.allow_fallback_for_missing_caches
     bridge_already_prepared_dot_duals = (
         request.command == "generate" and request.integral == "dot"
-        and request.sector_evaluator_backend != "two-stage-explicit"
+        and request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
     )
     if (
-        request.sector_evaluator_backend != "two-stage-explicit"
+        request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
         and not bridge_already_prepared_dot_duals
     ):
         topology.prepare_dual_evaluators(
@@ -1456,7 +1503,9 @@ def _prepare_sector_runtime_artifacts(
         topology.prepare_subtraction_formulas(active_sectors, progress=generation_progress)
     elif request.subtraction_backend == "projector-formula":
         topology.prepare_endpoint_projector_formulas(active_sectors, progress=generation_progress)
-        if request.sector_evaluator_backend == "two-stage-explicit":
+        if request.sector_evaluator_backend == "explicit":
+            topology.prepare_explicit_sector_formulas(active_sectors, progress=generation_progress)
+        elif request.sector_evaluator_backend == "two-stage-explicit":
             topology.prepare_two_stage_sector_formulas(active_sectors, progress=generation_progress)
         else:
             topology.prepare_regular_taylor_formulas(active_sectors, progress=generation_progress)
@@ -1544,6 +1593,15 @@ def _record_generation_artifact_timings(
                 "source+assembler sector evaluator pair(s)"
             ),
         )
+    if getattr(topology, "explicit_sector_formula_build_seconds", 0.0) > 0.0:
+        get_dot_bundle(request).timings.add(
+            "Symbolica explicit sector build",
+            topology.explicit_sector_formula_build_seconds,
+            detail=(
+                f"{getattr(topology, 'explicit_sector_formulas_generated', 0)} "
+                "single-evaluator sector integrand(s)"
+            ),
+        )
 
 
 def main() -> int:
@@ -1609,6 +1667,7 @@ def main() -> int:
                 dot_sector_laurent_max_order=int(topology.laurent_max_order),
                 dual_evaluator_mode=topology.dual_evaluator_mode,
                 ibp_reduce_to_log_endpoint=topology.ibp_reduce_to_log_endpoint,
+                ibp_power_goal=topology.ibp_power_goal,
                 subtraction_backend=str(
                     generation_options.get("subtraction_backend", request.subtraction_backend)
                 ),

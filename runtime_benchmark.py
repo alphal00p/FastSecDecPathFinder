@@ -15,6 +15,7 @@ import numpy as np
 from prettytable import PrettyTable
 
 from definitions import IntegralRequest
+from formatting import json_default
 from integrator import _make_sector_processor
 
 try:
@@ -271,7 +272,7 @@ def run_sector_runtime_benchmark(
         summary=summary,
     )
     if request.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
+        print(json.dumps(report, default=json_default, indent=2, sort_keys=True))
     else:
         _print_runtime_report(report, records, show_all=bool(request.show_stats))
     return report

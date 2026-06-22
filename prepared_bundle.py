@@ -27,6 +27,7 @@ from definitions import EpsilonExpansion, IntegralRequest, ParametricRepresentat
 from integrand import (
     ChainRuleFormulaDefinition,
     EndpointProjectorFormulaDefinition,
+    ExplicitSectorFormulaDefinition,
     IBPEndpointProjectorTerm,
     RegularTaylorFormulaDefinition,
     SubtractionFormulaDefinition,
@@ -36,7 +37,7 @@ from integrand import (
 from sectors_generator import SectorDefinition
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _json_default(value: Any) -> Any:
@@ -308,6 +309,7 @@ def _topology_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[
         "jit_compile_evaluators": topology.jit_compile_evaluators,
         "dual_evaluator_mode": topology.dual_evaluator_mode,
         "ibp_reduce_to_log_endpoint": topology.ibp_reduce_to_log_endpoint,
+        "ibp_power_goal": topology.ibp_power_goal,
         "parametric_representation": _parametric_to_json(topology.parametric_representation),
         "regular_taylor_signature_version": topology._regular_taylor_signature_version,
         "regular_taylor_formula_signature_limit": topology.regular_taylor_formula_signature_limit,
@@ -398,6 +400,11 @@ def _load_topology(data: dict[str, Any], store: PreparedEvaluatorStore) -> Topol
         jit_compile_evaluators=bool(data.get("jit_compile_evaluators", False)),
         dual_evaluator_mode=str(data.get("dual_evaluator_mode", "pregenerate")),
         ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
+        ibp_power_goal=(
+            int(data["ibp_power_goal"])
+            if data.get("ibp_power_goal") is not None
+            else (-1 if bool(data.get("ibp_reduce_to_log_endpoint", False)) else None)
+        ),
         skip_evaluator_build=True,
         strict_prepared_bundle=True,
         parametric_representation=_parametric_from_json(data.get("parametric_representation")),
@@ -694,6 +701,7 @@ def _endpoint_formula_json(writer: _BundleWriter, formula: EndpointProjectorForm
         "taylor_orders": formula.taylor_orders,
         "coefficient_layout": _encode(tuple(formula.coefficient_layout)),
         "ibp_reduce_to_log_endpoint": formula.ibp_reduce_to_log_endpoint,
+        "ibp_power_goal": formula.ibp_power_goal,
         "ibp_terms": [_ibp_term_to_json(term) for term in formula.ibp_terms],
         "build_seconds": formula.build_seconds,
     }
@@ -712,6 +720,11 @@ def _load_endpoint_formula(data: dict[str, Any], store: PreparedEvaluatorStore) 
         taylor_orders=[int(order) for order in data["taylor_orders"]],
         coefficient_layout=[tuple(item) for item in _decode(data["coefficient_layout"])],
         ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
+        ibp_power_goal=(
+            int(data["ibp_power_goal"])
+            if data.get("ibp_power_goal") is not None
+            else (-1 if bool(data.get("ibp_reduce_to_log_endpoint", False)) else None)
+        ),
         ibp_terms=[_ibp_term_from_json(item) for item in data.get("ibp_terms", [])],
         build_seconds=float(data.get("build_seconds", 0.0)),
     )
@@ -903,6 +916,46 @@ def _load_two_stage_formula(
     )
 
 
+def _explicit_formula_json(
+    writer: _BundleWriter,
+    formula: ExplicitSectorFormulaDefinition,
+) -> dict[str, Any]:
+    """Serialize one sector-specific explicit evaluator."""
+    return {
+        "sector_name": formula.sector_name,
+        "input_names": formula.input_names,
+        "laurent_orders": [int(order) for order in formula.laurent_orders],
+        "evaluator": writer.save_evaluator(
+            formula.evaluator,
+            "explicit_sector",
+            formula.sector_name,
+        ),
+        "expression_build_seconds": formula.expression_build_seconds,
+        "evaluator_build_seconds": formula.evaluator_build_seconds,
+        "expression_bytes": formula.expression_bytes,
+        "evaluator_bytes": formula.evaluator_bytes,
+        "source_kind": formula.source_kind,
+    }
+
+
+def _load_explicit_formula(
+    data: dict[str, Any],
+    store: PreparedEvaluatorStore,
+) -> ExplicitSectorFormulaDefinition:
+    """Hydrate a lazy explicit sector evaluator from a prepared bundle."""
+    return ExplicitSectorFormulaDefinition(
+        sector_name=str(data["sector_name"]),
+        input_names=[str(name) for name in data["input_names"]],
+        laurent_orders=[int(order) for order in data["laurent_orders"]],
+        evaluator=_ref(store, data["evaluator"]),
+        expression_build_seconds=float(data.get("expression_build_seconds", 0.0)),
+        evaluator_build_seconds=float(data.get("evaluator_build_seconds", 0.0)),
+        expression_bytes=int(data.get("expression_bytes", 0)),
+        evaluator_bytes=int(data.get("evaluator_bytes", 0)),
+        source_kind=str(data.get("source_kind", "explicit-sector-expression")),
+    )
+
+
 def _formula_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[str, Any]:
     """Serialize all prepared formula families."""
     return {
@@ -925,6 +978,10 @@ def _formula_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[s
         "two_stage_sector": [
             _two_stage_formula_json(writer, formula)
             for formula in getattr(topology, "_two_stage_sector_formulas", {}).values()
+        ],
+        "explicit_sector": [
+            _explicit_formula_json(writer, formula)
+            for formula in getattr(topology, "_explicit_sector_formulas", {}).values()
         ],
     }
 
@@ -960,6 +1017,13 @@ def _load_formulas(data: dict[str, Any], topology: TopologyDefinition, store: Pr
         for formula in (
             _load_two_stage_formula(item, store)
             for item in data.get("two_stage_sector", [])
+        )
+    }
+    topology._explicit_sector_formulas = {
+        formula.sector_name: formula
+        for formula in (
+            _load_explicit_formula(item, store)
+            for item in data.get("explicit_sector", [])
         )
     }
 
@@ -1004,6 +1068,7 @@ def save_prepared_bundle(
             "subtraction_backend": request.subtraction_backend,
             "sector_evaluator_backend": request.sector_evaluator_backend,
             "ibp_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,
+            "ibp_power_goal": request.ibp_power_goal,
             "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
             "allow_fallback_for_missing_caches": request.allow_fallback_for_missing_caches,
             "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
@@ -1031,6 +1096,7 @@ def save_prepared_bundle(
             "regular_taylor_formulas": len(topology._regular_taylor_formulas),
             "chain_rule_formulas": len(topology._chain_rule_formulas),
             "two_stage_sector_formulas": len(getattr(topology, "_two_stage_sector_formulas", {})),
+            "explicit_sector_formulas": len(getattr(topology, "_explicit_sector_formulas", {})),
             "evaluator_files": len(list((root / "evaluators").glob("*.bin")))
             + len(list((root / "evaluators").glob("*.bin.gz"))),
         },

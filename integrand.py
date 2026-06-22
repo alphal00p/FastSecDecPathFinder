@@ -271,7 +271,7 @@ ComplexPreciseRow = list[ComplexPrecise]
 CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS = 4
 CHAIN_RULE_FORMULA_CACHE_VERSION = 4
 CHAIN_RULE_EXPRESSION_CACHE_VERSION = 1
-TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION = 1
+TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION = 2
 
 
 class _SerializedEvaluatorRef:
@@ -386,6 +386,7 @@ class TopologyDefinition:
     jit_compile_evaluators: bool = False
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
+    ibp_power_goal: int | None = None
     skip_evaluator_build: bool = False
     strict_prepared_bundle: bool = False
     chain_rule_metadata_only: bool = False
@@ -444,6 +445,9 @@ class TopologyDefinition:
     _two_stage_sector_formulas: dict[
         str, "TwoStageSectorFormulaDefinition"
     ] = field(default_factory=dict, init=False, repr=False)
+    _explicit_sector_formulas: dict[
+        str, "ExplicitSectorFormulaDefinition"
+    ] = field(default_factory=dict, init=False, repr=False)
     _chain_rule_formula_lookup_cache: dict[
         tuple[str, str, tuple[tuple[int, ...], ...]], "ChainRuleFormulaDefinition"
     ] = field(default_factory=dict, init=False, repr=False)
@@ -492,9 +496,14 @@ class TopologyDefinition:
     chain_rule_formula_generation_seconds: float = field(default=0.0, init=False)
     two_stage_sector_formula_build_seconds: float = field(default=0.0, init=False)
     two_stage_sector_formulas_generated: int = field(default=0, init=False)
+    explicit_sector_formula_build_seconds: float = field(default=0.0, init=False)
+    explicit_sector_formulas_generated: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         """Build the scalar U and F evaluators in the declared row order."""
+        if self.ibp_power_goal is None and self.ibp_reduce_to_log_endpoint:
+            self.ibp_power_goal = -1
+        self.ibp_reduce_to_log_endpoint = self.ibp_power_goal == -1
         allowed_modes = {"pregenerate", "lazy", "single-overall", "symbolic-derivatives"}
         if self.dual_evaluator_mode not in allowed_modes:
             raise ValueError(
@@ -1070,7 +1079,7 @@ class TopologyDefinition:
             if not sector.singular_axes:
                 continue
             signature = self.endpoint_projector_signature(sector)
-            if self.ibp_reduce_to_log_endpoint and not bool(signature[2]):
+            if self.ibp_power_goal is not None and signature[2] is False:
                 override_sector_count += 1
                 override_signatures.add(signature)
             if signature in self._endpoint_projector_formulas or signature in seen:
@@ -1167,13 +1176,13 @@ class TopologyDefinition:
         endpoint_powers: list[tuple[int, float]],
         taylor_orders: list[int],
         *,
-        use_ibp: bool,
+        ibp_power_goal: int | None,
     ) -> tuple[Any, ...]:
         """Build the topology-independent endpoint-projector signature."""
         return (
             "endpoint-projector",
             2,
-            bool(use_ibp),
+            False if ibp_power_goal is None else int(ibp_power_goal),
             len(sector.singular_axes),
             tuple(endpoint_powers),
             tuple(taylor_orders),
@@ -1185,28 +1194,31 @@ class TopologyDefinition:
         sector: SectorDefinition,
         endpoint_powers: list[tuple[int, float]],
         taylor_orders: list[int],
-    ) -> bool:
+    ) -> int | None:
         """Choose IBP or a shipped direct projector for this endpoint signature."""
-        if not self.ibp_reduce_to_log_endpoint:
-            return False
+        if self.ibp_power_goal is None:
+            return None
+        goal = int(self.ibp_power_goal)
+        if goal != -1:
+            return goal
         threshold = int(self.direct_projector_cache_term_threshold)
         if threshold <= 0:
-            return True
-        ibp_term_count = len(_ibp_endpoint_projector_terms(endpoint_powers, self.laurent_orders))
+            return goal
+        ibp_term_count = len(_ibp_endpoint_projector_terms(endpoint_powers, self.laurent_orders, goal))
         if ibp_term_count < threshold:
-            return True
+            return goal
         direct_signature = self._endpoint_projector_signature_from_components(
             sector,
             endpoint_powers,
             taylor_orders,
-            use_ibp=False,
+            ibp_power_goal=None,
         )
-        return not endpoint_projector_formula_has_curated_cache(direct_signature)
+        return None if endpoint_projector_formula_has_curated_cache(direct_signature) else goal
 
     def endpoint_projector_signature(self, sector: SectorDefinition) -> tuple[Any, ...]:
         """Return the cache key for the endpoint-only projector formula."""
         endpoint_powers, taylor_orders = self._endpoint_projector_signature_components(sector)
-        use_ibp = self._effective_endpoint_projector_uses_ibp(
+        ibp_power_goal = self._effective_endpoint_projector_uses_ibp(
             sector,
             endpoint_powers,
             taylor_orders,
@@ -1215,7 +1227,7 @@ class TopologyDefinition:
             sector,
             endpoint_powers,
             taylor_orders,
-            use_ibp=use_ibp,
+            ibp_power_goal=ibp_power_goal,
         )
 
     def endpoint_projector_formula_for(
@@ -1230,12 +1242,17 @@ class TopologyDefinition:
         )
         if formula is None and self.strict_prepared_bundle:
             endpoint_powers, taylor_orders = self._endpoint_projector_signature_components(sector)
-            for use_ibp in (False, True):
+            alternate_goals: list[int | None] = [None]
+            if self.ibp_power_goal is not None:
+                alternate_goals.append(int(self.ibp_power_goal))
+            if -1 not in alternate_goals:
+                alternate_goals.append(-1)
+            for ibp_power_goal in alternate_goals:
                 alternate_signature = self._endpoint_projector_signature_from_components(
                     sector,
                     endpoint_powers,
                     taylor_orders,
-                    use_ibp=use_ibp,
+                    ibp_power_goal=ibp_power_goal,
                 )
                 formula = self._lookup_formula_with_laurent_superset(
                     self._endpoint_projector_formulas,
@@ -1927,6 +1944,67 @@ class TopologyDefinition:
     ) -> "TwoStageSectorFormulaDefinition | None":
         """Return a prepared source+assembler evaluator pair for a sector."""
         return self._two_stage_sector_formulas.get(sector.name)
+
+    def prepare_explicit_sector_formulas(
+        self,
+        sectors: list[SectorDefinition],
+        progress: Any | None = None,
+    ) -> None:
+        """Build one fully explicit multi-output evaluator per sector."""
+        pending = [
+            sector
+            for sector in sectors
+            if sector.name not in self._explicit_sector_formulas
+        ]
+        if not pending:
+            return
+        if progress is not None:
+            progress.start_stage(
+                "Symbolica explicit sector build",
+                detail=f"{len(pending)} sector evaluator(s)",
+                total=len(pending),
+            )
+        start_all = time.perf_counter()
+        try:
+            for index, sector in enumerate(pending, start=1):
+                if progress is not None:
+                    progress.update(
+                        index - 1,
+                        total=len(pending),
+                        detail=f"{sector.name} explicit {index}/{len(pending)}",
+                    )
+                start = time.perf_counter()
+                formula = build_explicit_sector_formula(
+                    self,
+                    sector,
+                    progress=progress,
+                    progress_index=index,
+                    progress_total=len(pending),
+                )
+                elapsed = time.perf_counter() - start
+                self._explicit_sector_formulas[sector.name] = formula
+                self.explicit_sector_formulas_generated += 1
+                self.explicit_sector_formula_build_seconds += elapsed
+                if progress is not None:
+                    progress.update(
+                        index,
+                        total=len(pending),
+                        detail=f"{sector.name} explicit done in {elapsed:.3g}s",
+                    )
+        finally:
+            if progress is not None:
+                progress.finish_stage(
+                    "Symbolica explicit sector build",
+                    time.perf_counter() - start_all,
+                    detail=f"{len(pending)} sector evaluator(s)",
+                )
+
+    def explicit_sector_formula_for(
+        self,
+        sector: SectorDefinition,
+    ) -> "ExplicitSectorFormulaDefinition | None":
+        """Return a prepared explicit evaluator for a sector."""
+        return self._explicit_sector_formulas.get(sector.name)
 
     def regular_taylor_signatures_for_sector(
         self,
@@ -3805,6 +3883,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
+            ibp_power_goal=request.ibp_power_goal,
         )
     if request.integral == "box":
         if request.s12 is None or request.s23 is None:
@@ -3836,6 +3915,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             jit_compile_evaluators=request.jit_compile_evaluators,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
+            ibp_power_goal=request.ibp_power_goal,
         )
     raise ValueError(f"unsupported integral {request.integral!r}")
 
@@ -5143,10 +5223,69 @@ def _expr_series_exp(a: ExprSeries, max_orders: list[int]) -> ExprSeries:
     )
 
 
+def _expr_binomial_integer(exponent: int, order: int) -> int:
+    """Return the exact generalized binomial coefficient for integer powers."""
+    k = int(order)
+    n = int(exponent)
+    if k < 0:
+        return 0
+    if k == 0:
+        return 1
+    if n >= 0:
+        if k > n:
+            return 0
+        return math.comb(n, k)
+    return (-1 if k % 2 else 1) * math.comb(-n + k - 1, k)
+
+
+def _expr_series_integer_power(
+    a: ExprSeries,
+    exponent: int,
+    max_orders: list[int],
+) -> ExprSeries:
+    """Raise a Symbolica Taylor series to an integer power exactly.
+
+    The explicit/two-stage sector builders use this path for extracted
+    monomial residuals such as ``F/M_F``.  Using ``exp(n log(M))`` here injects
+    floating constants into coefficients that can be as large as inverse powers
+    of endpoint coordinates.  Multi-axis IBP projectors then amplify those tiny
+    coefficient errors into apparent power divergences.  The integer binomial
+    series keeps the cancellation exact in the generated Symbolica expression.
+    """
+    n = int(exponent)
+    if n == 0:
+        return _expr_series_constant(E("1"), max_orders)
+    zero = _zero_multi(len(max_orders))
+    constant = a[zero]
+    h = {
+        key: value / constant
+        for key, value in a.items()
+        if key != zero
+    }
+    total = _expr_series_constant(E("1"), max_orders)
+    if h:
+        h_power = h
+        for order in range(1, sum(max_orders) + 1):
+            coeff = _expr_binomial_integer(n, order)
+            if coeff:
+                total = _expr_series_add(total, _expr_series_scale(h_power, E(str(coeff))))
+            h_power = _expr_series_mul(h_power, h, max_orders)
+            if not h_power:
+                break
+    return _expr_series_mul(
+        _expr_series_constant(_expression_int_power(constant, n), max_orders),
+        total,
+        max_orders,
+    )
+
+
 def _expr_series_pow_real(a: ExprSeries, power: float, max_orders: list[int]) -> ExprSeries:
     """Raise a Symbolica Taylor series to a real power."""
     if abs(power) <= 1.0e-15:
         return _expr_series_constant(E("1"), max_orders)
+    rounded = round(float(power))
+    if abs(float(power) - rounded) <= 1.0e-12:
+        return _expr_series_integer_power(a, int(rounded), max_orders)
     return _expr_series_exp(_expr_series_scale(_expr_series_log(a, max_orders), power), max_orders)
 
 
@@ -5227,6 +5366,7 @@ class EndpointProjectorFormulaDefinition:
     taylor_orders: list[int]
     coefficient_layout: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]]
     ibp_reduce_to_log_endpoint: bool = False
+    ibp_power_goal: int | None = None
     ibp_terms: list[IBPEndpointProjectorTerm] = field(default_factory=list)
     child_formulas: dict[tuple[Any, ...], "EndpointProjectorFormulaDefinition"] = field(
         default_factory=dict
@@ -5485,6 +5625,56 @@ class TwoStageSectorFormulaDefinition:
             assembler_row,
             precision_digits,
         )
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return [complex(float(value[0]), float(value[1])) for value in values]
+
+
+@dataclass
+class ExplicitSectorFormulaDefinition:
+    """Prepared single-evaluator sector integrand.
+
+    This is the pySecDec-style comparison artifact: all sector-map
+    substitutions, endpoint-projector algebra, and epsilon expansion requested
+    for this sector have already been folded into one multi-output Symbolica
+    evaluator.  Runtime evaluation only supplies sector coordinates.
+    """
+
+    sector_name: str
+    input_names: list[str]
+    laurent_orders: list[int]
+    evaluator: Any
+    expression_build_seconds: float = 0.0
+    evaluator_build_seconds: float = 0.0
+    expression_bytes: int = 0
+    evaluator_bytes: int = 0
+    source_kind: str = "explicit-sector-expression"
+
+    def evaluate_complex_batch(
+        self,
+        rows: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate all prepared Laurent coefficients for a double batch."""
+        sample_rows = np.asarray(rows, dtype=np.complex128)
+        start = time.perf_counter()
+        values = np.asarray(self.evaluator.evaluate_complex(sample_rows), dtype=np.complex128)
+        if values.ndim == 1:
+            values = values.reshape(sample_rows.shape[0], 1)
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return values
+
+    def evaluate_complex_prec(
+        self,
+        row: np.ndarray,
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[complex]:
+        """Evaluate one row with Symbolica arbitrary precision."""
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(row, dtype=float)]
+        start = time.perf_counter()
+        values = self.evaluator.evaluate_complex_with_prec(coords, precision_digits)
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return [complex(float(value[0]), float(value[1])) for value in values]
@@ -6160,6 +6350,7 @@ def _g_coefficients_by_symbolic_diff(
     u_residual: ExprSeries,
     f_residual: ExprSeries,
     j_series: ExprSeries,
+    numerator_eps_series: list[ExprSeries],
     monomial_pref: Any,
     monomial_log: Any,
     requested_pairs: set[tuple[tuple[int, ...], int]],
@@ -6170,6 +6361,12 @@ def _g_coefficients_by_symbolic_diff(
     u_poly = _expr_series_to_polynomial(u_residual, local_symbols)
     f_poly = _expr_series_to_polynomial(f_residual, local_symbols)
     j_poly = _expr_series_to_polynomial(j_series, local_symbols)
+    numerator_polys = [
+        _expr_series_to_polynomial(series, local_symbols)
+        for series in numerator_eps_series
+    ]
+    if not numerator_polys:
+        numerator_polys = [E("1")]
     u_power = int(round(float(topology.u_power_base)))
     f_power = int(round(float(topology.f_power_base)))
     if abs(float(topology.u_power_base) - u_power) > 1.0e-12:
@@ -6196,13 +6393,17 @@ def _g_coefficients_by_symbolic_diff(
         ]
         if not pairs:
             continue
-        g_expr = (
-            prefactor
-            if regular_order == 0
-            else prefactor
-            * (eps_log ** int(regular_order))
-            / E(str(math.factorial(int(regular_order))))
-        )
+        g_expr = E("0")
+        for numerator_order in range(int(regular_order) + 1):
+            if numerator_order >= len(numerator_polys):
+                continue
+            log_order = int(regular_order) - numerator_order
+            log_term = (
+                E("1")
+                if log_order == 0
+                else (eps_log ** log_order) / E(str(math.factorial(log_order)))
+            )
+            g_expr = g_expr + prefactor * numerator_polys[numerator_order] * log_term
         for multi in pairs:
             out[int(regular_order)][tuple(multi)] = _local_taylor_coefficient_expr(
                 g_expr,
@@ -6316,7 +6517,15 @@ def _two_stage_assembler_expressions(
                     tuple(int(value) for value in original_multi),
                     int(regular_order),
                 )
-                replacements.append((child.input_names[offset + column], coefficient_symbol(key)))
+                factor = _ibp_child_taylor_factor(
+                    tuple(int(value) for value in term.derivative_multi),
+                    active_positions,
+                    tuple(int(value) for value in child_multi),
+                )
+                coeff_expr = coefficient_symbol(key)
+                if factor != 1:
+                    coeff_expr = E(str(factor)) * coeff_expr
+                replacements.append((child.input_names[offset + column], coeff_expr))
 
             active_child_exprs = [
                 E("0") if index < 0 else _as_expression(child.output_expressions[index])
@@ -6545,6 +6754,33 @@ def _two_stage_derivative_fused_components(
                 j_series[tuple(multi)] = coeff
         if not j_series:
             j_series = _expr_series_constant(E("0"), max_orders)
+        numerator_exprs = sector.numerator_eps_exprs or [E("1")]
+        numerator_eps_series: list[ExprSeries] = []
+        for order in range(topology.coefficient_count):
+            if order >= len(numerator_exprs):
+                numerator_eps_series.append({})
+                continue
+            numerator_expr_y = _replace_sector_vars(
+                sector,
+                _as_expression(numerator_exprs[order]),
+                y_symbols,
+            )
+            series: ExprSeries = {}
+            for multi in residual_multis:
+                coeff = _expr_derivative_coefficient(
+                    numerator_expr_y,
+                    singular_symbols,
+                    tuple(multi),
+                )
+                coeff = _replace_many(coeff, endpoint_y_replacements)
+                if str(coeff) != "0":
+                    series[tuple(multi)] = coeff
+            numerator_eps_series.append(series)
+        if not sector.has_nontrivial_numerator():
+            numerator_eps_series = [
+                _expr_series_constant(E("1"), max_orders),
+                *[{} for _ in range(max(topology.coefficient_count - 1, 0))],
+            ]
         monomial_pref, monomial_log = _regular_monomial_base_log_expr(topology, sector, y_symbols)
         g_expr_cache[(tuple(boundary), tuple(zero))] = _g_coefficients_by_symbolic_diff(
             topology,
@@ -6552,6 +6788,7 @@ def _two_stage_derivative_fused_components(
             u_residual,
             f_residual,
             j_series,
+            numerator_eps_series,
             monomial_pref,
             monomial_log,
             pairs,
@@ -6639,6 +6876,7 @@ def _two_stage_sector_signature(
         TWO_STAGE_SECTOR_FORMULA_CACHE_VERSION,
         tuple(topology.laurent_orders),
         bool(topology.ibp_reduce_to_log_endpoint),
+        None if topology.ibp_power_goal is None else int(topology.ibp_power_goal),
         float(topology.u_power_base),
         float(topology.f_power_base),
         float(topology.eps_log_u_coeff),
@@ -6875,6 +7113,163 @@ def build_two_stage_sector_formula(
     return formula
 
 
+def _monomial_expr_from_symbols(symbols: list[Any], powers: list[int | float]) -> Any:
+    """Build a Symbolica monomial from already chosen coordinate symbols."""
+    out = E("1")
+    for symbol, power in zip(symbols, powers):
+        rounded = round(float(power))
+        if abs(float(power) - rounded) > 1.0e-12:
+            raise ValueError(f"non-integer monomial power {power!r}")
+        if int(rounded):
+            out = out * _expression_int_power(symbol, int(rounded))
+    return out
+
+
+def _explicit_finite_sector_outputs(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> list[Any]:
+    """Build explicit finite-sector Laurent expressions in sector coordinates."""
+    y_symbols = [S(f"y{axis}") for axis in range(sector.integration_dim)]
+    map_exprs_y = [
+        _replace_sector_vars(sector, _as_expression(expr), y_symbols)
+        for expr in sector.map_exprs
+    ]
+    x_replacements = list(zip(topology.x_names, map_exprs_y))
+    params_replacements = [
+        (name, E(repr(float(value))))
+        for name, value in zip(topology.parameter_names, topology.parameter_values)
+    ]
+    u_expr = _replace_many(topology.u_expr, x_replacements)
+    f_expr = _replace_many(topology.f_expr, x_replacements)
+    if params_replacements:
+        u_expr = _replace_many(u_expr, params_replacements)
+        f_expr = _replace_many(f_expr, params_replacements)
+    u_monomial = _monomial_expr_from_symbols(y_symbols, sector.u_monomial_powers)
+    f_monomial = _monomial_expr_from_symbols(y_symbols, sector.f_monomial_powers)
+    u_residual = u_expr / u_monomial
+    f_residual = f_expr / f_monomial
+    jacobian = _replace_sector_vars(
+        sector,
+        _as_expression(sector.regular_jacobian_expr),
+        y_symbols,
+    )
+    numerator_exprs = [
+        _replace_sector_vars(sector, _as_expression(expr), y_symbols)
+        for expr in (sector.numerator_eps_exprs or [E("1")])
+    ]
+    u_power = int(round(float(topology.u_power_base)))
+    f_power = int(round(float(topology.f_power_base)))
+    if abs(float(topology.u_power_base) - u_power) > 1.0e-12:
+        raise ValueError(f"{sector.name}: explicit path requires integer U power")
+    if abs(float(topology.f_power_base) - f_power) > 1.0e-12:
+        raise ValueError(f"{sector.name}: explicit path requires integer F power")
+    monomial_pref, monomial_log = _regular_monomial_base_log_expr(topology, sector, y_symbols)
+    prefactor = (
+        monomial_pref
+        * jacobian
+        * _expression_int_power(u_residual, u_power)
+        * _expression_int_power(f_residual, -f_power)
+    )
+    eps_log = (
+        monomial_log
+        + E(repr(float(topology.eps_log_u_coeff))) * u_residual.log()
+        + E(repr(float(topology.eps_log_f_coeff))) * f_residual.log()
+    )
+    outputs: list[Any] = []
+    for eps_order in topology.laurent_orders:
+        if int(eps_order) < 0:
+            outputs.append(E("0"))
+            continue
+        value = E("0")
+        for numerator_order in range(int(eps_order) + 1):
+            if numerator_order >= len(numerator_exprs):
+                continue
+            log_order = int(eps_order) - numerator_order
+            log_term = (
+                E("1")
+                if log_order == 0
+                else (eps_log ** log_order) / E(str(math.factorial(log_order)))
+            )
+            value = value + numerator_exprs[numerator_order] * log_term
+        outputs.append(prefactor * value)
+    return outputs
+
+
+def build_explicit_sector_formula(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    progress: Any | None = None,
+    progress_index: int = 0,
+    progress_total: int = 0,
+) -> ExplicitSectorFormulaDefinition:
+    """Build a single multi-output explicit sector evaluator."""
+    expr_start = time.perf_counter()
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} explicit expressions",
+        )
+    if sector.singular_axes:
+        coefficient_outputs, _coefficient_input_names, coefficient_keys = _two_stage_assembler_expressions(
+            topology,
+            sector,
+        )
+        assembler_outputs, _assembler_input_names, derivative_slots, source_outputs = (
+            _two_stage_derivative_fused_components(
+                topology,
+                sector,
+                coefficient_outputs,
+                coefficient_keys,
+                progress=progress,
+                progress_index=progress_index,
+                progress_total=progress_total,
+            )
+        )
+        replacements = [
+            (f"d{index}", source_outputs[index])
+            for index in range(len(derivative_slots))
+        ]
+        outputs = [
+            _replace_many(expr, replacements)
+            for expr in assembler_outputs
+        ]
+        source_kind = "fused-source-assembler-explicit"
+    else:
+        outputs = _explicit_finite_sector_outputs(topology, sector)
+        source_kind = "direct-explicit-finite"
+    expr_seconds = time.perf_counter() - expr_start
+
+    eval_start = time.perf_counter()
+    if progress is not None:
+        progress.update(
+            max(int(progress_index) - 1, 0),
+            total=int(progress_total) if progress_total else 1,
+            detail=f"{sector.name} explicit evaluator",
+        )
+    evaluator = Expression.evaluator_multiple(
+        outputs,
+        [S(f"y{axis}") for axis in range(sector.integration_dim)],
+        jit_compile=topology.jit_compile_evaluators,
+    )
+    eval_seconds = time.perf_counter() - eval_start
+    evaluator_bytes = evaluator.save()
+    return ExplicitSectorFormulaDefinition(
+        sector_name=sector.name,
+        input_names=[f"y{axis}" for axis in range(sector.integration_dim)],
+        laurent_orders=list(topology.laurent_orders),
+        evaluator=evaluator,
+        expression_build_seconds=float(expr_seconds),
+        evaluator_build_seconds=float(eval_seconds),
+        expression_bytes=int(
+            sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in outputs)
+        ),
+        evaluator_bytes=len(evaluator_bytes),
+        source_kind=source_kind,
+    )
+
+
 def _subset_mask(subset: tuple[int, ...]) -> int:
     """Encode a singular-position subset as a compact integer mask."""
     mask = 0
@@ -6886,6 +7281,40 @@ def _subset_mask(subset: tuple[int, ...]) -> int:
 def _multi_suffix(multi_index: tuple[int, ...]) -> str:
     """Encode a multi-index in a Symbolica-safe symbol name."""
     return "_".join(str(int(value)) for value in multi_index) if multi_index else "none"
+
+
+def _ibp_child_taylor_factor(
+    derivative_multi: tuple[int, ...],
+    active_positions: tuple[int, ...],
+    child_multi: tuple[int, ...],
+) -> int:
+    """Return the Taylor-coefficient factor for an IBP child projector.
+
+    IBP terms act on derivatives of the regular function.  If
+
+      g(y) = sum_n c_n y^n
+
+    and a term contains ``d`` derivatives, the child projector needs Taylor
+    coefficients of ``partial^d g``.  The coefficient of child multi-index
+    ``m`` is
+
+      c_{d+m} prod_i (d_i + m_i)! / m_i!.
+
+    The IBP term prefactor already carries ``prod_i d_i!`` for the child
+    constant coefficient, so the input column only needs the remaining
+    binomial factor ``prod_i binom(d_i+m_i, d_i)``.  Missing this factor makes
+    the child subtraction cancel only the constant term and leaves artificial
+    endpoint powers in multi-axis sectors.
+    """
+    factor = 1
+    derivative = tuple(int(value) for value in derivative_multi)
+    for child_position, child_value in enumerate(child_multi):
+        original_position = int(active_positions[int(child_position)])
+        d_value = int(derivative[original_position])
+        m_value = int(child_value)
+        if d_value:
+            factor *= math.comb(d_value + m_value, d_value)
+    return int(factor)
 
 
 def build_subtraction_formula(
@@ -6940,7 +7369,8 @@ def build_ibp_endpoint_projector_formula(
 ) -> EndpointProjectorFormulaDefinition:
     """Build a compound IBP projector from cached logarithmic projectors."""
     endpoint_powers = [(int(base), float(coeff)) for base, coeff in signature[4]]
-    terms = _ibp_endpoint_projector_terms(endpoint_powers, topology.laurent_orders)
+    ibp_power_goal = -1 if signature[2] is True else int(signature[2])
+    terms = _ibp_endpoint_projector_terms(endpoint_powers, topology.laurent_orders, ibp_power_goal)
     child_formulas: dict[tuple[Any, ...], EndpointProjectorFormulaDefinition] = {}
     for term in terms:
         if term.child_signature not in child_formulas:
@@ -6966,6 +7396,7 @@ def build_ibp_endpoint_projector_formula(
         taylor_orders=list(signature[5]),
         coefficient_layout=[],
         ibp_reduce_to_log_endpoint=True,
+        ibp_power_goal=ibp_power_goal,
         ibp_terms=terms,
         child_formulas=child_formulas,
     )
@@ -7406,10 +7837,12 @@ def _inverse_affine_regular_series(offset: int, eps_coeff: float, count: int) ->
 def _ibp_endpoint_projector_terms(
     endpoint_powers: list[tuple[int, float]],
     laurent_orders: list[int],
+    ibp_power_goal: int = -1,
 ) -> list[IBPEndpointProjectorTerm]:
     """Enumerate the IBP-lowered terms for one endpoint signature."""
     n_axes = len(endpoint_powers)
     count = len(laurent_orders)
+    goal = int(ibp_power_goal)
     zero_multi = tuple(0 for _ in range(n_axes))
     raw_terms: list[
         tuple[
@@ -7420,7 +7853,7 @@ def _ibp_endpoint_projector_terms(
         ]
     ] = [([1.0 + 0.0j] + [0.0 + 0.0j for _ in range(count - 1)], (), zero_multi, tuple(range(n_axes)))]
     for position, (base, eps_coeff) in enumerate(endpoint_powers):
-        required_order = int(-int(base) - 1)
+        required_order = max(0, goal - int(base))
         if required_order <= 0:
             continue
         next_terms: list[
@@ -7477,13 +7910,20 @@ def _ibp_endpoint_projector_terms(
         for value in derivative_multi:
             derivative_factor *= math.factorial(int(value))
         prefactor = [derivative_factor * value for value in prefactor]
+        active_endpoint_powers = tuple(
+            (
+                max(int(endpoint_powers[position][0]), goal),
+                endpoint_powers[position][1],
+            )
+            for position in active_positions
+        )
         child_signature = (
             "endpoint-projector",
             2,
             False,
             len(active_positions),
-            tuple((-1, endpoint_powers[position][1]) for position in active_positions),
-            tuple(0 for _ in active_positions),
+            active_endpoint_powers,
+            tuple(int(-int(base) - 1) for base, _coeff in active_endpoint_powers),
             tuple(laurent_orders),
         )
         out.append(
@@ -7916,7 +8356,15 @@ class SectorProcessor:
         timing: HotPathTiming,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Evaluate one precision-homogeneous sector batch."""
-        if len(sector.singular_axes) == 0:
+        explicit = self.topology.explicit_sector_formula_for(sector)
+        if explicit is not None:
+            coeffs, training = self._explicit_sector_contribution_batch(
+                sector,
+                rows,
+                explicit,
+                timing,
+            )
+        elif len(sector.singular_axes) == 0:
             coeffs, training = self._finite_contribution_batch(sector, rows, timing)
         elif self.subtraction_backend == "recursive":
             coeffs, training = self._recursive_taylor_subtraction_batch(sector, rows, timing)
@@ -8890,6 +9338,37 @@ class SectorProcessor:
                 )
         return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
 
+    def _explicit_sector_contribution_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        formula: ExplicitSectorFormulaDefinition,
+        timing: HotPathTiming,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate a sector through its fully explicit prepared evaluator."""
+        rows = np.asarray(y_values, dtype=float)
+        precision_digits = timing.precision_digits
+        if precision_digits is None:
+            values = formula.evaluate_complex_batch(rows, timing)
+            coeffs = self._select_active_laurent_columns(
+                np.asarray(values, dtype=np.complex128),
+                formula.laurent_orders,
+                sector.name,
+            )
+        else:
+            coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+            for row_index, row in enumerate(rows):
+                coeffs[row_index, :] = self._select_active_laurent_list(
+                    formula.evaluate_complex_prec(
+                        row,
+                        int(precision_digits),
+                        timing,
+                    ),
+                    formula.laurent_orders,
+                    sector.name,
+                )
+        return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
+
     def _convolve_regular_prefactor_array(
         self,
         values: np.ndarray,
@@ -9020,11 +9499,17 @@ class SectorProcessor:
                 offset += 1
                 continue
             cached = g_cache[(boundary, zero)]
-            input_matrix[:, offset] = _series_coefficient(
+            factor = _ibp_child_taylor_factor(
+                tuple(int(value) for value in term.derivative_multi),
+                active_positions,
+                tuple(int(value) for value in _child_multi),
+            )
+            values = _series_coefficient(
                 cached[regular_order],
                 multi_index,
                 n_rows,
             )
+            input_matrix[:, offset] = values if factor == 1 else values * factor
             offset += 1
         if offset != len(child.input_names):
             raise RuntimeError(
@@ -9053,9 +9538,11 @@ class SectorProcessor:
         ]
         groups: dict[
             tuple[tuple[int, ...], tuple[int, ...]],
-            list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]],
+            list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int, tuple[int, ...]]],
         ] = {}
-        expanded_entries: list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int]] = []
+        expanded_entries: list[
+            tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], int, tuple[int, ...]]
+        ] = []
         for _child_boundary, child_zero, child_multi, regular_order in child.coefficient_layout:
             original_zero = tuple(active_positions[position] for position in child_zero)
             original_multi = list(term.derivative_multi)
@@ -9066,6 +9553,7 @@ class SectorProcessor:
                 tuple(sorted(original_zero)),
                 tuple(original_multi),
                 int(regular_order),
+                tuple(child_multi),
             )
             expanded_entries.append(entry)
             groups.setdefault((entry[0], entry[1]), []).append(entry)
@@ -9098,9 +9586,19 @@ class SectorProcessor:
                         shared_g_cache[shared_key] = cached
                 g_cache[group_key] = cached
 
-            for boundary, zero, multi_index, regular_order in expanded_entries:
+            for boundary, zero, multi_index, regular_order, child_multi in expanded_entries:
                 cached = g_cache[(boundary, zero)]
-                input_row.append(_prec_series_coefficient(cached[regular_order], multi_index))
+                value = _prec_series_coefficient(cached[regular_order], multi_index)
+                factor = _ibp_child_taylor_factor(
+                    tuple(int(component) for component in term.derivative_multi),
+                    active_positions,
+                    tuple(int(component) for component in child_multi),
+                )
+                input_row.append(
+                    value
+                    if factor == 1
+                    else _pc_scale(value, factor, precision_digits)
+                )
         if len(input_row) != len(child.input_names):
             raise RuntimeError(
                 f"{sector.name}: IBP child input mismatch: filled {len(input_row)}, "

@@ -173,7 +173,9 @@ def summary_data(
         "jit_compile_evaluators": request.jit_compile_evaluators,
         "dual_evaluator_mode": request.dual_evaluator_mode,
         "subtraction_backend": request.subtraction_backend,
+        "sector_evaluator_backend": request.sector_evaluator_backend,
         "IBP_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,
+        "ibp_power_goal": request.ibp_power_goal,
         "direct_projector_cache_term_threshold": request.direct_projector_cache_term_threshold,
         "direct_projector_cache_override_sectors": getattr(
             topology, "endpoint_projector_direct_cache_override_sectors", 0
@@ -189,6 +191,11 @@ def summary_data(
         "chain_rule_formula_output_length_limit": request.chain_rule_formula_output_length_limit,
         "allow_fallback_for_missing_caches": request.allow_fallback_for_missing_caches,
         "runtime_ready": (
+            "explicit sector evaluators pregenerated"
+            if request.sector_evaluator_backend == "explicit"
+            else "two-stage explicit sector evaluators pregenerated"
+            if request.sector_evaluator_backend == "two-stage-explicit"
+            else
             "recursive endpoint subtraction; coefficient dual evaluators lazy"
             if request.subtraction_backend == "recursive" and request.dual_evaluator_mode == "lazy"
             else "recursive endpoint subtraction; coefficient evaluators pregenerated"
@@ -282,8 +289,8 @@ def summary_data(
     }
     if request.integral == "dot" and max_endpoint_taylor_order > 0:
         validation["warning"] = (
-            "DOT sectors with y^(-n+c*eps), n>1, use IBP-lowered logarithmic endpoint projectors"
-            if request.ibp_reduce_to_log_endpoint
+            "DOT sectors with y^(-n+c*eps), n>1, use IBP-lowered endpoint projectors"
+            if request.ibp_power_goal is not None
             else "DOT sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint projectors"
         )
 
@@ -396,6 +403,22 @@ def summary_data(
                 "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded"
                 if request.subtraction_backend == "projector-formula"
                 else "not used by this subtraction backend"
+            ),
+            "two_stage_sector_formula_count": len(
+                getattr(topology, "_two_stage_sector_formulas", {})
+            ),
+            "two_stage_sector_formula_build_seconds": getattr(
+                topology,
+                "two_stage_sector_formula_build_seconds",
+                0.0,
+            ),
+            "explicit_sector_formula_count": len(
+                getattr(topology, "_explicit_sector_formulas", {})
+            ),
+            "explicit_sector_formula_build_seconds": getattr(
+                topology,
+                "explicit_sector_formula_build_seconds",
+                0.0,
             ),
             "subtraction_formula_build_seconds": topology.subtraction_formula_build_seconds,
             "parametric": parametric_data,
