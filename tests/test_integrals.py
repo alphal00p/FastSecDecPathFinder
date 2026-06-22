@@ -3238,6 +3238,43 @@ def test_qmc_qmcpy_backend_records_lattice_metadata() -> None:
     assert result.samples == 2 * 1024 * len(sectors)
 
 
+def test_qmc_cbcpt_backend_records_lattice_metadata() -> None:
+    """QMC diagnostics should expose the bundled CBC table used for pySecDec checks."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="qmc",
+        qmc_shifts=2,
+        qmc_korobov_alpha=3,
+        qmc_lattice_backend="cbcpt-dn1-100",
+        samples_per_iter=32,
+        max_iter=1,
+        min_iter=1,
+        batch_size=2048,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.diagnostics["qmc_software"] == "pySecDecContrib bundled CBC lattice table"
+    assert result.diagnostics["qmc_lattice_backend"] == "cbcpt-dn1-100"
+    assert result.diagnostics["qmc_lattice_order"] == "linear"
+    assert result.diagnostics["qmc_lattice_points_per_shift"] == 32
+    assert result.samples == 2 * 1021 * len(sectors)
+
+
 def test_result_table_marks_missing_dot_reference_as_na(capsys: pytest.CaptureFixture[str]) -> None:
     """DOT/FSD-only output must not compute a pull against the zero placeholder."""
     request = make_request(integral="dot", prefactor_convention="sector")

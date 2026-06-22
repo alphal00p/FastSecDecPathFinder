@@ -735,6 +735,8 @@ def sector_endpoint_axes(
     """
     axes: list[int] = []
     if not hasattr(topology, "endpoint_power"):
+        if not hasattr(sector, "singular_axes"):
+            return tuple()
         return tuple(int(axis) for axis in sector.singular_axes)
     for axis in sector.singular_axes:
         if topology.endpoint_power(sector, axis).base < -1.0e-12:
@@ -755,6 +757,8 @@ def sector_active_coefficient_indices(
     sector: SectorDefinition,
 ) -> tuple[int, ...]:
     """Return Laurent coefficient slots that can be non-zero for a sector."""
+    if not hasattr(topology, "laurent_orders"):
+        return tuple(range(int(topology.coefficient_count)))
     min_order = -sector_endpoint_pole_depth(topology, sector)
     return tuple(
         index
@@ -1487,8 +1491,12 @@ def integrate_qmc(
     raw_samples_done = 0
     diagnostics: dict[str, Any] = {
         "sampling_mode": "qmc",
-        "qmc_lattice_backend": "qmcpy",
-        "qmc_software": "qmcpy.Lattice",
+        "qmc_lattice_backend": str(request.qmc_lattice_backend),
+        "qmc_software": (
+            "pySecDecContrib bundled CBC lattice table"
+            if str(request.qmc_lattice_backend) == "cbcpt-dn1-100"
+            else "qmcpy.Lattice"
+        ),
         "qmc_randomization": "SHIFT",
         "qmc_lattice_order": str(request.qmc_order),
         "qmc_lattice_points_per_shift": int(request.samples_per_iter),

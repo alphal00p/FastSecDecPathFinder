@@ -54,6 +54,11 @@ def _fmt_scientific(value: complex | float) -> str:
     return f"{scalar:.3e}"
 
 
+def _fmt_real(value: complex | float) -> str:
+    scalar = complex(value).real if isinstance(value, complex) else float(value)
+    return f"{scalar:.8g}"
+
+
 def _labels_from_result(data: dict[str, Any]) -> list[str]:
     labels = data.get("laurent_labels")
     if isinstance(labels, list) and labels:
@@ -205,6 +210,120 @@ def _inverse_regular_factor(coeffs: list[complex], errors: list[complex], factor
     return out, out_errors
 
 
+_INTEGRAL_RE = re.compile(
+    r"\bintegral\s+\d+/\d+:\s+\S+_sector_(?P<sector>\d+)_order_(?P<order>n?\-?\d+)"
+)
+_RESULT_RE = re.compile(
+    r"\bres:\s*"
+    r"\([^)]+\)\s*\+/-\s*\([^)]+\)\s*->\s*"
+    r"\((?P<re>[^,]+),(?P<im>[^)]+)\)\s*\+/-\s*"
+    r"\((?P<ere>[^,]+),(?P<eim>[^)]+)\),\s*"
+    r"n:\s*(?P<oldn>\d+)\s*->\s*(?P<newn>\d+)"
+)
+
+
+def _pysecdec_order_token_to_int(token: str) -> int:
+    if token.startswith("n"):
+        return -int(token[1:])
+    return int(token)
+
+
+def _float_or_nan(value: str) -> float:
+    return float(value.strip().replace("nan", "NaN"))
+
+
+def _parse_pysecdec_integral_records(verbose_log: str) -> dict[tuple[int, int], dict[str, Any]]:
+    """Return final pySecDec sector/order records parsed from verbose output.
+
+    pySecDec prints individual generated sector/order integrals before the
+    package-level Gamma/global prefactor convolution.  These are the correct
+    objects to compare to FSD's raw sector coefficients.
+    """
+    records: dict[tuple[int, int], dict[str, Any]] = {}
+    pending: tuple[int, int] | None = None
+    for line in verbose_log.splitlines():
+        header = _INTEGRAL_RE.search(line)
+        if header:
+            pending = (
+                int(header.group("sector")) - 1,
+                _pysecdec_order_token_to_int(header.group("order")),
+            )
+            continue
+        if pending is None:
+            continue
+        result = _RESULT_RE.search(line)
+        if not result:
+            continue
+        sector_id, order = pending
+        records[(sector_id, order)] = {
+            "sector_id": sector_id,
+            "sector_name": f"PSD{sector_id}",
+            "order": order,
+            "label": f"eps^{order}",
+            "coefficient": complex(
+                _float_or_nan(result.group("re")),
+                _float_or_nan(result.group("im")),
+            ),
+            "error": complex(
+                abs(_float_or_nan(result.group("ere"))),
+                abs(_float_or_nan(result.group("eim"))),
+            ),
+            "old_n": int(result.group("oldn")),
+            "new_n": int(result.group("newn")),
+        }
+        pending = None
+    return records
+
+
+def _sector_order_rows(
+    fsd: dict[str, Any],
+    pysecdec_records: dict[tuple[int, int], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    labels = _labels_from_result(fsd)
+    order_by_label = {
+        label: int(label.replace("eps^", ""))
+        for label in labels
+        if label.startswith("eps^")
+    }
+    rows: list[dict[str, Any]] = []
+    sector_results = fsd.get("sector_results", [])
+    for sector in sector_results:
+        sector_id = int(sector.get("sector_id", -1))
+        raw = sector.get("raw_sector") or sector.get("raw") or {}
+        coeffs = complex_list_from_json(raw.get("coefficients", []))
+        errors = complex_list_from_json(raw.get("errors", []))
+        for coeff_index, label in enumerate(labels):
+            order = order_by_label.get(label)
+            if order is None:
+                continue
+            record = pysecdec_records.get((sector_id, order))
+            if record is None:
+                continue
+            fsd_value = coeffs[coeff_index]
+            fsd_error = errors[coeff_index]
+            py_value = complex(record["coefficient"])
+            py_error = complex(record["error"])
+            combined_error = math.hypot(abs(fsd_error), abs(py_error))
+            diff = fsd_value - py_value
+            rows.append(
+                {
+                    "sector_id": sector_id,
+                    "sector_name": str(sector.get("name", f"PSD{sector_id}")),
+                    "order": order,
+                    "label": label,
+                    "fsd_coeff": fsd_value,
+                    "fsd_error": fsd_error,
+                    "pysecdec_coeff": py_value,
+                    "pysecdec_error": py_error,
+                    "diff": diff,
+                    "pull": abs(diff) / combined_error if combined_error > 0.0 else math.inf,
+                    "pysecdec_n": int(record["new_n"]),
+                    "fsd_samples": int(sector.get("samples", 0)),
+                }
+            )
+    return rows
+
+
 def _resolve_target(args: argparse.Namespace) -> tuple[list[complex], str]:
     """Return target coefficients in the FSD display convention."""
     if args.target_source == "file":
@@ -296,6 +415,7 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
     ]
     all_n_values = [n for n, _m in direct_nm] + [stop_n for _start_n, stop_n in refinement_pairs]
     max_observed_n = max(all_n_values) if all_n_values else None
+    integral_records = _parse_pysecdec_integral_records(verbose_log)
     return {
         "orders": orders,
         "coefficients": coeffs,
@@ -306,6 +426,7 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         "observed_max_n_points": max_observed_n,
         "observed_refinement_count": len(refinement_pairs),
         "observed_refinements": refinement_pairs[:20],
+        "per_integral_records": integral_records,
         "captured_verbose_log": verbose_log if bool(args.keep_pysecdec_verbose_log) else "",
     }
 
@@ -425,6 +546,21 @@ def main() -> int:
     parser.add_argument("--order", default="0", help="Laurent order to print, e.g. 0 or eps^0.")
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument(
+        "--sector-order-limit",
+        type=int,
+        default=0,
+        help=(
+            "Print a raw sector/order comparison table using pySecDec verbose "
+            "records. 0 disables it; -1 prints every matched row."
+        ),
+    )
+    parser.add_argument(
+        "--sector-order-sort",
+        choices=["index", "abs-diff", "pull"],
+        default="index",
+        help="Ordering for --sector-order-limit rows.",
+    )
+    parser.add_argument(
         "--pysecdec-verbose",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -456,6 +592,7 @@ def main() -> int:
     target_coeffs, target_label = _resolve_target(args)
     first_result_labels: list[str] | None = None
     rows: list[dict[str, Any]] = []
+    sector_order_rows: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="fsd-qmc-compare-") as tmp:
         tmpdir = Path(tmp)
         for n_points in args.sample_counts:
@@ -467,6 +604,13 @@ def main() -> int:
             order_index = _order_index(labels, args.order)
             pysecdec = _run_pysecdec(args, n_points)
             rows.append(_make_row(n_points, args, fsd, pysecdec, target_coeffs, order_index))
+            if int(args.sector_order_limit) != 0:
+                for sector_row in _sector_order_rows(
+                    fsd,
+                    pysecdec.get("per_integral_records", {}),
+                ):
+                    sector_row["n_points_per_shift"] = int(n_points)
+                    sector_order_rows.append(sector_row)
 
     table = PrettyTable()
     order_label = first_result_labels[_order_index(first_result_labels, args.order)] if first_result_labels else args.order
@@ -517,6 +661,68 @@ def main() -> int:
         f"{target_label}; displayed convention: {args.fsd_prefactor_convention}."
     )
 
+    if int(args.sector_order_limit) != 0:
+        if args.sector_order_sort == "abs-diff":
+            sorted_sector_rows = sorted(
+                sector_order_rows,
+                key=lambda row: abs(row["diff"]),
+                reverse=True,
+            )
+        elif args.sector_order_sort == "pull":
+            sorted_sector_rows = sorted(
+                sector_order_rows,
+                key=lambda row: float(row["pull"]),
+                reverse=True,
+            )
+        else:
+            sorted_sector_rows = sorted(
+                sector_order_rows,
+                key=lambda row: (
+                    int(row["n_points_per_shift"]),
+                    int(row["sector_id"]),
+                    int(row["order"]),
+                ),
+            )
+        if int(args.sector_order_limit) > 0:
+            sorted_sector_rows = sorted_sector_rows[: int(args.sector_order_limit)]
+        sector_table = PrettyTable()
+        sector_table.field_names = [
+            "N/shift",
+            "sector",
+            "order",
+            "FSD raw",
+            "FSD err",
+            "pySecDec raw",
+            "pySecDec err",
+            "diff",
+            "py n",
+            "FSD smpl",
+        ]
+        for row in sorted_sector_rows:
+            sector_table.add_row(
+                [
+                    row["n_points_per_shift"],
+                    row["sector_name"],
+                    row["label"].replace("eps^", ""),
+                    _fmt_real(row["fsd_coeff"]),
+                    _fmt_scientific(row["fsd_error"]),
+                    _fmt_real(row["pysecdec_coeff"]),
+                    _fmt_scientific(row["pysecdec_error"]),
+                    _fmt_scientific(row["diff"]),
+                    row["pysecdec_n"],
+                    row["fsd_samples"],
+                ]
+            )
+        print()
+        print("Raw sector/order comparison before global prefactor convolution:")
+        print(sector_table)
+        print(
+            "Sector/order pySecDec values are parsed from its verbose text log, "
+            "which prints coefficients with limited decimal precision.  Treat "
+            "these rows as structural and variance checks; aggregate rows use "
+            "the full JSON series returned by pySecDec."
+        )
+
     if args.output_json is not None:
         payload = {
             "run_file": str(args.run_file),
@@ -537,6 +743,13 @@ def main() -> int:
                     for key, value in row.items()
                 }
                 for row in rows
+            ],
+            "sector_order_rows": [
+                {
+                    key: (_complex_json(value) if isinstance(value, complex) else value)
+                    for key, value in row.items()
+                }
+                for row in sector_order_rows
             ],
         }
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
