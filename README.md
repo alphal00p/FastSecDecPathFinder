@@ -777,10 +777,11 @@ When target stopping is enabled, Havana performs the target check after each
 accumulated batch, not only at full iteration boundaries.  The final result
 includes all completed batches up to the stopping point, and `--batch-size`
 therefore controls the mid-iteration stopping granularity.  In correlated QMC
-mode, the meaningful aggregate error/pull is available only after a complete
-random-shift sector sum has been registered; before that first complete
-aggregate, the progress bar shows `pending` for both `err%` and the live value,
-pulls are suppressed, and keyboard interruption returns the last complete
+mode, the meaningful aggregate error/pull is available only after at least two
+complete random-shift sector sums have been registered. Before the first
+complete aggregate, the progress bar shows `pending` for both `err%` and the
+live value; after one aggregate it may show the central value but keeps `err%`
+and pull as `pending`/`N/A`. Keyboard interruption returns the last complete
 aggregate estimate.
 
 The final table reports the selected prefactor convention only.  Values with

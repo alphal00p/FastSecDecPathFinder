@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 
 TARGET_PROGRESS_UNITS = 10_000
-TARGET_TIME_WARMUP_DISCOUNT = 0.85
+TARGET_TIME_WARMUP_DISCOUNT = 0.50
 EXPERIMENTAL_QMC_COMPONENT_SUPPORTS = False
 
 
@@ -1410,11 +1410,11 @@ def _target_time_warmup_records(active_sector_count: int, workers: int) -> int:
     # target-time runs do not spend all their time calibrating.
     return min(
         max(
-            int(active_sector_count) * 64,
-            max(int(workers), 1) * 2048,
-            8192,
+            int(active_sector_count) * 128,
+            max(int(workers), 1) * 4096,
+            32768,
         ),
-        65536,
+        262144,
     )
 
 
@@ -1504,10 +1504,10 @@ def _measure_record_throughput(
     steady_elapsed_for_tuning = min(elapsed, steady_elapsed)
     # The warm-up intentionally exercises the real evaluator stack, so its raw
     # timing remains useful diagnostics.  For choosing the production sample
-    # count, however, that same measurement is still mildly cold: worker
-    # scheduling, cache population and first-use Python paths can bleed into
-    # the hot timing.  Discount only the tuning denominator, not the reported
-    # raw warm-up time, so target-time runs are not systematically undersized.
+    # count, however, that same measurement is still cold: worker scheduling,
+    # cache population and first-use Python paths can bleed into the hot timing.
+    # Discount only the tuning denominator, not the reported raw warm-up time,
+    # so target-time runs are not systematically undersized.
     discounted_elapsed_for_tuning = max(
         steady_elapsed_for_tuning * TARGET_TIME_WARMUP_DISCOUNT,
         1.0e-12,
@@ -1941,6 +1941,7 @@ def integrate_qmc(
                 completed_aggregate_raw_samples,
             )
             if completed_shift_count < 2:
+                progress_target = None
                 relerr_override = "pending"
         else:
             # In correlated QMC mode the statistically meaningful pull/error is
