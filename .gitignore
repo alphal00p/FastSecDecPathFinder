@@ -1,6 +1,10 @@
 .venv/
 .deps/
 external/
+EXPERIMENTAL/
+output/
+MyFSDOutput*/
+MyPySecDecOutput*/
 .pysecdec_build/
 .pysecdec*/
 __pycache__/
@@ -34,6 +38,10 @@ __pycache__/
 /docs/hybrid_*
 /docs/sandbox_parallel/
 /docs/subtraction_probes/
+/examples/outputs/*.json
+!/examples/outputs/dot_box_pysecdec_target.json
+!/examples/outputs/dot_double_box_pysecdec_target.json
+!/examples/outputs/dot_triangle_pysecdec_target.json
 /examples/outputs/result.json
 /examples/outputs/*_result.json
 /examples/outputs/triple_box_all_*.json

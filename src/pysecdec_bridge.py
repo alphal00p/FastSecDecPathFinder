@@ -7,6 +7,7 @@ objects backed by Symbolica evaluators.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -157,6 +158,35 @@ def pysecdec_package_paths(bundle: DotBuildBundle, request: IntegralRequest) -> 
     )
 
 
+def _pysecdec_generation_log_path(paths: PySecDecPackagePaths) -> Path:
+    """Return the log file collecting suppressed pySecDec/FORM/make output."""
+    return paths.package_dir.parent / f"{paths.package_dir.name}_generation.log"
+
+
+@contextlib.contextmanager
+def _redirect_process_output_to(log_handle: Any):
+    """Redirect Python and child-process stdout/stderr to ``log_handle``.
+
+    ``contextlib.redirect_stdout`` only replaces ``sys.stdout`` and misses
+    subprocesses spawned by pySecDec/FORM.  pySecDec generation is noisy exactly
+    through those descendants, so temporarily redirect the OS file descriptors
+    as well.
+    """
+    sys_stdout = os.dup(1)
+    sys_stderr = os.dup(2)
+    try:
+        log_handle.flush()
+        os.dup2(log_handle.fileno(), 1)
+        os.dup2(log_handle.fileno(), 2)
+        with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
+            yield
+    finally:
+        os.dup2(sys_stdout, 1)
+        os.dup2(sys_stderr, 2)
+        os.close(sys_stdout)
+        os.close(sys_stderr)
+
+
 def ensure_pysecdec_package(
     bundle: DotBuildBundle,
     request: IntegralRequest,
@@ -193,21 +223,48 @@ def ensure_pysecdec_package(
         return paths, timings
 
     cwd = Path.cwd()
+    log_path = _pysecdec_generation_log_path(paths)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_detail = "" if request.show_pysecdec_output else f"captured output: {log_path}"
     try:
         os.chdir(paths.package_dir.parent)
-        with timings.measure("pySecDec package generation", progress=progress):
-            modules["loop_package"](
-                paths.package_dir.name,
-                bundle.loop_integral,
-                requested_orders=[bundle.topology.laurent_max_order],
-                real_parameters=bundle.kinematics.parameter_names,
-                contour_deformation=False,
-                decomposition_method=request.sector_method,
-                normaliz_executable=request.normaliz_executable,
-                enforce_complex=True,
+        with (
+            contextlib.nullcontext()
+            if request.show_pysecdec_output
+            else log_path.open("w", encoding="utf-8")
+        ) as log_handle:
+            with timings.measure(
+                "pySecDec package generation",
+                log_detail,
+                progress=progress,
+            ):
+                with (
+                    contextlib.nullcontext()
+                    if request.show_pysecdec_output
+                    else _redirect_process_output_to(log_handle)
+                ):
+                    modules["loop_package"](
+                        paths.package_dir.name,
+                        bundle.loop_integral,
+                        requested_orders=[bundle.topology.laurent_max_order],
+                        real_parameters=bundle.kinematics.parameter_names,
+                        contour_deformation=False,
+                        decomposition_method=request.sector_method,
+                        normaliz_executable=request.normaliz_executable,
+                        enforce_complex=True,
+                    )
+            compile_detail = (
+                "make pylink"
+                if request.show_pysecdec_output
+                else f"make pylink; captured output: {log_path}"
             )
-        with timings.measure("pySecDec package compile", "make pylink", progress=progress):
-            subprocess.run(["make", "-C", str(paths.package_dir), "pylink", "-j"], check=True)
+            with timings.measure("pySecDec package compile", compile_detail, progress=progress):
+                subprocess.run(
+                    ["make", "-C", str(paths.package_dir), "pylink", "-j"],
+                    check=True,
+                    stdout=None if request.show_pysecdec_output else log_handle,
+                    stderr=None if request.show_pysecdec_output else subprocess.STDOUT,
+                )
     finally:
         os.chdir(cwd)
     return paths, timings
@@ -1200,6 +1257,42 @@ def build_dot_bundle(
     return DotBuildBundle(
         topology=topology,
         sectors=sectors,
+        timings=timings,
+        loop_integral=li,
+        parsed_graph=parsed,
+        kinematics=kin,
+    )
+
+
+def build_native_pysecdec_dot_bundle(
+    parsed: ParsedDotGraph,
+    kin: KinematicsDefinition,
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> DotBuildBundle:
+    """Build only the pySecDec objects needed for native pySecDec integration.
+
+    This path deliberately skips the FSD-side U/F Symbolica evaluators,
+    sector conversion, and endpoint-subtraction formula preparation.  Native
+    pySecDec mode hands the loop integral to ``loop_package`` and uses the
+    generated pySecDec evaluator as the numerical integrand.
+    """
+    modules = require_pysecdec()
+    timings = GenerationTimings()
+    constructor_label = (
+        "pySecDec LoopIntegralFromPropagators"
+        if parsed.numerator is not None
+        else "pySecDec LoopIntegralFromGraph"
+    )
+    with timings.measure(constructor_label, progress=progress):
+        li = _make_loop_integral(parsed, kin, request, modules)
+    topology = SimpleNamespace(
+        family=f"DOT[{parsed.graph_name}]",
+        laurent_max_order=int(request.max_eps_order),
+    )
+    return DotBuildBundle(
+        topology=topology,
+        sectors=[],
         timings=timings,
         loop_integral=li,
         parsed_graph=parsed,

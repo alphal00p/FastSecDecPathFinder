@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - non-POSIX fallback.
     fcntl = None
 
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 FORMULA_CACHE_ENV = "FSD_SUBTRACTION_FORMULA_CACHE_DIR"
 
 

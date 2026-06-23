@@ -498,7 +498,7 @@ def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
     prepared_bundle = data.get("prepared_bundle")
     generation_summary = data.get("generation_timings")
     timings = None
-    if prepared_bundle is None:
+    if prepared_bundle is None and not isinstance(generation_summary, dict):
         try:
             if request.integral == "dot":
                 from dot_topology import get_dot_bundle
@@ -526,6 +526,8 @@ def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
             + " "
             + maybe_color(str(Path(bundle_path).expanduser()), Fore.MAGENTA)
         )
+    elif data.get("pysecdec_native"):
+        print(maybe_color("\npySecDec generation report", Fore.CYAN))
     else:
         print(maybe_color("\nFSD generation report", Fore.CYAN))
 
@@ -591,7 +593,9 @@ def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
         )
     print(details_table)
 
-    symanzik = data["symanzik"]
+    symanzik = data.get("symanzik")
+    if not isinstance(symanzik, dict):
+        return
     cache_table = PrettyTable()
     cache_table.field_names = [
         maybe_color("artifact", Fore.CYAN),
@@ -674,6 +678,7 @@ def print_preintegration_summary(
     sectors: list[SectorDefinition],
     benchmark_available: bool,
     data: JsonDict | None = None,
+    show_generation_report: bool = True,
 ) -> None:
     """Print colored pre-integration tables for topology and sectors."""
     if data is None:
@@ -788,7 +793,8 @@ def print_preintegration_summary(
     symanzik.add_row(["U/F Taylor shapes", shape_text])
     print(symanzik)
 
-    print_generation_report(request, data)
+    if show_generation_report:
+        print_generation_report(request, data)
 
     sector_table = PrettyTable()
     sector_table.field_names = [
@@ -1542,6 +1548,101 @@ def print_result_table(output: JsonDict) -> None:
                 label = "Generation"
                 suffix = ""
             print(maybe_color(f"{label}:", Fore.CYAN) + suffix + " " + "  ".join(parts))
+
+
+def _json_complex(value: Any) -> complex:
+    """Accept runtime complex values and their JSON-serialized representation."""
+    if isinstance(value, dict) and {"re", "im"}.issubset(value):
+        return complex(float(value["re"]), float(value["im"]))
+    return complex(value)
+
+
+def _epsilon_label(order: int) -> str:
+    """Return the compact epsilon-order label used in result tables."""
+    return "eps^0" if int(order) == 0 else f"eps^{int(order)}"
+
+
+def print_pysecdec_result_table(output: JsonDict) -> None:
+    """Print native pySecDec coefficients without dumping internal JSON data."""
+    pysecdec = output.get("pysecdec", {})
+    coeffs = [_json_complex(value) for value in pysecdec.get("coeffs", [])]
+    errors = [_json_complex(value) for value in pysecdec.get("errors", [])]
+    orders = [int(order) for order in pysecdec.get("orders", [])]
+    if len(orders) != len(coeffs):
+        min_order = -len(coeffs) + 1
+        orders = list(range(min_order, min_order + len(coeffs)))
+    if len(errors) < len(coeffs):
+        errors = errors + [0.0 + 0.0j for _ in range(len(coeffs) - len(errors))]
+
+    convention = output.get("prefactor_convention", "pysecdec")
+    table = PrettyTable()
+    table.field_names = [
+        maybe_color("coeff", Fore.CYAN),
+        maybe_color(f"pySecDec {convention}", Fore.CYAN),
+        maybe_color("MC err", Fore.CYAN),
+    ]
+    for order, coeff, error in zip(orders, coeffs, errors):
+        table.add_row(
+            [
+                maybe_color(_epsilon_label(order), Fore.MAGENTA),
+                maybe_color(format_complex_with_error(coeff, error), Fore.GREEN),
+                format_percent(relative_error_percent(coeff, error)),
+            ]
+        )
+    print(table)
+    print(
+        maybe_color("Legend:", Fore.CYAN)
+        + " native pySecDec integration result in convention "
+        + maybe_color(str(convention), Fore.MAGENTA)
+        + "; coefficients use two-significant-digit MC parentheses and "
+        + maybe_color("MC err", Fore.YELLOW)
+        + " is the relative 1σ pySecDec uncertainty in percent."
+    )
+
+    timings = pysecdec.get("timings", {})
+    if isinstance(timings, dict):
+        records = timings.get("records", [])
+    elif isinstance(timings, list):
+        records = timings
+    else:
+        records = []
+    totals: dict[str, float] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("name", ""))
+        seconds = float(record.get("seconds", 0.0) or 0.0)
+        totals[name] = totals.get(name, 0.0) + seconds
+    if totals:
+        parts = []
+        for name, color in (
+            ("pySecDec package generation", Fore.MAGENTA),
+            ("pySecDec package compile", Fore.YELLOW),
+            ("pySecDec package load", Fore.BLUE),
+            ("pySecDec integration", Fore.GREEN),
+        ):
+            if name in totals:
+                parts.append(colored_kv(name.replace("pySecDec ", ""), format_seconds(totals[name]), color))
+        if parts:
+            print(maybe_color("pySecDec timing:", Fore.CYAN) + " " + "  ".join(parts))
+
+    generation = output.get("summary", {}).get("generation_timings")
+    if isinstance(generation, dict) and generation.get("headline"):
+        parts = []
+        for record in generation["headline"]:
+            if isinstance(record, dict):
+                parts.append(
+                    colored_kv(
+                        str(record.get("name")),
+                        format_seconds(float(record.get("seconds", 0.0) or 0.0)),
+                        Fore.MAGENTA,
+                    )
+                )
+        total = generation.get("total")
+        if total is not None:
+            parts.append(colored_kv("total", format_seconds(float(total)), Fore.CYAN))
+        if parts:
+            print(maybe_color("Generation:", Fore.CYAN) + " " + "  ".join(parts))
 
 
 def json_default(obj: Any) -> Any:

@@ -31,7 +31,7 @@ from integrator import integrate
 from sectors_generator import generate_sectors
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)

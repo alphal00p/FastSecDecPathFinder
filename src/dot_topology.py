@@ -10,7 +10,11 @@ from definitions import IntegralRequest
 from dot_parser import ParsedDotGraph, parse_dot_file
 from generation_timing import GenerationProgress, GenerationTimings
 from kinematics import KinematicsDefinition, load_kinematics
-from pysecdec_bridge import DotBuildBundle, build_dot_bundle
+from pysecdec_bridge import (
+    DotBuildBundle,
+    build_dot_bundle,
+    build_native_pysecdec_dot_bundle,
+)
 
 if TYPE_CHECKING:
     from integrand import TopologyDefinition
@@ -170,6 +174,7 @@ class GammaLoopDotTopologyBuilder:
 
 
 _DOT_BUNDLE_CACHE: dict[tuple[object, ...], DotBuildBundle] = {}
+_PYSECDEC_NATIVE_DOT_BUNDLE_CACHE: dict[tuple[object, ...], DotBuildBundle] = {}
 
 
 def clear_dot_bundle_cache() -> None:
@@ -181,6 +186,7 @@ def clear_dot_bundle_cache() -> None:
     """
 
     _DOT_BUNDLE_CACHE.clear()
+    _PYSECDEC_NATIVE_DOT_BUNDLE_CACHE.clear()
 
 
 def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
@@ -220,6 +226,44 @@ def _bundle_from_request(
     bundle = build_dot_bundle(data.graph, data.kinematics, request, progress=progress)
     bundle.timings.records = [*data.timings.records, *bundle.timings.records]
     _DOT_BUNDLE_CACHE[key] = bundle
+    return bundle
+
+
+def _pysecdec_native_request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
+    """Return a cache key for native pySecDec package/integration setup."""
+    return (
+        request.dot_file,
+        request.kinematics_file,
+        request.graph_name,
+        request.numerator_reducer,
+        request.max_eps_order,
+    )
+
+
+def get_pysecdec_native_dot_bundle(
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> DotBuildBundle:
+    """Return a DOT bundle containing only native pySecDec prerequisites."""
+    key = _pysecdec_native_request_cache_key(request)
+    cached = _PYSECDEC_NATIVE_DOT_BUNDLE_CACHE.get(key)
+    if cached is not None:
+        if progress is not None and progress.logger is not None:
+            progress.logger.info(
+                "generation cache hit: reused native pySecDec DOT bundle for %s",
+                request.dot_file,
+            )
+        return cached
+    builder = GammaLoopDotTopologyBuilder.from_request(request)
+    data = builder.parse_gammaloop_dot(progress=progress)
+    bundle = build_native_pysecdec_dot_bundle(
+        data.graph,
+        data.kinematics,
+        request,
+        progress=progress,
+    )
+    bundle.timings.records = [*data.timings.records, *bundle.timings.records]
+    _PYSECDEC_NATIVE_DOT_BUNDLE_CACHE[key] = bundle
     return bundle
 
 

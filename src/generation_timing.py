@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 UF_TIMING_BUCKET = "Generation U and F polynomial"
 SECTOR_TIMING_BUCKET = "Generating sectors"
 SYMBOLICA_TIMING_BUCKET = "Generating Symbolica evaluators"
+PYSECDEC_PACKAGE_TIMING_BUCKET = "pySecDec package generation/compile"
 
 
 @dataclass
@@ -83,6 +84,7 @@ class GenerationTimings:
             UF_TIMING_BUCKET: 0.0,
             SECTOR_TIMING_BUCKET: 0.0,
             SYMBOLICA_TIMING_BUCKET: 0.0,
+            PYSECDEC_PACKAGE_TIMING_BUCKET: 0.0,
         }
         for record in self.records:
             if record.name in {
@@ -110,6 +112,11 @@ class GenerationTimings:
                 "Symbolica explicit sector build",
             }:
                 buckets[SYMBOLICA_TIMING_BUCKET] += record.seconds
+            elif record.name in {
+                "pySecDec package generation",
+                "pySecDec package compile",
+            }:
+                buckets[PYSECDEC_PACKAGE_TIMING_BUCKET] += record.seconds
         return buckets
 
     def to_summary_dict(self) -> dict[str, object]:
@@ -165,6 +172,10 @@ _STAGE_SHORT_NAMES = {
     "Symbolica subtraction formula build": "subtraction",
     "Symbolica two-stage sector build": "two-stage",
     "Symbolica explicit sector build": "explicit",
+    "pySecDec package generation": "pySecDec gen",
+    "pySecDec package compile": "pySecDec make",
+    "pySecDec package load": "pySecDec load",
+    "pySecDec integration": "pySecDec itg",
 }
 
 

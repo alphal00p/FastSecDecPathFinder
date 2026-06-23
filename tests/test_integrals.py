@@ -19,15 +19,20 @@ from typing import Any
 
 import numpy as np
 import pytest
+import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from FSD import (
     _align_coefficients,
     _align_coefficients_by_order,
+    _merge_pysecdec_package_generation_timings,
     build_request,
     compute_benchmark_quietly,
     configure_laurent_range,
@@ -39,6 +44,7 @@ from FSD import (
 from definitions import IntegralRequest, TargetDefinition
 from definitions import HotPathTiming
 from definitions import EpsilonExpansion, ParametricRepresentation
+from generation_timing import GenerationTimings
 from dot_parser import parse_dot_file
 from dot_topology import GammaLoopDotTopologyBuilder, clear_dot_bundle_cache
 from formatting import (
@@ -46,6 +52,7 @@ from formatting import (
     apply_global_convention,
     combine_uncorrelated_errors,
     make_output,
+    print_pysecdec_result_table,
     print_result_table,
     pull_value,
     selected_prefactor_values,
@@ -98,9 +105,25 @@ from pysecdec_bridge import (
 )
 from result_io import print_saved_results, target_from_result_file, write_result_json
 from sectors_generator import SectorDefinition, generate_sectors
-from scripts.compare_qmc_pysecdec import _path_from_run_file
 from symbolica import E
 from symbolica import S
+
+
+def _path_from_run_file(run_file: Path, key: str, fallback: Path) -> Path:
+    """Resolve a path-valued option from an FSD run YAML file."""
+    try:
+        raw = yaml.safe_load(run_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fallback
+    if not isinstance(raw, dict) or key not in raw:
+        return fallback
+    value = raw[key]
+    if value is None:
+        return fallback
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return path
+    return (run_file.parent / path).resolve()
 
 
 def make_request(**overrides: Any) -> IntegralRequest:
@@ -120,6 +143,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "pysecdec_epsrel": 1.0e-2,
         "pysecdec_maxeval": 1000,
         "keep_pysecdec_workdir": False,
+        "show_pysecdec_output": False,
         "progress_value_order": "eps^0",
         "max_eps_order": 0,
         "target_args": None,
@@ -201,6 +225,94 @@ def test_sector_stat_table_values_are_ellipsized_to_fixed_width() -> None:
     assert len(clipped) == 50
     assert clipped.endswith("[...]")
     assert "x" * 60 not in clipped
+
+
+def test_pysecdec_package_timings_merge_into_generation_summary() -> None:
+    """Native pySecDec FORM/codegen and compile time are generation cost."""
+    summary = {
+        "generation_timings": {
+            "details": [
+                {
+                    "name": "DOT parse",
+                    "seconds": 0.25,
+                    "detail": "",
+                }
+            ]
+        }
+    }
+    pysecdec_timings = GenerationTimings()
+    pysecdec_timings.add(
+        "pySecDec package generation",
+        10.0,
+        "captured output: pysecdec_generation.log",
+    )
+    pysecdec_timings.add("pySecDec package compile", 2.0, "make pylink")
+    pysecdec_timings.add("pySecDec integration", 5.0, "")
+
+    _merge_pysecdec_package_generation_timings(summary, pysecdec_timings)
+
+    details = summary["generation_timings"]["details"]
+    names = [record["name"] for record in details]
+    assert "DOT parse" in names
+    assert "pySecDec package generation" in names
+    assert "pySecDec package compile" in names
+    assert "pySecDec integration" not in names
+    headline = {
+        record["name"]: record["seconds"]
+        for record in summary["generation_timings"]["headline"]
+    }
+    assert headline["pySecDec package generation/compile"] == pytest.approx(12.0)
+
+
+def test_pysecdec_result_table_avoids_raw_dict_dump(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Native pySecDec-only mode should render a table, not an internal dict."""
+    output = {
+        "prefactor_convention": "pysecdec",
+        "summary": {
+            "generation_timings": {
+                "headline": [
+                    {
+                        "name": "pySecDec package generation/compile",
+                        "seconds": 1.25,
+                    }
+                ],
+                "total": 1.25,
+            }
+        },
+        "pysecdec": {
+            "orders": [-2, -1, 0],
+            "coeffs": [1.0 + 0.0j, 2.0 + 0.0j, -3.0 + 0.0j],
+            "errors": [0.1 + 0.0j, 0.2 + 0.0j, 0.3 + 0.0j],
+            "timings": {
+                "records": [
+                    {
+                        "name": "pySecDec package generation",
+                        "seconds": 1.0,
+                    },
+                    {
+                        "name": "pySecDec package compile",
+                        "seconds": 0.25,
+                    },
+                    {
+                        "name": "pySecDec integration",
+                        "seconds": 0.5,
+                    },
+                ]
+            },
+        },
+    }
+
+    print_pysecdec_result_table(output)
+    rendered = capsys.readouterr().out
+
+    assert "pySecDec pysecdec" in rendered
+    assert "eps^-2" in rendered
+    assert "MC err" in rendered
+    assert "pySecDec timing" in rendered
+    assert "'summary':" not in rendered
+    assert "{'pysecdec':" not in rendered
 
 
 def test_progress_field_padding_is_fixed_width_and_ansi_safe() -> None:
@@ -1286,7 +1398,7 @@ def test_promote_subtraction_formula_asset_script(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    script = PROJECT_ROOT / "scripts" / "promote_subtraction_formula_asset.py"
+    script = PROJECT_ROOT / "src" / "promote_subtraction_formula_asset.py"
     subprocess.run(
         [
             sys.executable,
@@ -1852,7 +1964,7 @@ def test_watchdog_wrapper_stops_on_stop_file(tmp_path: Path) -> None:
     proc = subprocess.Popen(
         [
             sys.executable,
-            str(PROJECT_ROOT / "run_with_memory_watch.py"),
+            str(PROJECT_ROOT / "src" / "run_with_memory_watch.py"),
             "--limit-gb",
             "35",
             "--timeout-seconds",

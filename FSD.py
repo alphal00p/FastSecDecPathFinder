@@ -24,6 +24,11 @@ import signal
 import sys
 import time
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_ROOT = PROJECT_ROOT / "src"
+if SRC_ROOT.is_dir() and str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
 from colorama import Fore, Style, init as colorama_init
 import yaml
 
@@ -43,12 +48,13 @@ from formatting import (
     output_json,
     print_generation_report,
     print_preintegration_summary,
+    print_pysecdec_result_table,
     print_result_table,
     selected_prefactor_values,
     summary_data,
 )
-from dot_topology import get_dot_bundle
-from generation_timing import GenerationProgress
+from dot_topology import get_dot_bundle, get_pysecdec_native_dot_bundle
+from generation_timing import GenerationProgress, GenerationTimings
 from integrand import build_topology
 from integrator import integrate
 from kinematics import load_kinematics
@@ -1196,6 +1202,16 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--pysecdec-maxeval", type=int, default=100000)
     parser.add_argument("--keep-pysecdec-workdir", action="store_true")
     parser.add_argument(
+        "--show-pysecdec-output",
+        action="store_true",
+        default=bool(defaults.get("show_pysecdec_output", False)),
+        help=(
+            "Do not capture pySecDec/FORM/make output during native pySecDec "
+            "package generation. By default that output is written to a log file "
+            "under --pysecdec-workdir and the CLI shows generation progress instead."
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help=(
@@ -1530,6 +1546,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         pysecdec_epsrel=args.pysecdec_epsrel,
         pysecdec_maxeval=args.pysecdec_maxeval,
         keep_pysecdec_workdir=args.keep_pysecdec_workdir,
+        show_pysecdec_output=bool(args.show_pysecdec_output),
         progress_value_order=args.progress_value_order,
         max_eps_order=args.max_eps_order,
         target_args=target_args,
@@ -2093,6 +2110,134 @@ def _generation_progress(
     )
 
 
+_PYSECDEC_GENERATION_STAGES = {
+    "pySecDec package generation",
+    "pySecDec package compile",
+}
+
+
+def _merge_pysecdec_package_generation_timings(
+    summary: dict,
+    pysecdec_timings: GenerationTimings,
+) -> None:
+    """Merge native pySecDec package build timings into generation metadata.
+
+    pySecDec's package writer runs FORM/code generation and then compiles the
+    generated C++ integration library.  Those stages are part of the integrand
+    generation cost, not the numerical integration cost, so expose them through
+    the same ``summary["generation_timings"]`` object used by FSD generation.
+    Package load and numerical integration remain only in ``pysecdec_timings``.
+    """
+    combined = GenerationTimings()
+    existing = summary.get("generation_timings")
+    if isinstance(existing, dict):
+        for record in existing.get("details", existing.get("records", [])):
+            if not isinstance(record, dict):
+                continue
+            combined.add(
+                str(record.get("name", "")),
+                float(record.get("seconds", 0.0)),
+                str(record.get("detail", "")),
+            )
+    for record in pysecdec_timings.records:
+        if record.name in _PYSECDEC_GENERATION_STAGES:
+            combined.add(record.name, record.seconds, record.detail)
+    summary["generation_timings"] = combined.to_summary_dict()
+
+
+def _specialize_native_pysecdec_generation_timings(summary: dict) -> None:
+    """Use native pySecDec headline buckets for pySecDec-only runs."""
+    generation = summary.get("generation_timings")
+    if not isinstance(generation, dict):
+        return
+    details = [
+        record
+        for record in generation.get("details", generation.get("records", []))
+        if isinstance(record, dict)
+    ]
+    setup_names = {
+        "DOT parse",
+        "kinematics load/evaluation",
+        "pySecDec LoopIntegralFromGraph",
+        "pySecDec LoopIntegralFromPropagators",
+    }
+    package_names = {
+        "pySecDec package generation",
+        "pySecDec package compile",
+    }
+    setup_seconds = sum(
+        float(record.get("seconds", 0.0) or 0.0)
+        for record in details
+        if str(record.get("name", "")) in setup_names
+    )
+    package_seconds = sum(
+        float(record.get("seconds", 0.0) or 0.0)
+        for record in details
+        if str(record.get("name", "")) in package_names
+    )
+    summary["generation_timings"] = {
+        "headline": [
+            {
+                "name": "DOT/kinematics/pySecDec loop-integral setup",
+                "seconds": setup_seconds,
+            },
+            {
+                "name": "pySecDec package generation/compile",
+                "seconds": package_seconds,
+            },
+        ],
+        "details": details,
+        "total": sum(float(record.get("seconds", 0.0) or 0.0) for record in details),
+    }
+
+
+def _run_native_pysecdec_dot(request: IntegralRequest, logger: logging.Logger) -> int:
+    """Run DOT input through pySecDec without building FSD sector evaluators."""
+    progress = _generation_progress(request, logger, "pySecDec")
+    try:
+        bundle = get_pysecdec_native_dot_bundle(request, progress=progress)
+        pysecdec_result = run_pysecdec_package(bundle, request, progress=progress)
+    except Exception as exc:
+        print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+        return 1
+    finally:
+        progress.close()
+
+    pysecdec_result.timings.log(logger)
+    summary: dict[str, object] = {
+        "generation_timings": bundle.timings.to_summary_dict(),
+        "pysecdec_native": True,
+    }
+    _merge_pysecdec_package_generation_timings(summary, pysecdec_result.timings)
+    _specialize_native_pysecdec_generation_timings(summary)
+    summary["pysecdec_timings"] = pysecdec_result.timings.to_dict()
+    output = {
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "command": sys.argv,
+        "integral": request.integral,
+        "mode": request.mode,
+        "prefactor_convention": request.prefactor_convention,
+        "request": request_metadata(request),
+        "environment": environment_metadata(),
+        "summary": summary,
+        "pysecdec": {
+            "coeffs": pysecdec_result.coeffs,
+            "errors": pysecdec_result.errors,
+            "orders": pysecdec_result.orders,
+            "timings": summary.get("pysecdec_timings", {}),
+        },
+    }
+    write_result_json(output, result_output_path(request))
+    if request.json:
+        print(output_json(output))
+    else:
+        if not request.quiet_summary:
+            print_generation_report(request, summary)
+        print_pysecdec_result_table(output)
+    return 0
+
+
 def _pysecdec_target(
     request: IntegralRequest,
     summary: dict,
@@ -2113,6 +2258,7 @@ def _pysecdec_target(
     finally:
         if progress is not None:
             progress.close()
+    _merge_pysecdec_package_generation_timings(summary, result.timings)
     summary["pysecdec_timings"] = result.timings.to_dict()
     return TargetDefinition(
         source="pysecdec",
@@ -2424,6 +2570,12 @@ def _main_impl() -> int:
         if request.command == "cache":
             run_universal_cache_mode(request, logger)
             return 0
+        if (
+            request.command == "run"
+            and request.integral == "dot"
+            and request.dot_engine == "pysecdec"
+        ):
+            return _run_native_pysecdec_dot(request, logger)
         legacy_prepared_output = (
             request.command == "run"
             and _has_external_global_prefactor(request)
@@ -2669,7 +2821,8 @@ def _main_impl() -> int:
                 finally:
                     pysecdec_progress.close()
                 pysecdec_timings.log(logger)
-                summary["pysecdec_timings"] = pysecdec_timings.to_summary_dict()
+                _merge_pysecdec_package_generation_timings(summary, pysecdec_timings)
+                summary["pysecdec_timings"] = pysecdec_timings.to_dict()
                 if not request.json and not request.quiet_summary:
                     print_generation_report(request, summary)
                 report = benchmark_pysecdec_generated_kernels(
@@ -2725,6 +2878,7 @@ def _main_impl() -> int:
             sectors,
             benchmark_available=target is not None,
             data=summary,
+            show_generation_report=request.dot_engine != "pysecdec",
         )
 
     def write_intermediate_result(integration_result: IntegrationResult) -> None:
@@ -2763,7 +2917,10 @@ def _main_impl() -> int:
                 finally:
                     pysecdec_progress.close()
                 pysecdec_result.timings.log(logger)
+                _merge_pysecdec_package_generation_timings(summary, pysecdec_result.timings)
                 summary["pysecdec_timings"] = pysecdec_result.timings.to_dict()
+                if not request.json and not request.quiet_summary:
+                    print_generation_report(request, summary)
             if integration is None:
                 output = {
                     "schema_version": 1,
@@ -2779,10 +2936,14 @@ def _main_impl() -> int:
                         "coeffs": pysecdec_result.coeffs if pysecdec_result else [],
                         "errors": pysecdec_result.errors if pysecdec_result else [],
                         "orders": pysecdec_result.orders if pysecdec_result else [],
+                        "timings": summary.get("pysecdec_timings", {}),
                     },
                 }
                 write_result_json(output, result_output_path(request))
-                print(output_json(output) if request.json else output)
+                if request.json:
+                    print(output_json(output))
+                else:
+                    print_pysecdec_result_table(output)
                 return 0
         else:
             integration = integrate(

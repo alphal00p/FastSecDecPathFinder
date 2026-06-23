@@ -69,6 +69,7 @@ class IntegralRequest:
     pysecdec_epsrel: float
     pysecdec_maxeval: int
     keep_pysecdec_workdir: bool
+    show_pysecdec_output: bool
     progress_value_order: str
     max_eps_order: int
     target_args: tuple[str, ...] | None
