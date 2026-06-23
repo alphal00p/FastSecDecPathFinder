@@ -651,6 +651,31 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     assert target_request.target_rel_error == pytest.approx(3.0e-4)
     assert target_request.target_rel_accuracy == pytest.approx(0.03)
 
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--sampling-mode", "qmc"])
+    qmc_request = build_request(parse_args())
+    assert qmc_request.evaluator_compile_mode == "eager"
+    assert qmc_request.jit_compile_evaluators is False
+    assert qmc_request.real_evaluator is False
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["FSD.py", "--sampling-mode", "qmc", "--jit-compile"],
+    )
+    qmc_jit_request = build_request(parse_args())
+    assert qmc_jit_request.evaluator_compile_mode == "jit"
+    assert qmc_jit_request.jit_compile_evaluators is True
+    assert qmc_jit_request.real_evaluator is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["FSD.py", "--sampling-mode", "qmc", "--real-evaluator"],
+    )
+    qmc_real_request = build_request(parse_args())
+    assert qmc_real_request.evaluator_compile_mode == "eager"
+    assert qmc_real_request.real_evaluator is True
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -3237,6 +3262,105 @@ def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     for sector_result in result.per_sector:
         assert sector_result.samples == 4 * 32
         assert sector_result.diagnostics["sampling_mode"] == "qmc"
+
+
+def test_target_time_tuning_uses_steady_state_warmup_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Target-time tuning should not be pinned to conservative cold warm-up wall time."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        sampling_mode="qmc",
+        qmc_lattice_backend="cbcpt-dn1-100",
+        qmc_shifts=2,
+        target_integration_time=10.0,
+        samples_per_iter=1,
+        max_iter=5,
+        min_iter=1,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    def fake_warmup(_request, _topology, _active_sectors):
+        return {
+            "warmup_records": 100,
+            "warmup_seconds": 10.0,
+            "warmup_setup_seconds": 0.5,
+            "records_per_second": 10.0,
+            "records_per_second_for_tuning": 25.0,
+            "steady_state_warmup_seconds_for_tuning": 4.0,
+            "workers": 1,
+            "avg_eval_us_per_sample_per_worker": 1.0,
+            "profile": {
+                "python_fraction": 0.0,
+                "evaluator_fraction": 1.0,
+                "havana_fraction": 0.0,
+            },
+        }
+
+    monkeypatch.setattr(integrator_module, "_measure_record_throughput", fake_warmup)
+    tuned_request, diagnostics = integrator_module.autotune_request_for_target_time(
+        request,
+        topology,
+        sectors,
+    )
+
+    assert diagnostics is not None
+    qmc_group_count = diagnostics["qmc_group_count"]
+    expected_target_records = 250
+    expected_samples = max(
+        expected_target_records
+        // max(int(request.max_iter) * int(request.qmc_shifts) * int(qmc_group_count), 1),
+        1,
+    )
+    assert diagnostics["records_per_second"] == pytest.approx(10.0)
+    assert diagnostics["tuning_records_per_second"] == pytest.approx(25.0)
+    assert diagnostics["estimated_target_records"] == expected_target_records
+    assert tuned_request.samples_per_iter == expected_samples
+
+
+def test_dot_triangle_qmc_auto_defaults_match_target(tmp_path: Path) -> None:
+    """Automatic QMC evaluator defaults should reproduce the pySecDec target."""
+    result_path = tmp_path / "triangle_qmc.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "FSD.py",
+            "--run",
+            "examples/runs/dot_triangle.yaml",
+            "--sampling-mode",
+            "qmc",
+            "--qmc-shifts",
+            "4",
+            "--samples-per-iter",
+            "64",
+            "--max-iter",
+            "1",
+            "--batch-size",
+            "64",
+            "--workers",
+            "1",
+            "--prefactor-convention",
+            "pysecdec",
+            "--target",
+            "examples/outputs/dot_triangle_pysecdec_target.json",
+            "--no-progress",
+            "--quiet-summary",
+            "--json",
+            "--result-path",
+            str(result_path),
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    data = json.loads(result_path.read_text())
+    assert data["request"]["evaluator_compile_mode"] == "eager"
+    assert data["request"]["real_evaluator"] is False
+    pulls = [float(value) for value in data["aggregate_results"]["pull"]]
+    assert max(abs(value) for value in pulls) < 3.0
 
 
 def test_qmc_qmcpy_backend_records_lattice_metadata() -> None:

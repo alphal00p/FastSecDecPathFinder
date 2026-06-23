@@ -845,7 +845,9 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         const="jit",
         default=default_evaluator_mode,
         help=(
-            "Build Symbolica evaluators with jit_compile=True. This is the default."
+            "Build Symbolica evaluators with jit_compile=True. This is the "
+            "default outside QMC; QMC uses eager complex evaluators unless an "
+            "evaluator mode is supplied explicitly."
         ),
     )
     evaluator_mode_group.add_argument(
@@ -873,7 +875,10 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         dest="real_evaluator",
         action="store_true",
         default=real_default,
-        help="Use real-valued Symbolica evaluator APIs for f64 real kinematics. Default.",
+        help=(
+            "Use real-valued Symbolica evaluator APIs for f64 real kinematics. "
+            "Default outside QMC."
+        ),
     )
     real_group.add_argument(
         "--complex-evaluator",
@@ -1291,6 +1296,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-IBP_reduce_to_log_endpoint" in raw_argv
         or "--no-ibp-reduce-to-log-endpoint" in raw_argv
     )
+    parsed.evaluator_mode_explicit = (
+        "--jit-compile" in raw_argv
+        or "--jit-compile-evaluators" in raw_argv
+        or "--compile" in raw_argv
+        or "--eager-evaluator" in raw_argv
+        or "--no-jit-compile" in raw_argv
+        or "evaluator_compile_mode" in defaults
+        or "jit_compile_evaluators" in defaults
+    )
+    parsed.real_evaluator_explicit = (
+        "--real-evaluator" in raw_argv
+        or "--complex-evaluator" in raw_argv
+        or "real_evaluator" in defaults
+    )
     return parsed
 
 
@@ -1342,6 +1361,18 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     else:
         ibp_power_goal = None
     ibp_reduce_to_log_endpoint = ibp_power_goal == -1
+    evaluator_compile_mode = str(args.evaluator_compile_mode)
+    real_evaluator = bool(args.real_evaluator)
+    # The current Symbolica real-JIT path is intentionally still exposed when
+    # requested explicitly, because it has standalone MREs in this repository.
+    # For automatic QMC steering, however, the validated parity path with
+    # pySecDec/OneLOop is eager complex evaluation; using it by default avoids
+    # silently producing biased QMC coefficients.
+    if str(args.sampling_mode) == "qmc":
+        if not bool(getattr(args, "evaluator_mode_explicit", False)):
+            evaluator_compile_mode = "eager"
+            if not bool(getattr(args, "real_evaluator_explicit", False)):
+                real_evaluator = False
 
     return IntegralRequest(
         run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
@@ -1399,9 +1430,9 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         min_error=args.min_error,
         bins=args.bins,
         workers=args.workers,
-        jit_compile_evaluators=args.evaluator_compile_mode == "jit",
-        evaluator_compile_mode=str(args.evaluator_compile_mode),
-        real_evaluator=bool(args.real_evaluator),
+        jit_compile_evaluators=evaluator_compile_mode == "jit",
+        evaluator_compile_mode=evaluator_compile_mode,
+        real_evaluator=real_evaluator,
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
         sector_evaluator_backend=args.sector_evaluator_backend,

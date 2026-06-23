@@ -1381,11 +1381,30 @@ def _measure_record_throughput(
         _PARENT_REQUEST = None
     end = time.perf_counter()
     elapsed = max(end - start, 1.0e-12)
+    # The wall-clock warm-up includes cold worker scheduling and first-batch
+    # effects that should not dominate a target-time estimate.  Keep that raw
+    # measurement in diagnostics, but tune with a steady-state estimate derived
+    # from the hot path timing whenever it is available.
+    worker_seconds = (
+        timing.eval_seconds
+        + timing.python_seconds
+        + timing.havana_seconds
+    )
+    active_workers = max(min(int(request.workers), len(batches)), 1)
+    steady_elapsed = (
+        max(worker_seconds / active_workers, 1.0e-12)
+        if worker_seconds > 0.0
+        else elapsed
+    )
+    records_per_second = float(n_records / elapsed)
+    records_per_second_for_tuning = float(n_records / min(elapsed, steady_elapsed))
     return {
         "warmup_records": int(n_records),
         "warmup_seconds": float(elapsed),
         "warmup_setup_seconds": float(max(start - setup_start, 0.0)),
-        "records_per_second": float(n_records / elapsed),
+        "records_per_second": records_per_second,
+        "records_per_second_for_tuning": records_per_second_for_tuning,
+        "steady_state_warmup_seconds_for_tuning": float(min(elapsed, steady_elapsed)),
         "workers": int(request.workers),
         "avg_eval_us_per_sample_per_worker": avg_eval_us_per_sample_per_worker(
             timing,
@@ -1411,7 +1430,10 @@ def autotune_request_for_target_time(
     active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
     warmup = _measure_record_throughput(request, topology, active_sectors)
     target_seconds = float(request.target_integration_time)
-    target_records = max(int(warmup["records_per_second"] * target_seconds), 1)
+    tuning_records_per_second = float(
+        warmup.get("records_per_second_for_tuning", warmup["records_per_second"])
+    )
+    target_records = max(int(tuning_records_per_second * target_seconds), 1)
     iteration_budget = int(request.max_iter) if int(request.max_iter) > 0 else max(int(request.min_iter), 1)
     tuned_samples = int(request.samples_per_iter)
     if request.sampling_mode == "qmc":
@@ -1446,6 +1468,7 @@ def autotune_request_for_target_time(
         "tuned_max_iter": int(tuned_request.max_iter),
         "tuned_samples_per_iter": int(tuned_request.samples_per_iter),
         "estimated_target_records": int(target_records),
+        "tuning_records_per_second": float(tuning_records_per_second),
         **warmup,
         **tuning_extra,
     }
@@ -1796,7 +1819,7 @@ def integrate_qmc(
         if correlated_qmc and aggregate_shift_stats[0].count > 0:
             live_stats = _qmc_live_stats_from_aggregate(
                 aggregate_shift_stats,
-                raw_samples_done,
+                completed_aggregate_raw_samples,
             )
         else:
             # In correlated QMC mode the statistically meaningful pull/error is
