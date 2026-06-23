@@ -15,7 +15,9 @@ mode FSD only prepares the DOT/kinematics boundary and lets pySecDec generate
 and run its own integrator.
 
 `FSD.py` is the top-level CLI entry point.  The implementation modules live in
-`src/`.
+`src/`.  With the uv setup, run the packaged CLI as `uv run fsd ...`; uv will
+create and reuse the locked `.venv` environment without requiring manual
+activation.
 
 ## Common Runs
 
@@ -27,7 +29,7 @@ keeps JIT enabled while avoiding the current real-valued JIT evaluator issue.
 One-loop massless box from DOT, integrated with FSD/QMC for about 30 seconds:
 
 ```sh
-.venv/bin/python FSD.py \
+uv run fsd \
   --run examples/runs/dot_box.yaml \
   --sampling-mode qmc \
   --target-integration-time 30 \
@@ -41,7 +43,7 @@ One-loop massless box from DOT, integrated with FSD/QMC for about 30 seconds:
 The same one-loop box, integrated natively by pySecDec:
 
 ```sh
-.venv/bin/python FSD.py \
+uv run fsd \
   --run examples/runs/dot_box.yaml \
   --dot-engine pysecdec \
   --workers 10 \
@@ -52,7 +54,7 @@ The same one-loop box, integrated natively by pySecDec:
 Massless two-loop double box from DOT, integrated with FSD/Havana:
 
 ```sh
-.venv/bin/python FSD.py \
+uv run fsd \
   --run examples/runs/dot_double_box.yaml \
   --sampling-mode havana \
   --workers 10 \
@@ -68,7 +70,7 @@ Massless two-loop double box from DOT, integrated with FSD/Havana:
 The same double box supplied directly through `U` and `F` polynomials:
 
 ```sh
-.venv/bin/python FSD.py \
+uv run fsd \
   --run examples/runs/double_box_from_U_and_F.yaml \
   --sampling-mode havana \
   --workers 10 \
@@ -83,6 +85,19 @@ The same double box supplied directly through `U` and `F` polynomials:
 
 ## Setup
 
+With Nix flakes, enter the shell first to get Python, uv, and pySecDec's native
+build/runtime tools:
+
+```sh
+nix develop
+uv sync
+uv run fsd --help
+```
+
+After `uv sync`, commands should normally be run with `uv run fsd ...`.  Use
+`uv run python FSD.py ...` only when you explicitly want to bypass the packaged
+console script and execute the source file directly.
+
 Create the local environment and install the external OneLOopBridge binding:
 
 ```sh
@@ -95,9 +110,11 @@ or point to an existing checkout:
 ONELOOPBRIDGE_SRC=/path/to/OneLOopBridge ./install.sh
 ```
 
-DOT mode requires pySecDec, pydot, and PyYAML.  The default sector method is
-`iterative`; pySecDec's `geometric` method additionally requires Normaliz on
-`PATH` or `--normaliz-executable`.
+DOT mode requires pySecDec, pydot, and PyYAML.  The flake shell includes uv,
+Python, Rust tooling for OneLOopBridge, make/pkg-config/zlib for pySecDec
+source builds, and Normaliz for pySecDec's `geometric` sector method.  Outside
+the flake shell, `geometric` additionally requires Normaliz on `PATH` or
+`--normaliz-executable`.
 
 Large formula caches are intentionally not tracked.  If you have a packaged
 cache, install it with:
@@ -126,20 +143,20 @@ result files.
 Run the test suite:
 
 ```sh
-.venv/bin/python -m pytest -q
+uv run pytest -q
 ```
 
 Show a saved result:
 
 ```sh
-.venv/bin/python FSD.py --show-results examples/outputs/dot_double_box_pysecdec_target.json
+uv run fsd --show-results examples/outputs/dot_double_box_pysecdec_target.json
 ```
 
 Force native pySecDec output to stream to the terminal instead of the default
 captured generation log:
 
 ```sh
-.venv/bin/python FSD.py --run examples/runs/dot_box.yaml --dot-engine pysecdec --show-pysecdec-output
+uv run fsd --run examples/runs/dot_box.yaml --dot-engine pysecdec --show-pysecdec-output
 ```
 
 ## More Detail

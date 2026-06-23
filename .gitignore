@@ -1,6 +1,9 @@
 .venv/
+.devenv/
 .deps/
 external/
+build/
+*.egg-info/
 EXPERIMENTAL/
 output/
 MyFSDOutput*/

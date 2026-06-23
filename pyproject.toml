@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fast-sec-dec-path-finder"
+version = "0.1.0"
+description = "Sector-decomposition prototype for Feynman integral experiments."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "colorama",
+    "numpy",
+    "prettytable",
+    "progressbar2",
+    "psutil",
+    "pydot",
+    "pySecDec",
+    "pyyaml",
+    "qmcpy",
+    "symbolica",
+]
+
+[project.scripts]
+fsd = "FSD:main"
+
+[dependency-groups]
+dev = [
+    "maturin[patchelf]",
+    "pytest",
+]
+
+[tool.setuptools]
+py-modules = [
+    "FSD",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]

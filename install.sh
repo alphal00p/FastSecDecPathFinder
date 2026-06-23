@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install only the Python environment and, optionally, build the external
+# Install the uv-managed Python environment and, optionally, build the external
 # OneLOopBridge bindings.  The bridge checkout is never vendored into the repo.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
@@ -67,12 +67,18 @@ if [[ -n "${CACHE_URL}" && -n "${CACHE_TARBALL}" ]]; then
   exit 2
 fi
 
-python3 -m venv "${VENV_DIR}"
-"${VENV_DIR}/bin/python" -m pip install --upgrade pip
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required. Install it first, then rerun ./install.sh." >&2
+  exit 1
+fi
+
 # pySecDec source builds compile bundled GiNaC documentation on some systems.
 # A conservative C locale avoids macOS failures when LC_ALL=C.UTF-8 is not
 # supported by the local Perl/makeinfo toolchain.
-LC_ALL=C LANG=C "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+(
+  cd "${ROOT_DIR}"
+  UV_PROJECT_ENVIRONMENT="${VENV_DIR}" LC_ALL=C LANG=C uv sync --group dev
+)
 
 if [[ -n "${CACHE_URL}" ]]; then
   mkdir -p "${ROOT_DIR}/.deps"
@@ -113,7 +119,6 @@ if [[ -n "${BRIDGE_SRC}" ]]; then
   (
     cd "${BRIDGE_SRC}"
     # maturin develop installs the Python extension directly into this venv.
-    "${VENV_DIR}/bin/python" -m pip install 'maturin[patchelf]'
     VIRTUAL_ENV="${VENV_DIR}" PATH="${VENV_DIR}/bin:${PATH}" \
       "${VENV_DIR}/bin/maturin" develop --release --features python
   )
