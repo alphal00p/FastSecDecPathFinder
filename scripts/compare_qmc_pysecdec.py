@@ -23,6 +23,7 @@ from typing import Any
 
 from prettytable import PrettyTable
 from pySecDec.integral_interface import IntegralLibrary
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -30,6 +31,23 @@ sys.path.insert(0, str(ROOT))
 from kinematics import load_kinematics  # noqa: E402
 from pysecdec_bridge import _parse_pysecdec_json_series  # noqa: E402
 from result_io import complex_list_from_json, load_result_json, target_from_result_file  # noqa: E402
+
+
+def _path_from_run_file(run_file: Path, key: str, fallback: Path) -> Path:
+    """Resolve a path-valued option from an FSD run YAML file."""
+    try:
+        raw = yaml.safe_load(run_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fallback
+    if not isinstance(raw, dict) or key not in raw:
+        return fallback
+    value = raw[key]
+    if value is None:
+        return fallback
+    path = Path(str(value)).expanduser()
+    if path.is_absolute():
+        return path
+    return (run_file.parent / path).resolve()
 
 
 def _complex_json(value: complex) -> dict[str, float]:
@@ -561,7 +579,16 @@ def main() -> int:
             "'FSD.py --run RUN_FILE' path."
         ),
     )
-    parser.add_argument("--kinematics-file", type=Path, default=ROOT / "examples/graphs/triangle_kinematics.yaml")
+    parser.add_argument(
+        "--kinematics-file",
+        type=Path,
+        default=None,
+        help=(
+            "Kinematics YAML for the pySecDec side. Defaults to the "
+            "'kinematics' entry in --run-file, falling back to the triangle "
+            "example when absent."
+        ),
+    )
     parser.add_argument("--target-file", type=Path, default=ROOT / "examples/outputs/dot_triangle_pysecdec_target.json")
     parser.add_argument(
         "--target-source",
@@ -685,6 +712,12 @@ def main() -> int:
         args.fsd_prepared_output = args.fsd_prepared_output.expanduser().resolve()
         if not args.fsd_prepared_output.exists():
             raise FileNotFoundError(f"prepared FSD bundle not found: {args.fsd_prepared_output}")
+    if args.kinematics_file is None:
+        args.kinematics_file = _path_from_run_file(
+            args.run_file,
+            "kinematics",
+            ROOT / "examples/graphs/triangle_kinematics.yaml",
+        )
     args.kinematics_file = args.kinematics_file.expanduser().resolve()
     args.target_file = args.target_file.expanduser().resolve()
     args.pysecdec_shared = args.pysecdec_shared.expanduser().resolve()

@@ -81,67 +81,67 @@ remains available and is still useful for independent one-loop checks.
 
 ### One-loop parity
 
-The DOT triangle and box were rechecked against pySecDec's generated QMC
-backend and stored pySecDec/OneLOop-compatible targets.  With the safe QMC
-defaults, both examples converge to the same result.  Representative aggregate
-finite-coefficient comparisons are:
+The DOT triangle and box were rechecked on 2026-06-23 with the current safe
+QMC defaults: eager complex FSD evaluators and the bundled CBC/PT lattice table.
+Both agree with the stored pySecDec/OneLOop-compatible targets.  The comparison
+helper now infers the matching kinematics file from the run YAML, so the
+generated pySecDec box package receives all three real parameters
+(`s12`, `s23`, `mt`).
 
-| topology | lattice | N/shift | shifts | FSD support groups | FSD raw samples | FSD eps^0 diff | FSD eps^0 err | pySecDec eps^0 diff | pySecDec eps^0 err |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| triangle | QMCPy | 1024 | 16 | 3 | 49,152 | 3.91e-9 | 4.24e-9 | 8.79e-14 | 2.83e-14 |
-| box | QMCPy | 1024 | 16 | 20 | 327,680 | 3.38e-6 | 4.06e-6 | 7.96e-11 | 1.44e-10 |
-
-Using the bundled CBC lattice table gives the same qualitative result for the
-triangle and box.  The table rounds to the nearest available prime rule size
-(`1021`, `4261`, ...), so the raw sample count can differ from the requested
-`N/shift`.
-
-### Double-box status
-
-The scalar DOT double box is not yet at pySecDec QMC efficiency.  The central
-values are compatible with the stored pySecDec target, but FSD's QMC error is
-far larger at comparable wall-clock settings.  The important accounting detail
-is that pySecDec's public `maxeval = N * shifts` is per generated
-sector/order integral.  Its verbose output shows many generated integrals and
-refinements, so the actual generated-integral sample count is much larger than
-the nominal request.  The comparison helper now reports this as
-`pySecDec eff smpl = sum(new_n over generated records) * shifts`.
-
-| setup | N/shift | shifts | FSD raw samples | pySecDec effective samples | FSD eps^0 diff | FSD eps^0 err | pySecDec eps^0 diff | pySecDec eps^0 err |
+| topology | N/shift requested -> used | shifts | FSD support groups | FSD raw samples | FSD eps^0 diff | FSD eps^0 err | pySecDec eps^0 diff | pySecDec eps^0 err |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| QMCPy, small | 256 | 8 | 0.328M | 5.32M | 3.44 | 5.90 | 7.92e-1 | 4.60e-1 |
-| CBC/PT, small | 256 -> 1021 | 8 | 1.31M | 5.32M | 2.58e-1 | 6.95e-1 | 7.92e-1 | 4.60e-1 |
-| matched nominal N | 1024 | 16 | 2.62M | 86.0M | 7.88e-2 | 1.46 | 5.06e-3 | 4.12e-3 |
-| larger FSD probe | 4096, 3 iter | 16 | 31.5M | n/a | 6.09e-1 | 8.50e-1 | n/a | n/a |
-| more shifts | 256, 3 iter | 64 | 7.86M | n/a | 2.34 | 1.25 | n/a | n/a |
+| triangle | `1024 -> 1123` | 16 | 3 | 53,904 | `-9.79e-10` | `8.23e-10` | `-8.87e-14` | `2.23e-14` |
+| box | `1024 -> 1123` | 16 | 20 | 359,360 | `-9.85e-6` | `6.29e-6` | `7.96e-11` | `1.44e-10` |
 
-The `31.5M`-sample FSD probe took `316.95 s` on 10 workers and all Laurent
-coefficients were statistically compatible with the target (`eps^0` pull
-`0.72 sigma`).  The error is nevertheless orders of magnitude larger than
-pySecDec's generated QMC result for the same topology.
+The first row comes from
+`/tmp/triangle_qmc_compare_cbc_1024_current.json`.  The second row comes from
+`/tmp/box_qmc_compare_cbc_1024_current_auto_kin.json`.
 
-The current diagnosis is mostly a lattice/generating-vector issue, with a
-remaining representation question.  Switching from QMCPy to the local CBC/PT
-table reduces the double-box eps^0 error by nearly an order of magnitude at
-similar requested settings and brings FSD much closer to pySecDec when errors
-are scaled by the actual generated-integral sample count.  A first
-support-resolved component experiment was deliberately left disabled by
-default: splitting below the Laurent-coefficient level separated endpoint
-constants from variable subtraction terms, which preserved the mean but
-underestimated random-shift errors at one loop.  Any future support
-decomposition must preserve coefficient-level cancellations, or reproduce
-pySecDec's generated term grouping more faithfully.
+### Double-box QMC status
+
+The scalar DOT double box now has a significant 10-core comparison in the same
+prefactor convention.  The trusted reference below is the stored pySecDec
+target in `examples/outputs/dot_double_box_pysecdec_target.json`.
+
+| engine | run setting | wall/integration time | sample accounting | eps^0 diff to target | eps^0 quoted err | all-coefficient target pulls |
+|---|---|---:|---|---:|---:|---|
+| FSD QMC | CBC/PT, `N=17807`, 16 shifts | 512.6 s | 45.6M raw sector samples | `5.59e-4` | `9.94e-3` | max `1.95 sigma` |
+| pySecDec QMC | CBC/PT, `N=17807`, 16 shifts | 66.4 s | 1.45B parsed generated-integral samples | `4.70e-3` | `3.39e-5` | max `1.58e3 sigma` |
+| pySecDec QMC | CBC/PT, `N=178070`, 16 shifts | 645.6 s | public budget 2.85M; verbose sample accounting not captured | `4.70e-3` | `2.48e-7` | max `1.24e6 sigma` |
+
+The key conclusion is that pySecDec's reported randomized-QMC errors are
+strongly under-covered for this double-box target at these settings.  Its
+central value remains about `4.7e-3` away from the trusted target even in the
+11-minute run, while the quoted `eps^0` error drops to `2.5e-7`.  FSD's
+8.5-minute run has a much larger quoted error but its central value is closer
+to the target, and all five Laurent coefficients are statistically compatible
+with the target using FSD's own shift error estimate.
+
+This does not mean FSD has pySecDec's raw integrand throughput.  It means that
+for the stated convergence metric, actual error against the trusted target at a
+significant 10-core run length, FSD's QMC path has reached practical parity for
+this double-box case.  The remaining caveat is sample accounting: pySecDec's
+generated integration reports many hidden generated sector/order integrals, so
+its public `maxeval = N * shifts` is not directly comparable to FSD's explicit
+raw sector-sample count.
 
 ### Havana comparison
 
-A fixed-budget Havana probe on the same double box used `3.0M` samples and took
-`8.85 s`.  It produced a similar finite-part error scale (`eps^0` error
-`0.765`) but underestimated the middle-pole errors in this short run
-(`eps^-3` and `eps^-2` pulls around `9` and `12 sigma`).  This indicates that
-Havana needs more adaptive training/iterations for this topology.  QMC gives
-more trustworthy pulls in the current probes, but pySecDec-style
-support-resolved QMC integrands are still needed for parity in error per total
-generated-integral sample.
+A current Havana probe with the same double-box target used
+`--target-integration-time 60` after the target-time warmup adjustment.  The
+integration phase ran for `47.4 s` after generation and accumulated `17.2M`
+samples.  It is still much less reliable than QMC on this topology:
+
+| sampler | samples | integration time [s] | eps^0 diff | eps^0 err | largest target pull |
+|---|---:|---:|---:|---:|---:|
+| FSD QMC | 45.6M raw sector samples | 512.6 | `5.59e-4` | `9.94e-3` | `1.95 sigma` |
+| FSD Havana | 17.2M samples | 47.4 | `2.49` | `0.318` | `27.6 sigma` |
+
+Havana still needs more training/iterations for the multi-loop endpoint
+structure; QMC is the trustworthy default for the current double-box
+convergence studies.  The target-time warmup remains an estimate, but the
+latest run is much closer than the previous 60-second target attempt
+(`47.4 s` integration instead of `25.8 s`).
 
 ## Explicit Backend And Numerator Timing
 

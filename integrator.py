@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 
 TARGET_PROGRESS_UNITS = 10_000
-TARGET_TIME_WARMUP_DISCOUNT = 0.50
+TARGET_TIME_WARMUP_DISCOUNT = 0.25
 EXPERIMENTAL_QMC_COMPONENT_SUPPORTS = False
 
 

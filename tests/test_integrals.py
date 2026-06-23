@@ -90,6 +90,7 @@ from pysecdec_bridge import (
 )
 from result_io import print_saved_results, target_from_result_file, write_result_json
 from sectors_generator import SectorDefinition, generate_sectors
+from scripts.compare_qmc_pysecdec import _path_from_run_file
 from symbolica import E
 from symbolica import S
 
@@ -4099,6 +4100,17 @@ def test_kinematics_yaml_uses_symbolica_expression_evaluation() -> None:
     replacements = dict(kin.replacements)
     assert replacements["p1*p2"] == pytest.approx(-0.5)
     assert replacements["p1*p3"] == pytest.approx(1.0)
+
+
+def test_qmc_compare_helper_resolves_kinematics_from_run_yaml() -> None:
+    """The comparison helper should not default box runs to triangle kinematics."""
+    resolved = _path_from_run_file(
+        PROJECT_ROOT / "examples/runs/dot_box.yaml",
+        "kinematics",
+        PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml",
+    )
+
+    assert resolved == (PROJECT_ROOT / "examples/graphs/box_kinematics.yaml").resolve()
 
 
 def test_dot_triangle_pysecdec_generation_matches_expected_endpoint_metadata() -> None:
