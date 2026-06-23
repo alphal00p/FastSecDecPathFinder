@@ -1524,6 +1524,10 @@ def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
         from dot_topology import generate_sectors_from_dot_request
 
         return generate_sectors_from_dot_request(request)
+    if request.integral == "uf":
+        from uf_topology import generate_sectors_from_uf_request
+
+        return generate_sectors_from_uf_request(request)
     if request.integral == "triangle":
         sectors = [
             _triangle_sector(

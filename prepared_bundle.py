@@ -1124,8 +1124,10 @@ def save_prepared_bundle(
             "max_eps_order": request.max_eps_order,
         },
         "source_files": {
+            "topology_source": request.topology_source,
             "dot_file": request.dot_file,
             "kinematics_file": request.kinematics_file,
+            "uf_topology": request.uf_topology,
         },
         "metadata": {
             "python": sys.version,

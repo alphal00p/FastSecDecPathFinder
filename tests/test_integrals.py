@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import json
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1024,6 +1025,7 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
         "dot_triple_box.yaml",
         "dot_triple_box_offshell.yaml",
         "dot_triple_box_offshell_rank2_numerator.yaml",
+        "double_box_from_U_and_F.yaml",
     }
     for run_file in run_files:
         request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
@@ -1033,6 +1035,10 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
         if request.dot_file is not None:
             assert Path(request.dot_file).is_file()
             assert Path(request.kinematics_file or "").is_file()
+        if request.integral == "uf":
+            assert request.topology_source == "uf"
+            assert isinstance(request.uf_topology, dict)
+            assert request.uf_topology.get("variables")
         if request.target_args:
             for target in request.target_args:
                 target_path = Path(target)
@@ -3006,6 +3012,162 @@ def test_dot_generation_timing_has_requested_headline_buckets() -> None:
     } <= headline_names
 
 
+def test_direct_uf_double_box_matches_dot_construction() -> None:
+    """The direct U/F double-box preset reproduces DOT topology/sector metadata."""
+    clear_dot_bundle_cache()
+    from uf_topology import clear_uf_bundle_cache
+
+    clear_uf_bundle_cache()
+    uf_args = parse_args(
+        [
+            "--run",
+            str(PROJECT_ROOT / "examples/runs/double_box_from_U_and_F.yaml"),
+            "--samples-per-iter",
+            "16",
+            "--batch-size",
+            "16",
+            "--max-iter",
+            "1",
+            "--no-progress",
+            "--quiet-summary",
+        ]
+    )
+    dot_args = parse_args(
+        [
+            "--run",
+            str(PROJECT_ROOT / "examples/runs/dot_double_box.yaml"),
+            "--samples-per-iter",
+            "16",
+            "--batch-size",
+            "16",
+            "--max-iter",
+            "1",
+            "--no-progress",
+            "--quiet-summary",
+        ]
+    )
+    uf_request = build_request(uf_args)
+    dot_request = build_request(dot_args)
+    try:
+        validate_request(uf_request)
+        validate_request(dot_request)
+        uf_topology = build_topology(uf_request)
+        dot_topology = build_topology(dot_request)
+        uf_sectors = generate_sectors(uf_request)
+        dot_sectors = generate_sectors(dot_request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    assert uf_request.integral == "uf"
+    assert uf_topology.laurent_min_order == dot_topology.laurent_min_order == -4
+    assert uf_topology.laurent_max_order == dot_topology.laurent_max_order
+    assert uf_topology.global_prefactor_min_order == dot_topology.global_prefactor_min_order
+    assert np.allclose(
+        uf_topology.global_prefactor_coeffs,
+        dot_topology.global_prefactor_coeffs,
+    )
+    assert len(uf_sectors) == len(dot_sectors)
+    assert Counter(len(sector.singular_axes) for sector in uf_sectors) == Counter(
+        len(sector.singular_axes) for sector in dot_sectors
+    )
+
+    x_sample = [0.05, 0.1, 0.2, 0.07, 0.11, 0.13, 0.17]
+    assert abs(uf_topology.u_value(x_sample) - dot_topology.u_value(x_sample)) < 1.0e-12
+    assert abs(uf_topology.f_value(x_sample) - dot_topology.f_value(x_sample)) < 1.0e-12
+    y_sample = [0.23 for _ in range(uf_sectors[0].integration_dim)]
+    assert np.allclose(uf_sectors[0].map_eval(y_sample), dot_sectors[0].map_eval(y_sample))
+    assert uf_sectors[0].u_monomial_powers == dot_sectors[0].u_monomial_powers
+    assert uf_sectors[0].f_monomial_powers == dot_sectors[0].f_monomial_powers
+    assert uf_sectors[0].measure_monomial_powers == dot_sectors[0].measure_monomial_powers
+
+
+def test_direct_uf_prepared_bundle_round_trips(tmp_path: Path) -> None:
+    """Direct U/F topology metadata and evaluators survive prepared-bundle IO."""
+    from uf_topology import clear_uf_bundle_cache
+
+    clear_uf_bundle_cache()
+    output_dir = tmp_path / "prepared_uf_double_box"
+    request = build_request(
+        parse_args(
+            [
+                "generate",
+                "--run",
+                str(PROJECT_ROOT / "examples/runs/double_box_from_U_and_F.yaml"),
+                "--output",
+                str(output_dir),
+                "--samples-per-iter",
+                "16",
+                "--batch-size",
+                "16",
+                "--max-iter",
+                "1",
+                "--no-progress",
+                "--quiet-summary",
+            ]
+        )
+    )
+    try:
+        validate_request(request)
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    manifest = save_prepared_bundle(
+        output_dir,
+        request,
+        topology,
+        sectors,
+        generation_timings={},
+    )
+    loaded_topology, loaded_sectors, loaded_manifest = load_prepared_bundle(output_dir)
+
+    assert manifest["source_files"]["topology_source"] == "uf"
+    assert loaded_manifest["source_files"]["topology_source"] == "uf"
+    assert loaded_topology.family == topology.family
+    assert loaded_topology.parametric_representation.propagator_powers == (
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    )
+    assert len(loaded_sectors) == len(sectors)
+    assert loaded_sectors[0].measure_monomial_powers == sectors[0].measure_monomial_powers
+
+
+def test_dot_nonunit_power_reaches_sector_measure_metadata(tmp_path: Path) -> None:
+    """DOT propagator powers are represented as sector measure monomials."""
+    clear_dot_bundle_cache()
+    dot_text = (PROJECT_ROOT / "examples/graphs/triangle.dot").read_text(encoding="utf-8")
+    dot_file = tmp_path / "triangle_power.dot"
+    dot_file.write_text(
+        dot_text.replace('name="e0", mass="mt"', 'name="e0", mass="mt", power=2'),
+        encoding="utf-8",
+    )
+    request = make_request(
+        integral="dot",
+        dot_file=str(dot_file),
+        kinematics_file=str(PROJECT_ROOT / "examples/graphs/triangle_kinematics.yaml"),
+        mode="massless",
+        m=0.0,
+        prefactor_convention="sector",
+        subtraction_backend="projector-formula",
+    )
+    try:
+        validate_request(request)
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    assert topology.parametric_representation.propagator_powers[0] == 2.0
+    assert topology.parametric_representation.parameter_weight_powers[0] == 1.0
+    assert any(any(abs(power) > 0.0 for power in sector.measure_monomial_powers) for sector in sectors)
+
+
 def test_dot_fsd_integration_does_not_reenter_pysecdec_after_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4196,6 +4358,79 @@ def test_example_dot_parser_preserves_external_direction_and_masses() -> None:
     assert [line.mass for line in parsed.internal_lines] == ["mt", "mt", "mt"]
     assert [line.momentum for line in parsed.external_lines] == ["p0", "-p1", "-p2"]
     assert parsed.pysecdec_internal_lines()[0][0] == "mt"
+
+
+def test_dot_parser_accepts_positive_integer_propagator_powers(tmp_path: Path) -> None:
+    """DOT edge ``power=``/``pow=`` attributes become propagator powers."""
+    dot_file = tmp_path / "powers.dot"
+    dot_file.write_text(
+        """
+        digraph powers {
+          v1; v2; v3;
+          v1 -> v2 [id=0, name="e0", mass="0", power=2];
+          v2 -> v3 [id=1, name="e1", mass="0", pow=3];
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    parsed = parse_dot_file(dot_file)
+
+    assert [line.power for line in parsed.internal_lines] == [2, 3]
+
+
+@pytest.mark.parametrize("power", ["0", "-1", "1.5", "eps"])
+def test_dot_parser_rejects_unsupported_propagator_powers(tmp_path: Path, power: str) -> None:
+    """Only positive integer DOT propagator powers are supported."""
+    dot_file = tmp_path / "bad_power.dot"
+    dot_file.write_text(
+        f"""
+        digraph bad_power {{
+          v1; v2;
+          v1 -> v2 [id=0, name="e0", mass="0", power="{power}"];
+        }}
+        """,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="power|non-integer"):
+        parse_dot_file(dot_file)
+
+
+def test_dot_powerlist_is_forwarded_to_pysecdec_graph_constructor(tmp_path: Path) -> None:
+    """The DOT bridge passes parsed propagator powers as pySecDec powerlist."""
+    dot_file = tmp_path / "powers.dot"
+    dot_file.write_text(
+        """
+        digraph powers {
+          v1; v2; v3;
+          v1 -> v2 [id=0, name="e0", mass="0", power=2];
+          v2 -> v3 [id=1, name="e1", mass="0", power=1];
+        }
+        """,
+        encoding="utf-8",
+    )
+    parsed = parse_dot_file(dot_file)
+    captured: dict[str, Any] = {}
+
+    def fake_loop_integral_from_graph(*_args: Any, **kwargs: Any) -> object:
+        captured["powerlist"] = kwargs.get("powerlist")
+        return object()
+
+    modules = {
+        "LoopIntegralFromGraph": fake_loop_integral_from_graph,
+        "LoopIntegralFromPropagators": lambda *_args, **_kwargs: object(),
+    }
+    kin = KinematicsDefinition(
+        path=tmp_path / "kinematics.yaml",
+        values={},
+        replacements=[],
+        replacement_expressions=[],
+    )
+
+    _make_loop_integral(parsed, kin, make_request(integral="dot"), modules)
+
+    assert captured["powerlist"] == [2, 1]
 
 
 def test_dot_parser_reads_graph_level_momentum_numerator() -> None:

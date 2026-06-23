@@ -1,0 +1,51 @@
+topology-source: uf
+uf-topology:
+  family: double_box_from_U_and_F
+  variables: [x0, x1, x2, x3, x4, x5, x6]
+  parameters: [s12, s23]
+  values:
+    s12: -1.0
+    s23: -1.0
+  U: |
+    x0*x3+x0*x4+x0*x6+x0*x2
+    +x3*x6+x3*x1+x3*x5
+    +x4*x6+x4*x1+x4*x5
+    +x6*x1+x6*x2+x6*x5
+    +x1*x2+x2*x5
+  F: |
+    x0*x4*x6
+    +x3*x6*x5
+    +x3*x1*x5
+    +x4*x1*x5
+    +x6*x1*x5
+    +x6*x2*x5
+    +x1*x2*x5
+  loop-count: 2
+  dimension: "4 - 2*eps"
+  propagator-powers: [1, 1, 1, 1, 1, 1, 1]
+  U-exponent: "1 + 3*eps"
+  F-exponent: "-3 - 2*eps"
+  global-prefactor: "-gamma(3 + 2*eps)"
+dot-engine: fsd
+sector-method: iterative
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+ibp-reduce-to-log-endpoint: true
+symbolic-derivatives: true
+evaluator-compile-mode: eager
+real-evaluator: false
+max-weight-precision-xi: 0.9
+stability-threshold: 1.0e-3
+medium-precision-stability-threshold: 1.0e-6
+high-precision-stability-threshold: 1.0e-8
+stability-precision: 32
+medium-precision-stability-precision: 100
+high-precision-stability-precision: 1000
+max-eps-order: 0
+target: ../outputs/dot_double_box_pysecdec_target.json
+samples-per-iter: 100000
+batch-size: 10000
+max-iter: 3
+min-iter: 1
+workers: 1
+result-path: ../outputs/double_box_from_U_and_F_result.json

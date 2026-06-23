@@ -15,6 +15,7 @@ import re
 import os
 import shutil
 import subprocess
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,36 @@ class DotBuildBundle:
     loop_integral: Any
     parsed_graph: ParsedDotGraph
     kinematics: KinematicsDefinition
+
+
+@dataclass(frozen=True)
+class UFTopologyData:
+    """Direct Symanzik-polynomial topology input."""
+
+    family: str
+    x_names: list[str]
+    parameter_names: list[str]
+    parameter_values: list[float]
+    u_expr_text: str
+    f_expr_text: str
+    loop_count: int
+    dimension: EpsilonExpansion
+    propagator_powers: tuple[float, ...]
+    measure_powers: tuple[float, ...]
+    u_exponent: EpsilonExpansion
+    f_exponent: EpsilonExpansion
+    global_prefactor: str
+
+
+@dataclass
+class UFBuildBundle:
+    """Topology, sector, and timing objects created from direct U/F input."""
+
+    topology: TopologyDefinition
+    sectors: list[SectorDefinition]
+    timings: GenerationTimings
+    loop_integral: Any
+    source: UFTopologyData
 
 
 @dataclass
@@ -381,6 +412,7 @@ def _mass_parameter_names(parsed: ParsedDotGraph) -> list[str]:
 
 def _make_loop_integral(parsed: ParsedDotGraph, kin: KinematicsDefinition, request: IntegralRequest, modules: dict[str, Any]) -> Any:
     """Build pySecDec's loop-integral object for the parsed DOT graph."""
+    powerlist = [int(line.power) for line in parsed.internal_lines]
     if parsed.numerator is not None:
         propagators = parsed.graph_attr_list("propagators", separator=";")
         loop_momenta = parsed.graph_attr_list("loop_momenta")
@@ -406,6 +438,7 @@ def _make_loop_integral(parsed: ParsedDotGraph, kin: KinematicsDefinition, reque
             Feynman_parameters="x",
             regulators=["eps"],
             dimensionality="4-2*eps",
+            powerlist=powerlist,
         )
 
     missing_masses = [name for name in _mass_parameter_names(parsed) if name not in kin.values]
@@ -434,6 +467,7 @@ def _make_loop_integral(parsed: ParsedDotGraph, kin: KinematicsDefinition, reque
         Feynman_parameters="x",
         regulators=["eps"],
         dimensionality="4-2*eps",
+        powerlist=powerlist,
     )
 
 
@@ -879,6 +913,63 @@ def _split_cast_product(obj: Any, dimension: int) -> tuple[list[int], Any]:
     return [0 for _ in range(dimension)], obj
 
 
+def _coefficient_is_one(text: str) -> bool:
+    """Return whether a monomial coefficient is numerically the unit constant."""
+    stripped = str(text).strip()
+    if stripped in {"1", "+1", "(1)", "+(1)", "1.0", "+1.0"}:
+        return True
+    try:
+        value = E(stripped).evaluator([]).evaluate([[]])[0][0]
+        return abs(float(value) - 1.0) <= 1.0e-14
+    except Exception:
+        return False
+
+
+def _measure_monomial_powers_from_maps(
+    sec: Any,
+    topology: TopologyDefinition,
+    dimension: int,
+) -> list[float]:
+    """Return sector-variable powers from original ``x_i^(nu_i-1)`` weights.
+
+    pySecDec exposes the transformed Feynman parameters in ``Sector.other``.
+    In this first propagator-power implementation we only support the
+    monomial maps produced by the existing decomposition paths.  A nontrivial
+    regular residual in ``X_i(y)^(nu_i-1)`` would need a separate regular
+    measure factor, so fail clearly instead of silently dropping it.
+    """
+    parametric = topology.parametric_representation
+    if parametric is None:
+        return [0.0 for _ in range(dimension)]
+    weights = list(parametric.parameter_weight_powers)
+    if len(weights) != len(topology.x_names):
+        raise ValueError(
+            f"{topology.family}: parameter_weight_powers has length {len(weights)}, "
+            f"expected {len(topology.x_names)}"
+        )
+    maps = list(sec.other)[: len(topology.x_names)]
+    out = [0.0 for _ in range(dimension)]
+    for x_index, (weight, map_poly) in enumerate(zip(weights, maps)):
+        if abs(float(weight)) <= 1.0e-15:
+            continue
+        rounded_weight = round(float(weight))
+        if abs(float(weight) - rounded_weight) > 1.0e-12 or rounded_weight < 0:
+            raise ValueError(
+                f"{topology.family}: parameter weight {weight:g} for x{x_index} "
+                "is unsupported; only non-negative integer weights are implemented"
+            )
+        powers, coeff = _split_one_term_monomial(map_poly, dimension)
+        if not _coefficient_is_one(coeff):
+            raise ValueError(
+                f"{topology.family}: transformed x{x_index} has non-unit regular "
+                f"coefficient {coeff!r}; non-unit propagator powers require a "
+                "regular measure residual, which is not implemented yet"
+            )
+        for axis, power in enumerate(powers):
+            out[axis] += float(rounded_weight * int(power))
+    return out
+
+
 def _sector_variable_names(sec: Any) -> list[str]:
     """Return pySecDec sector integration variable names."""
     for poly in list(getattr(sec, "other", [])) + list(getattr(sec, "cast", [])):
@@ -895,6 +986,7 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
     u_powers, _u_residual = _split_cast_product(sec.cast[0], dimension)
     f_powers, _f_residual = _split_cast_product(sec.cast[1], dimension)
     jacobian_powers, jacobian_coeff = _split_one_term_monomial(sec.Jacobian, dimension)
+    measure_powers = _measure_monomial_powers_from_maps(sec, topology, dimension)
     other_exprs = [_polynomial_to_expr(poly) for poly in sec.other]
     map_exprs = other_exprs[: len(topology.x_names)]
     numerator_eps_exprs = other_exprs[len(topology.x_names):] or [E("1")]
@@ -908,6 +1000,7 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
     for axis in range(dimension):
         base = (
             float(jacobian_powers[axis])
+            + float(measure_powers[axis])
             + topology.parametric_representation.u_exponent.base * float(u_powers[axis])
             + topology.parametric_representation.f_exponent.base * float(f_powers[axis])
         )
@@ -945,6 +1038,7 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
         u_monomial_powers=u_powers,
         f_monomial_powers=f_powers,
         jacobian_monomial_powers=jacobian_powers,
+        measure_monomial_powers=measure_powers,
         singular_axes=singular_axes,
         subtraction_type=subtraction,
         description="pySecDec-generated DOT sector",
@@ -975,6 +1069,8 @@ def build_dot_bundle(
     param_names = kin.parameter_names
     param_values = kin.parameter_values
     with timings.measure("Symbolica scalar evaluator build", progress=progress):
+        propagator_powers = tuple(float(line.power) for line in parsed.internal_lines)
+        parameter_weight_powers = tuple(float(line.power - 1) for line in parsed.internal_lines)
         topology = TopologyDefinition(
             family=f"DOT[{parsed.graph_name}]",
             x_names=[str(symbol) for symbol in list(li.integration_variables)],
@@ -990,12 +1086,12 @@ def build_dot_bundle(
             convention_note="DOT scalar integral in pySecDec/FSD sector convention",
             parametric_representation=ParametricRepresentation(
                 loop_count=parsed.loop_count,
-                propagator_powers=tuple(1.0 for _ in parsed.internal_lines),
+                propagator_powers=propagator_powers,
                 dimension=EpsilonExpansion(4.0, -2.0),
                 gamma_argument=EpsilonExpansion(0.0, 0.0),
                 u_exponent=u_exp,
                 f_exponent=f_exp,
-                parameter_weight_powers=tuple(0.0 for _ in parsed.internal_lines),
+                parameter_weight_powers=parameter_weight_powers,
                 prefactor_description=f"pySecDec Gamma/global factor: {li.Gamma_factor}",
                 convention_description="FSD coefficients are before convolution with the pySecDec global prefactor",
             ),
@@ -1108,6 +1204,167 @@ def build_dot_bundle(
         loop_integral=li,
         parsed_graph=parsed,
         kinematics=kin,
+    )
+
+
+def _symbolica_to_pysecdec_text(text: str) -> str:
+    """Convert the small expression subset accepted in run YAML to pySecDec syntax."""
+    return str(text).replace("^", "**").replace("i_", "I")
+
+
+def _make_uf_loop_integral(source: UFTopologyData, modules: dict[str, Any]) -> Any:
+    """Build a lightweight loop-integral object from explicit U/F polynomials."""
+    Polynomial = modules["Polynomial"]
+    u_poly = Polynomial.from_expression(
+        _symbolica_to_pysecdec_text(source.u_expr_text),
+        source.x_names,
+    )
+    f_poly = Polynomial.from_expression(
+        _symbolica_to_pysecdec_text(source.f_expr_text),
+        source.x_names,
+    )
+    return SimpleNamespace(
+        U=u_poly,
+        F=f_poly,
+        integration_variables=list(getattr(u_poly, "polysymbols", source.x_names)),
+        exponent_U=source.u_exponent.as_text(),
+        exponent_F=source.f_exponent.as_text(),
+        Gamma_factor=source.global_prefactor,
+        numerator=None,
+    )
+
+
+def build_uf_bundle(
+    source: UFTopologyData,
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> UFBuildBundle:
+    """Build topology and sectors for FSD from direct Symanzik U/F input."""
+    modules = require_pysecdec()
+    timings = GenerationTimings()
+    with timings.measure("U/F input polynomial construction", progress=progress):
+        li = _make_uf_loop_integral(source, modules)
+    with timings.measure("U/F extraction", progress=progress):
+        u_expr = E(source.u_expr_text)
+        f_expr = E(source.f_expr_text)
+    with timings.measure("Symbolica scalar evaluator build", progress=progress):
+        topology = TopologyDefinition(
+            family=source.family,
+            x_names=list(source.x_names),
+            parameter_names=list(source.parameter_names),
+            parameter_values=list(source.parameter_values),
+            u_expr=u_expr,
+            f_expr=f_expr,
+            u_power_base=source.u_exponent.base,
+            f_power_base=-source.f_exponent.base,
+            eps_log_u_coeff=source.u_exponent.eps_coeff,
+            eps_log_f_coeff=source.f_exponent.eps_coeff,
+            expected_laurent_orders=["eps^0"],
+            convention_note="direct U/F scalar integral in pySecDec/FSD sector convention",
+            parametric_representation=ParametricRepresentation(
+                loop_count=source.loop_count,
+                propagator_powers=tuple(float(value) for value in source.propagator_powers),
+                dimension=source.dimension,
+                gamma_argument=EpsilonExpansion(0.0, 0.0),
+                u_exponent=source.u_exponent,
+                f_exponent=source.f_exponent,
+                parameter_weight_powers=tuple(float(value) for value in source.measure_powers),
+                prefactor_description=f"direct U/F global factor: {source.global_prefactor}",
+                convention_description="FSD coefficients are before convolution with the supplied global prefactor",
+            ),
+            jit_compile_evaluators=request.jit_compile_evaluators,
+            evaluator_compile_mode=request.evaluator_compile_mode,
+            real_evaluator=request.real_evaluator,
+            dual_evaluator_mode=request.dual_evaluator_mode,
+            ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
+            ibp_power_goal=request.ibp_power_goal,
+        )
+    pysecdec_sectors = _decompose(
+        li,
+        request,
+        timings,
+        modules,
+        progress=progress,
+        numerator_polynomials=None,
+    )
+    with timings.measure(
+        "FSD SectorDefinition conversion",
+        f"{len(pysecdec_sectors)} sectors",
+        progress=progress,
+    ):
+        sectors = [_convert_sector(sec, i, topology, request) for i, sec in enumerate(pysecdec_sectors)]
+    max_sector_depth = max((len(sector.singular_axes) for sector in sectors), default=0)
+    universal_depth = 2 * source.loop_count
+    if max_sector_depth > universal_depth:
+        worst = [
+            sector.name for sector in sectors if len(sector.singular_axes) == max_sector_depth
+        ][:5]
+        raise ValueError(
+            f"sector endpoint pole depth {max_sector_depth} exceeds the scalar 2L depth "
+            f"{universal_depth}; examples: {', '.join(worst)}"
+        )
+    min_order = -universal_depth
+    prefactor_series_max_order = max(0, int(request.max_eps_order) - min_order)
+    prefactor_min_order, prefactor_coeffs = _prefactor_series(
+        source.global_prefactor,
+        prefactor_series_max_order,
+    )
+    display_min_order = (
+        min_order + int(prefactor_min_order)
+        if request.prefactor_convention == "pysecdec"
+        else min_order
+    )
+    if request.max_eps_order < display_min_order:
+        raise ValueError(
+            f"--max-eps-order must be >= eps^{display_min_order}; got eps^{request.max_eps_order}"
+        )
+    topology.global_prefactor_min_order = int(prefactor_min_order)
+    topology.global_prefactor_coeffs = prefactor_coeffs
+    sector_max_order = int(request.max_eps_order)
+    if request.prefactor_convention == "pysecdec":
+        sector_max_order = int(request.max_eps_order) - int(prefactor_min_order)
+    topology.set_laurent_range(min_order, sector_max_order)
+    if request.command == "generate":
+        topology.chain_rule_metadata_only = True
+        if request.output is not None:
+            topology.streaming_evaluator_cache_dir = str(
+                Path(request.output).expanduser().resolve() / ".stream_evaluator_cache"
+            )
+    with timings.measure(
+        "Symbolica sector evaluator build",
+        f"{len(sectors)} sectors",
+        progress=progress,
+    ):
+        if request.sector_evaluator_backend == "explicit":
+            timings.add(
+                "Symbolica sector evaluator build skipped",
+                0.0,
+                detail="explicit backend uses sector-level evaluators directly",
+            )
+        else:
+            prepare_sector_evaluators(sectors, progress=progress, include_dual=False)
+    if request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}:
+        with timings.measure(
+            "Symbolica Taylor evaluator build",
+            request.dual_evaluator_mode,
+            progress=progress,
+        ):
+            topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode, progress=progress)
+    else:
+        timings.add(
+            "Symbolica Taylor evaluator build",
+            0.0,
+            detail=(
+                "skipped: sector evaluator backend prepares explicit sector "
+                "integrand evaluators"
+            ),
+        )
+    return UFBuildBundle(
+        topology=topology,
+        sectors=sectors,
+        timings=timings,
+        loop_integral=li,
+        source=source,
     )
 
 

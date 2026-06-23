@@ -136,7 +136,9 @@ def monomial_power_text(variable_names: list[str], powers: list[int]) -> str:
 def kinematic_restrictions(request: IntegralRequest) -> str:
     """Return the human-readable restriction enforced by validation."""
     if request.integral == "dot":
-        return "scalar Euclidean DOT topology; unit propagator powers; no FSD contour deformation"
+        return "scalar Euclidean DOT topology; positive integer propagator powers; no FSD contour deformation"
+    if request.integral == "uf":
+        return "direct scalar U/F topology; positive integer propagator powers; no FSD contour deformation"
     if request.integral == "triangle":
         if request.mode == "massive":
             return "m > 0 and s < 4 m^2"
@@ -225,6 +227,8 @@ def summary_data(
     }
     if request.dot_file is not None:
         header["dot_file"] = request.dot_file
+    if request.integral == "uf":
+        header["topology_source"] = "uf"
     parametric = topology.parametric_representation
     parametric_data = {}
     if parametric is not None:
@@ -300,11 +304,11 @@ def summary_data(
         "kinematic_restrictions": kinematic_restrictions(request),
         "max_endpoint_taylor_order": max_endpoint_taylor_order,
     }
-    if request.integral == "dot" and max_endpoint_taylor_order > 0:
+    if request.integral in {"dot", "uf"} and max_endpoint_taylor_order > 0:
         validation["warning"] = (
-            "DOT sectors with y^(-n+c*eps), n>1, use IBP-lowered endpoint projectors"
+            "external sectors with y^(-n+c*eps), n>1, use IBP-lowered endpoint projectors"
             if request.ibp_power_goal is not None
-            else "DOT sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint projectors"
+            else "external sectors with y^(-n+c*eps), n>1, use recursive Taylor endpoint projectors"
         )
 
     return {
@@ -489,16 +493,21 @@ def _color_table_cell_lines(value: str, color: str) -> str:
 
 def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
     """Print consolidated generation timings and cache/fallback statistics."""
-    if request.integral != "dot":
+    if request.integral not in {"dot", "uf"}:
         return
     prepared_bundle = data.get("prepared_bundle")
     generation_summary = data.get("generation_timings")
     timings = None
     if prepared_bundle is None:
         try:
-            from dot_topology import get_dot_bundle
+            if request.integral == "dot":
+                from dot_topology import get_dot_bundle
 
-            timings = get_dot_bundle(request).timings
+                timings = get_dot_bundle(request).timings
+            else:
+                from uf_topology import get_uf_bundle
+
+                timings = get_uf_bundle(request).timings
             generation_summary = timings.to_summary_dict()
         except Exception:
             return
@@ -946,6 +955,9 @@ def apply_global_convention(
     dot_global_prefactor_min_order: int | None = None,
 ) -> tuple[list[complex], list[complex]]:
     """Apply gamma-scheme and stripped-convention shifts to sector coefficients."""
+    def has_external_prefactor() -> bool:
+        return request.integral in {"dot", "uf"}
+
     def convolve_regular_factor(
         coeffs_in: list[complex],
         errors_in: list[complex],
@@ -1011,7 +1023,7 @@ def apply_global_convention(
                 errors_out[out_index] += abs(factor_coeff) * errors_in[coeff_index]
         return coeffs_out, errors_out
 
-    if request.integral == "dot":
+    if has_external_prefactor():
         if request.prefactor_convention == "pysecdec":
             prefactor = (
                 list(dot_global_prefactor_coeffs)
@@ -1019,9 +1031,14 @@ def apply_global_convention(
                 else list(request.dot_global_prefactor_coeffs or [])
             )
             if not prefactor:
-                from dot_topology import get_dot_bundle
+                if request.integral == "dot":
+                    from dot_topology import get_dot_bundle
 
-                bundle_topology = get_dot_bundle(request).topology
+                    bundle_topology = get_dot_bundle(request).topology
+                else:
+                    from uf_topology import get_uf_bundle
+
+                    bundle_topology = get_uf_bundle(request).topology
                 prefactor = bundle_topology.global_prefactor_coeffs or [1.0 + 0.0j]
                 prefactor_min_order = int(getattr(bundle_topology, "global_prefactor_min_order", 0))
             else:
@@ -1104,7 +1121,7 @@ def display_laurent_labels(
     summary: JsonDict | None = None,
 ) -> list[str]:
     """Return labels for coefficients after the selected prefactor convention."""
-    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+    if request.integral in {"dot", "uf"} and request.prefactor_convention == "pysecdec":
         raw_min_order = (
             int(request.dot_sector_laurent_min_order)
             if request.dot_sector_laurent_min_order is not None

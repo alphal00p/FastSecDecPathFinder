@@ -69,6 +69,7 @@ from result_io import (
 )
 from runtime_benchmark import run_sector_runtime_benchmark
 from sectors_generator import generate_sectors
+from uf_topology import get_uf_bundle
 
 
 _INTERRUPT_CLEANUP_ACTIVE = False
@@ -274,10 +275,16 @@ def validate_request(request: IntegralRequest) -> None:
     if request.command in {"generate", "integrate"} and request.output is None:
         raise ValueError(f"{request.command} requires --output DIR")
     if request.command == "generate":
-        if request.dot_file is None:
-            raise ValueError("generate currently supports DOT topologies only and requires --dot-file")
-        if request.kinematics_file is None:
-            raise ValueError("generate requires --kinematics")
+        if request.integral == "dot":
+            if request.dot_file is None:
+                raise ValueError("generate DOT mode requires --dot-file")
+            if request.kinematics_file is None:
+                raise ValueError("generate DOT mode requires --kinematics")
+        elif request.integral == "uf":
+            if not isinstance(request.uf_topology, dict):
+                raise ValueError("generate U/F mode requires a uf-topology mapping")
+        else:
+            raise ValueError("generate currently supports only DOT and direct U/F topologies")
         if request.dual_evaluator_mode == "lazy":
             raise ValueError(
                 "generate cannot use --lazy-dual-evaluators-generation because "
@@ -409,6 +416,19 @@ def validate_request(request: IntegralRequest) -> None:
     if request.direct_projector_cache_term_threshold < 0:
         raise ValueError("--direct-projector-cache-term-threshold must be >= 0")
 
+    if request.integral == "uf":
+        if request.command == "integrate":
+            return
+        if request.topology_source != "uf":
+            raise ValueError("direct U/F topology mode requires --topology-source uf")
+        if not isinstance(request.uf_topology, dict):
+            raise ValueError("direct U/F topology mode requires a uf-topology YAML mapping")
+        if request.dot_engine != "fsd":
+            raise ValueError("direct U/F topology mode supports only --dot-engine fsd")
+        if request.target_args == ("pysecdec",):
+            raise ValueError("direct U/F topology mode cannot use --target pysecdec")
+        return
+
     if request.integral == "dot":
         if request.command == "integrate":
             return
@@ -531,6 +551,8 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
     for raw_key, raw_value in data.items():
         key = _normalise_run_key(raw_key)
         value = raw_value
+        if key == "uf_topology" and value is not None and not isinstance(value, dict):
+            raise ValueError(f"{run_path}: uf-topology must be a YAML mapping")
         if key in {
             "pregenerate_dual_evaluators",
             "lazy_dual_evaluators_generation",
@@ -594,6 +616,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         choices=["triangle", "box"],
         default="triangle",
         help="Built-in example integral. Ignored when --dot-file is supplied.",
+    )
+    parser.add_argument(
+        "--topology-source",
+        choices=["builtin", "dot", "uf"],
+        default=defaults.get("topology_source", "builtin"),
+        help=(
+            "Topology input source. 'uf' reads an inline uf-topology block from "
+            "the run YAML and generates sectors from the supplied U/F polynomials."
+        ),
     )
     parser.add_argument(
         "--dot-file",
@@ -1416,9 +1447,16 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     command = getattr(args, "command", "run") or "run"
     dot_file = str(Path(args.dot_file).expanduser()) if args.dot_file is not None else None
     kinematics_file = str(Path(args.kinematics).expanduser()) if args.kinematics is not None else None
+    topology_source = str(getattr(args, "topology_source", "builtin") or "builtin")
+    if dot_file is not None:
+        topology_source = "dot"
     prefactor_convention = args.prefactor_convention
     if prefactor_convention is None:
-        prefactor_convention = "pysecdec" if dot_file is not None or command in {"generate", "integrate", "cache"} else "raw"
+        prefactor_convention = (
+            "pysecdec"
+            if topology_source in {"dot", "uf"} or command in {"generate", "integrate", "cache"}
+            else "raw"
+        )
     output = str(Path(args.output).expanduser()) if args.output is not None else None
     if args.result_path is not None:
         result_path = str(Path(args.result_path).expanduser())
@@ -1473,7 +1511,13 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
 
     return IntegralRequest(
         run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
-        integral="dot" if dot_file is not None or command in {"generate", "integrate"} else args.integral,
+        integral=(
+            "uf"
+            if topology_source == "uf"
+            else ("dot" if dot_file is not None or command in {"generate", "integrate"} else args.integral)
+        ),
+        topology_source=topology_source,
+        uf_topology=getattr(args, "uf_topology", None),
         dot_file=dot_file,
         kinematics_file=kinematics_file,
         graph_name=args.graph_name,
@@ -1605,6 +1649,20 @@ def deepest_laurent_order(topology) -> int:
     return -2 * loop_count
 
 
+def _has_external_global_prefactor(request: IntegralRequest) -> bool:
+    """Return whether sector coefficients are followed by a stored prefactor."""
+    return request.integral in {"dot", "uf"}
+
+
+def _get_external_bundle(request: IntegralRequest, progress: GenerationProgress | None = None):
+    """Return the generated bundle for DOT or direct-U/F external topologies."""
+    if request.integral == "dot":
+        return get_dot_bundle(request, progress=progress)
+    if request.integral == "uf":
+        return get_uf_bundle(request, progress=progress)
+    raise ValueError(f"{request.integral!r} is not an external parametric topology")
+
+
 def _sector_max_order_for_display(request: IntegralRequest, topology, min_order: int) -> int:
     """Return the raw sector order needed for the requested displayed order.
 
@@ -1612,7 +1670,7 @@ def _sector_max_order_for_display(request: IntegralRequest, topology, min_order:
     sector integration.  If that prefactor starts at eps^p with p < 0, a final
     coefficient through eps^M needs raw sector coefficients through eps^(M-p).
     """
-    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+    if _has_external_global_prefactor(request) and request.prefactor_convention == "pysecdec":
         prefactor_min_order = int(getattr(topology, "global_prefactor_min_order", 0))
         display_min_order = int(min_order) + prefactor_min_order
         if request.max_eps_order < display_min_order:
@@ -1650,7 +1708,7 @@ def _display_laurent_orders(request: IntegralRequest, topology) -> list[int]:
         display_max_order = int(topology.laurent_max_order)
     else:
         display_max_order = int(request.max_eps_order)
-    if request.integral == "dot" and request.prefactor_convention == "pysecdec":
+    if _has_external_global_prefactor(request) and request.prefactor_convention == "pysecdec":
         prefactor_min_order = int(getattr(topology, "global_prefactor_min_order", 0))
         display_min_order = int(topology.laurent_min_order) + prefactor_min_order
         if request.command == "integrate" and not request.max_eps_order_explicit:
@@ -1795,6 +1853,11 @@ def _make_integration_output(
                 "values": bundle.kinematics.values,
                 "replacements": bundle.kinematics.replacement_expressions,
             },
+        }
+    elif request.integral == "uf":
+        output["input_metadata"] = {
+            "topology_source": "uf",
+            "uf_topology": request.uf_topology or {},
         }
     return output
 
@@ -2081,7 +2144,7 @@ def _write_pysecdec_target_file(
 ) -> None:
     """Generate a DOT pySecDec target and persist it as a reusable result file."""
     if request.integral != "dot":
-        raise ValueError("missing file-backed targets can only be generated in DOT mode")
+        raise ValueError("missing file-backed pySecDec targets can only be generated in DOT mode")
     if request.prefactor_convention != "pysecdec":
         raise ValueError("file-backed pySecDec targets require --prefactor-convention pysecdec")
     _ensure_target_parent(path)
@@ -2125,9 +2188,13 @@ def resolve_target(
         if len(args) == 1:
             token = args[0]
             if token == "pysecdec":
+                if request.integral != "dot":
+                    raise ValueError("--target pysecdec is only available in DOT mode")
                 target = _pysecdec_target(request, summary, logger=logger)
                 return _align_target_to_topology(target, topology, request)
             if token == "oneloop":
+                if request.integral == "uf":
+                    raise ValueError("--target oneloop is not available in direct U/F mode")
                 target = (
                     _dot_oneloop_target(request, topology)
                     if request.integral == "dot"
@@ -2148,6 +2215,8 @@ def resolve_target(
                 return _align_target_to_topology(target, topology, request)
         return _numeric_target(request, topology, args)
 
+    if request.integral == "uf":
+        return None
     if request.integral != "dot":
         return _oneloop_target(request, topology)
     if request.dot_engine == "both":
@@ -2213,13 +2282,13 @@ def _prepare_sector_runtime_artifacts(
         "order",
         "local-order",
     }
-    bridge_already_prepared_dot_duals = (
-        request.command == "generate" and request.integral == "dot"
+    bridge_already_prepared_external_duals = (
+        request.command == "generate" and _has_external_global_prefactor(request)
         and request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
     )
     if (
         request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
-        and not bridge_already_prepared_dot_duals
+        and not bridge_already_prepared_external_duals
     ):
         topology.prepare_dual_evaluators(
             active_sectors,
@@ -2246,9 +2315,10 @@ def _record_generation_artifact_timings(
     topology,
     extra_dual_build_before: float,
 ) -> None:
-    """Append evaluator/formula build timings to the DOT generation timeline."""
-    if request.integral != "dot" or request.command == "integrate":
+    """Append evaluator/formula build timings to the external generation timeline."""
+    if not _has_external_global_prefactor(request) or request.command == "integrate":
         return
+    bundle = _get_external_bundle(request)
     if topology.subtraction_formula_build_seconds > 0.0:
         if request.subtraction_backend == "projector-formula":
             signature_count = len(topology._endpoint_projector_formulas)
@@ -2282,20 +2352,20 @@ def _record_generation_artifact_timings(
         else:
             signature_count = len(topology._subtraction_formulas)
             detail = f"{signature_count} formula signature(s)"
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica subtraction formula build",
             topology.subtraction_formula_build_seconds,
             detail=detail,
         )
     extra_dual_build = topology.dual_evaluator_build_seconds - extra_dual_build_before
     if extra_dual_build > 0.0:
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica dual evaluator build",
             extra_dual_build,
             detail="regular Taylor source shapes",
         )
     if topology.chain_rule_formula_build_seconds > 0.0:
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica chain-rule formula build",
             topology.chain_rule_formula_build_seconds,
             detail=(
@@ -2307,13 +2377,13 @@ def _record_generation_artifact_timings(
             ),
         )
     elif getattr(topology, "chain_rule_formulas_skipped", 0):
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica chain-rule formula build",
             0.0,
             detail=f"skipped {topology.chain_rule_formulas_skipped} mapped derivative formula(s)",
         )
     if getattr(topology, "two_stage_sector_formula_build_seconds", 0.0) > 0.0:
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica two-stage sector build",
             topology.two_stage_sector_formula_build_seconds,
             detail=(
@@ -2322,7 +2392,7 @@ def _record_generation_artifact_timings(
             ),
         )
     if getattr(topology, "explicit_sector_formula_build_seconds", 0.0) > 0.0:
-        get_dot_bundle(request).timings.add(
+        bundle.timings.add(
             "Symbolica explicit sector build",
             topology.explicit_sector_formula_build_seconds,
             detail=(
@@ -2356,7 +2426,7 @@ def _main_impl() -> int:
             return 0
         legacy_prepared_output = (
             request.command == "run"
-            and request.integral == "dot"
+            and _has_external_global_prefactor(request)
             and request.output is not None
             and (Path(request.output).expanduser() / "manifest.json").is_file()
         )
@@ -2395,6 +2465,21 @@ def _main_impl() -> int:
                     )
             request = replace(
                 request,
+                integral=(
+                    "uf"
+                    if (prepared_manifest.get("source_files", {}).get("topology_source") == "uf")
+                    else request.integral
+                ),
+                topology_source=str(
+                    prepared_manifest.get("source_files", {}).get(
+                        "topology_source",
+                        request.topology_source,
+                    )
+                ),
+                uf_topology=prepared_manifest.get("source_files", {}).get(
+                    "uf_topology",
+                    request.uf_topology,
+                ),
                 dot_global_prefactor_coeffs=tuple(topology.global_prefactor_coeffs or []),
                 dot_global_prefactor_min_order=int(getattr(topology, "global_prefactor_min_order", 0)),
                 dot_sector_laurent_min_order=int(topology.laurent_min_order),
@@ -2418,9 +2503,9 @@ def _main_impl() -> int:
                     )
                 ),
             )
-        elif request.integral == "dot" and request.command != "generate":
+        elif _has_external_global_prefactor(request) and request.command != "generate":
             generation_progress = _generation_progress(request, logger, "FSD generation")
-            bundle = get_dot_bundle(request, progress=generation_progress)
+            bundle = _get_external_bundle(request, progress=generation_progress)
             request = replace(
                 request,
                 dot_global_prefactor_coeffs=tuple(bundle.topology.global_prefactor_coeffs or []),
@@ -2430,7 +2515,7 @@ def _main_impl() -> int:
                 dot_sector_laurent_min_order=int(bundle.topology.laurent_min_order),
                 dot_sector_laurent_max_order=int(bundle.topology.laurent_max_order),
             )
-        elif request.target_args is None:
+        elif request.target_args is None and not _has_external_global_prefactor(request):
             check_oneloop_bridge()
     except Exception as exc:
         if generation_progress is not None:
@@ -2439,7 +2524,11 @@ def _main_impl() -> int:
         return 2
 
     if request.command != "integrate" and prepared_manifest is None:
-        if request.command == "generate" and request.integral == "dot" and generation_progress is None:
+        if (
+            request.command == "generate"
+            and _has_external_global_prefactor(request)
+            and generation_progress is None
+        ):
             generation_progress = _generation_progress(request, logger, "FSD generation")
         topology = build_topology(request)
         if request.command == "generate":
@@ -2494,8 +2583,8 @@ def _main_impl() -> int:
                 summary["generation_timings"] = _json.loads(timings_file.read_text(encoding="utf-8"))
             except Exception:
                 summary["generation_timings"] = {}
-    elif request.integral == "dot":
-        summary["generation_timings"] = get_dot_bundle(request).timings.to_summary_dict()
+    elif _has_external_global_prefactor(request):
+        summary["generation_timings"] = _get_external_bundle(request).timings.to_summary_dict()
 
     if request.command == "generate":
         try:
@@ -2539,9 +2628,9 @@ def _main_impl() -> int:
 
     if (
         request.command == "run"
-        and request.integral == "dot"
+        and _has_external_global_prefactor(request)
         and request.output is not None
-        and request.dot_engine in {"fsd", "both"}
+        and (request.integral == "uf" or request.dot_engine in {"fsd", "both"})
         and prepared_manifest is None
     ):
         try:

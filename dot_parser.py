@@ -180,8 +180,11 @@ def parse_dot_file(path: str | Path, graph_name: str | None = None) -> ParsedDot
             power = int(power_text)
         except ValueError as exc:
             raise ValueError(f"{file_path}: edge {edge_name} has non-integer power {power_text!r}") from exc
-        if power != 1:
-            raise ValueError(f"{file_path}: edge {edge_name} has power {power}; only unit powers are supported")
+        if power <= 0:
+            raise ValueError(
+                f"{file_path}: edge {edge_name} has power {power}; "
+                "only positive integer propagator powers are supported"
+            )
 
         if source_external ^ target_external:
             vertex = target if source_external else source

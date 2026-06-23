@@ -159,6 +159,8 @@ class IntegralRequest:
     target_integration_time: float | None = None
     target_abs_error: float | None = None
     target_rel_error: float | None = None
+    topology_source: str = "builtin"
+    uf_topology: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -66,7 +66,7 @@ class DotTopologyPrintout:
         return [
             ("family", "DOT graph name from pydot"),
             ("loop count", "graph cycle rank E-V+1"),
-            ("propagator powers", "unit powers only in this phase"),
+            ("propagator powers", "positive integer DOT edge power= attributes"),
             ("dimension", "4 - 2 eps"),
             ("prefactor", "pySecDec Gamma/global prefactor metadata"),
             ("U polynomial", "retained Symbolica expression from pySecDec"),

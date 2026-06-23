@@ -3998,6 +3998,10 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
         from dot_topology import build_topology_from_dot_request
 
         return build_topology_from_dot_request(request)
+    if request.integral == "uf":
+        from uf_topology import build_topology_from_uf_request
+
+        return build_topology_from_uf_request(request)
     if request.integral == "triangle":
         if request.s is None:
             raise ValueError("triangle topology requires s")
