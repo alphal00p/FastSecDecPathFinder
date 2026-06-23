@@ -88,14 +88,15 @@ helper now infers the matching kinematics file from the run YAML, so the
 generated pySecDec box package receives all three real parameters
 (`s12`, `s23`, `mt`).
 
-| topology | N/shift requested -> used | shifts | FSD support groups | FSD raw samples | FSD eps^0 diff | FSD eps^0 err | pySecDec eps^0 diff | pySecDec eps^0 err |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| triangle | `1024 -> 1123` | 16 | 3 | 53,904 | `-9.79e-10` | `8.23e-10` | `-8.87e-14` | `2.23e-14` |
-| box | `1024 -> 1123` | 16 | 20 | 359,360 | `-9.85e-6` | `6.29e-6` | `7.96e-11` | `1.44e-10` |
+| topology | N/shift requested -> used | shifts | FSD support groups | FSD raw samples | FSD eps^0 diff | FSD eps^0 err | pySecDec effective samples | pySecDec eps^0 diff | pySecDec eps^0 err |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| triangle | `1024 -> 1123` | 16 | 2 | 35,936 | `+9.53e-10` | `8.42e-10` | 89,840 | `+1.36e-10` | `7.12e-10` |
+| box | `1024 -> 1123` | 16 | 5 | 89,840 | `+1.36e-5` | `8.77e-6` | 143,744 | `+4.88e-6` | `6.06e-6` |
 
-The first row comes from
-`/tmp/triangle_qmc_compare_cbc_1024_current.json`.  The second row comes from
-`/tmp/box_qmc_compare_cbc_1024_current_auto_kin.json`.
+These rows come from fixed-work pySecDec comparisons with loose pySecDec
+tolerances (`epsrel=epsabs=1e99`), so pySecDec does not refine to a hidden
+accuracy target.  They confirm that FSD QMC still has one-loop convergence
+parity in sample-count terms.
 
 ### Double-box QMC status
 
@@ -123,46 +124,59 @@ correct pySecDec-prefactor coefficients for this double-box run are:
 
 | engine | run setting | wall/integration time | sample accounting | eps^0 value | eps^0 quoted err | note |
 |---|---|---:|---|---:|---:|---|
-| FSD QMC, old prefactor bundle | CBC/PT, `N=17807`, 16 shifts | 512.6 s | 45.6M raw sector samples | `-14.8573283689` | `9.94e-3` | retained only as stale diagnostic |
-| FSD QMC, corrected prefactor bundle | CBC/PT, `N=17807`, 16 shifts | 126.1 s | 30.2M raw sector samples | `-14.8630462698` | `4.08e-3` | all coefficients within `2.5 sigma` of long pySecDec |
-| pySecDec QMC | CBC/PT, `N=17807`, 16 shifts | 66.4 s | 1.45B parsed generated-integral samples | `-14.8531825366` | `3.39e-5` | agrees with longer pySecDec run |
+| FSD QMC, corrected prefactor bundle | CBC/PT, `N=17807`, 16 shifts | 125.9 s | 30.2M raw sector-group samples | `-14.8630462698` | `4.08e-3` | all coefficients within `2.5 sigma` |
+| pySecDec QMC, fixed-work tolerances | CBC/PT, `N=17807`, 16 shifts | 3.68 s | 86.0M parsed sector/order samples | `-14.8446386726` | `3.78e-3` | same `n`, loose tolerances |
+| FSD QMC, corrected prefactor bundle | CBC/PT, `N=34687`, 32 shifts | 471.1 s | 117.7M raw sector-group samples | `-14.8480115525` | `2.83e-3` | 7.9-minute 10-core run |
+| pySecDec QMC, fixed-work tolerances | CBC/PT, `N=34687`, 32 shifts | 11.5 s | 335.2M parsed sector/order samples | `-14.8529765646` | `1.90e-3` | same `n`, loose tolerances |
 | pySecDec QMC | CBC/PT, `N=178070`, 16 shifts | 645.6 s | public budget 2.85M; verbose sample accounting not captured | `-14.8531901024` | `2.48e-7` | best current reference |
 
-The corrected FSD run is compatible with the long pySecDec numerical reference
-for all five Laurent coefficients, but it is not competitive in precision per
-wall time.  At the same nominal requested lattice size, pySecDec is not doing
-the same effective work as FSD: even with `evaluateminn=1`, the generated QMC
-integrator refines many sector/order kernels to larger lattice sizes.  For
-example, a comparison run requested `N=1024` and `N=4096` with 16 shifts:
+The corrected FSD runs are compatible with the long pySecDec numerical
+reference for all five Laurent coefficients.  In sample-count terms, FSD is
+close to pySecDec: at `N=34687`, 32 shifts, pySecDec uses about `2.85x` more
+parsed sector/order samples and quotes a finite-part error only about `1.5x`
+smaller.  In wall-clock terms pySecDec remains far faster because its generated
+C++ kernels are much cheaper than FSD's Symbolica evaluator route.
+
+The source of the earlier apparent non-parity was twofold:
+
+1. FSD expanded the signed pySecDec global prefactor `-gamma(3+2 eps)`
+   incorrectly from `eps^2` onward.  That is now fixed by the signed/scaled
+   affine-Gamma path.
+2. The comparison script used `epsrel=epsabs=1e-99` for pySecDec.  That forced
+   pySecDec to refine internally, so nominal low-`N` runs were not fixed-work
+   runs.  For example, a comparison run requested `N=1024` and `N=4096` with
+   16 shifts:
 
 | requested `N` | FSD raw sector samples | FSD eps^0 diff / err | pySecDec effective samples parsed from verbose log | pySecDec eps^0 diff / err |
 |---:|---:|---:|---:|---:|
 | 1024 | 1.90M | `+5.02e-1 / 2.06e0` | 86.0M | `+3.63e-4 / 4.12e-3` |
 | 4096 | 7.23M | `+7.60e-2 / 2.07e-1` | 326.6M | `+1.00e-4 / 4.53e-4` |
 
-This explains why pySecDec appears to converge much faster at equal user-facing
-`N`: its generated integrator is also allocating substantially more effective
-sector/order work.  FSD still needs a pySecDec-like adaptive per-sector/order
-QMC schedule if the comparison target is equal convergence quality at equal wall
-time.
+This explains why pySecDec appeared to converge much faster at equal
+user-facing `N`: the generated integrator was also allocating substantially more
+effective sector/order work.  If the target is equal wall time rather than
+equal sampled work, FSD still needs either much faster sector kernels or a
+compiled pySecDec-style backend.  If the target is equal sample count, the
+current fixed-work runs show close parity.
 
 ### Havana comparison
 
-A current Havana probe with the same double-box target used
-`--target-integration-time 60` after the target-time warmup adjustment.  The
-integration phase ran for `47.4 s` after generation and accumulated `17.2M`
+A current Havana probe with the same corrected double-box target used
+`--target-integration-time 120` after the target-time warmup adjustment.  The
+integration phase ran for `208.3 s` after generation and accumulated `50.6M`
 samples.  It is still much less reliable than QMC on this topology:
 
 | sampler | samples | integration time [s] | eps^0 diff to long pySecDec | eps^0 err | note |
 |---|---:|---:|---:|---:|---:|
-| FSD QMC | 30.2M raw sector samples | 126.1 | `-9.86e-3` | `4.08e-3` | corrected prefactor bundle |
-| FSD Havana | 17.2M samples | 47.4 | not rerun against the long pySecDec reference | `0.318` | still less reliable |
+| FSD QMC | 30.2M raw sector-group samples | 125.9 | `-9.86e-3` | `4.08e-3` | corrected prefactor bundle |
+| FSD QMC | 117.7M raw sector-group samples | 471.1 | `+5.18e-3` | `2.83e-3` | 7.9-minute 10-core run |
+| FSD Havana | 50.6M samples | 208.3 | `+1.25e-1` | `0.320` | corrected prefactor bundle |
 
 Havana still needs more training/iterations for the multi-loop endpoint
 structure; QMC is the trustworthy default for the current double-box
-convergence studies.  The target-time warmup remains an estimate, but the
-latest run is much closer than the previous 60-second target attempt
-(`47.4 s` integration instead of `25.8 s`).
+convergence studies.  The target-time warmup remains an estimate and overshot
+this run, but the sampler conclusion is unambiguous: at comparable sampled work
+Havana is orders of magnitude less efficient than QMC for the finite part.
 
 ## Explicit Backend And Numerator Timing
 

@@ -93,10 +93,23 @@ With a regenerated prepared bundle using the corrected prefactor, a QMC run at
 | `eps^0` | -14.863046 | 4.08e-3 | -14.853190 | 2.41 |
 
 This run is statistically compatible with the high-stat pySecDec reference for
-all five coefficients.  It does not prove equal convergence quality.  pySecDec
-still obtains much smaller errors per wall time because its generated C++ QMC
-path adaptively refines individual sector/order kernels, whereas FSD currently
-uses a coarser independent sector-group lattice schedule.
+all five coefficients.
+
+A higher-stat FSD run at `N=34687` with 32 random shifts accumulated `117.7M`
+raw sector-group samples in `471.1 s` and gave:
+
+| order | FSD QMC | MC err | pySecDec reference | pull |
+|---|---:|---:|---:|---:|
+| `eps^-4` | -6.11e-17 | 1.91e-16 | 6.94e-17 | 0.68 |
+| `eps^-3` | 1.500016 | 1.37e-5 | 1.500000 | 1.13 |
+| `eps^-2` | 1.268395 | 4.97e-5 | 1.268353 | 0.85 |
+| `eps^-1` | 3.004745 | 5.34e-4 | 3.003641 | 2.07 |
+| `eps^0` | -14.848012 | 2.83e-3 | -14.853190 | 1.83 |
+
+The matching fixed-work pySecDec run at the same `N=34687`, 32 shifts used
+`335.2M` parsed sector/order samples and quoted `eps^0` error `1.90e-3`.
+Thus FSD is close to pySecDec in sample-count convergence, although pySecDec is
+still much faster in wall time because its generated kernels are cheaper.
 
 ## Triple Box Status
 

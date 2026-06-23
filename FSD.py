@@ -308,8 +308,18 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--qmc-lattice-backend supports 'qmcpy' and 'cbcpt-dn1-100'")
     if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
         raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
-    if request.qmc_support_mode not in {"boundary", "order", "full", "component"}:
-        raise ValueError("--qmc-support-mode must be 'boundary', 'order', 'full', or 'component'")
+    if request.qmc_support_mode not in {
+        "boundary",
+        "local-boundary",
+        "order",
+        "local-order",
+        "full",
+        "component",
+    }:
+        raise ValueError(
+            "--qmc-support-mode must be 'boundary', 'local-boundary', "
+            "'order', 'local-order', 'full', or 'component'"
+        )
     if (
         request.sampling_mode == "qmc"
         and request.qmc_lattice_backend == "qmcpy"
@@ -695,15 +705,17 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     )
     parser.add_argument(
         "--qmc-support-mode",
-        choices=["boundary", "order", "full", "component"],
+        choices=["boundary", "local-boundary", "order", "local-order", "full", "component"],
         default=str(defaults.get("qmc_support_mode", "boundary")),
         help=(
             "QMC support grouping. 'boundary' uses FSD's current lower-support "
-            "boundary optimization for deepest pole terms; 'full' periodizes "
+            "boundary optimization for deepest pole terms; 'local-boundary' "
+            "keeps every sector/order in its natural local support dimension; "
+            "'full' periodizes "
             "every active Laurent coefficient in the full sector dimension, "
             "'order' samples each sector/Laurent-order pair separately with "
-            "the same boundary support rule, matching pySecDec's generated "
-            "sector/order kernel structure more closely; 'component' enables "
+            "the same boundary support rule, 'local-order' disables any global "
+            "support lifting for that per-order split; 'component' enables "
             "the experimental explicit component split when available. "
             "Default: boundary."
         ),

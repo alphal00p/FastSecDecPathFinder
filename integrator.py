@@ -710,6 +710,21 @@ def qmc_support_groups(
     ]
 
 
+def _qmc_base_support_mode(support_mode: str) -> str:
+    """Return the grouping algebra used by a possibly local-only QMC mode."""
+    mode = str(support_mode)
+    if mode == "local-boundary":
+        return "boundary"
+    if mode == "local-order":
+        return "order"
+    return mode
+
+
+def _qmc_uses_global_support_lift(support_mode: str) -> bool:
+    """Whether FSD should lift local supports to global per-order dimensions."""
+    return str(support_mode) not in {"local-boundary", "local-order", "component"}
+
+
 def qmc_component_support_groups(
     topology: TopologyDefinition,
     sector: SectorDefinition,
@@ -724,13 +739,14 @@ def qmc_component_support_groups(
     summed Laurent coefficient in the full sector dimension.
     """
     full_axes = tuple(range(int(sector.integration_dim)))
-    if support_mode == "full":
+    base_support_mode = _qmc_base_support_mode(support_mode)
+    if base_support_mode == "full":
         active = sector_active_coefficient_indices(topology, sector)
         return [(active, full_axes, None)] if active else []
 
     explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
     formula = explicit_formula_for(sector) if explicit_formula_for is not None else None
-    if support_mode == "component" and formula is not None and formula.qmc_component_layout:
+    if base_support_mode == "component" and formula is not None and formula.qmc_component_layout:
         by_coefficient: dict[int, dict[str, Any]] = {}
         for component_index, (coefficient_index, axes) in enumerate(formula.qmc_component_layout):
             if int(coefficient_index) < 0 or int(coefficient_index) >= topology.coefficient_count:
@@ -773,7 +789,7 @@ def qmc_component_support_groups(
             if boundary_axes:
                 local_support[deepest_index] = boundary_axes
 
-    if support_mode == "order":
+    if base_support_mode == "order":
         return [
             ((int(index),), axes, None)
             for index, axes in sorted(local_support.items())
@@ -1569,10 +1585,14 @@ def autotune_request_for_target_time(
     tuned_samples = int(request.samples_per_iter)
     if request.sampling_mode == "qmc":
         support_mode = str(getattr(request, "qmc_support_mode", "boundary"))
-        global_support_dims = qmc_global_support_dims(
-            topology,
-            active_sectors,
-            support_mode=support_mode,
+        global_support_dims = (
+            qmc_global_support_dims(
+                topology,
+                active_sectors,
+                support_mode=support_mode,
+            )
+            if _qmc_uses_global_support_lift(support_mode)
+            else None
         )
         qmc_group_count = sum(
             len(
@@ -1863,10 +1883,14 @@ def integrate_qmc(
     ]
     correlated_qmc = bool(request.qmc_correlate_sectors)
     support_mode = str(getattr(request, "qmc_support_mode", "boundary"))
-    global_support_dims = qmc_global_support_dims(
-        topology,
-        active_sectors,
-        support_mode=support_mode,
+    global_support_dims = (
+        qmc_global_support_dims(
+            topology,
+            active_sectors,
+            support_mode=support_mode,
+        )
+        if _qmc_uses_global_support_lift(support_mode)
+        else None
     )
     qmc_group_count = sum(
         len(
@@ -1902,7 +1926,11 @@ def integrate_qmc(
         "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
         "qmc_correlate_sectors": correlated_qmc,
         "qmc_support_grouping": support_mode,
-        "qmc_global_support_dimensions": [int(value) for value in global_support_dims],
+        "qmc_global_support_dimensions": (
+            [int(value) for value in global_support_dims]
+            if global_support_dims is not None
+            else "local"
+        ),
         "qmc_sector_group_count": int(qmc_group_count),
         "active_sector_count": len(active_sector_ids),
         "note": (

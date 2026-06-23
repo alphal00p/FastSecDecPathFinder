@@ -431,16 +431,21 @@ def _pysecdec_coefficients_in_fsd_convention(
 def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
     kinematics = load_kinematics(args.kinematics_file)
     library = IntegralLibrary(str(args.pysecdec_shared.resolve()))
+    maxeval = (
+        int(args.pysecdec_maxeval)
+        if args.pysecdec_maxeval is not None
+        else int(n_points) * int(args.qmc_shifts)
+    )
     library.use_Qmc(
         transform=f"korobov{args.qmc_korobov_alpha}",
         generatingvectors=str(args.pysecdec_generatingvectors),
         minn=int(n_points),
         minm=int(args.qmc_shifts),
-        maxeval=int(n_points) * int(args.qmc_shifts),
+        maxeval=maxeval,
         cputhreads=int(args.workers),
         seed=int(args.seed),
-        epsrel=1.0e-99,
-        epsabs=1.0e-99,
+        epsrel=float(args.pysecdec_epsrel),
+        epsabs=float(args.pysecdec_epsabs),
         evaluateminn=int(args.pysecdec_evaluateminn),
     )
     start = time.perf_counter()
@@ -500,9 +505,11 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         "coefficients": coeffs,
         "errors": errors,
         "elapsed_seconds": elapsed,
-        "requested_maxeval_budget": int(n_points) * int(args.qmc_shifts),
+        "requested_maxeval_budget": int(maxeval),
         "requested_n_points": int(n_points),
         "requested_evaluateminn": int(args.pysecdec_evaluateminn),
+        "requested_epsrel": float(args.pysecdec_epsrel),
+        "requested_epsabs": float(args.pysecdec_epsabs),
         "observed_max_n_points": max_observed_n,
         "observed_refinement_count": len(refinement_pairs),
         "observed_refinements": refinement_pairs[:20],
@@ -648,6 +655,34 @@ def main() -> int:
             "Forwarded to pySecDec QMC as evaluateminn. Use 1 for an explicit "
             "low floor; pySecDec's C++ default is 100000 when the wrapper "
             "sentinel 0 is passed."
+        ),
+    )
+    parser.add_argument(
+        "--pysecdec-epsrel",
+        type=float,
+        default=1.0e-2,
+        help=(
+            "Forwarded to pySecDec QMC as epsrel. Use a loose value for "
+            "fixed-work convergence comparisons; use a tiny value only when "
+            "deliberately studying pySecDec's adaptive refinement."
+        ),
+    )
+    parser.add_argument(
+        "--pysecdec-epsabs",
+        type=float,
+        default=1.0e-7,
+        help=(
+            "Forwarded to pySecDec QMC as epsabs. Use a loose value for "
+            "fixed-work convergence comparisons."
+        ),
+    )
+    parser.add_argument(
+        "--pysecdec-maxeval",
+        type=int,
+        default=None,
+        help=(
+            "Optional maxeval forwarded to pySecDec QMC. Default is "
+            "N/shift * shifts, matching the previous comparison harness."
         ),
     )
     parser.add_argument("--workers", type=int, default=10)
@@ -898,6 +933,11 @@ def main() -> int:
             "fsd_prefactor_convention": str(args.fsd_prefactor_convention),
             "pysecdec_generatingvectors": str(args.pysecdec_generatingvectors),
             "pysecdec_evaluateminn": int(args.pysecdec_evaluateminn),
+            "pysecdec_epsrel": float(args.pysecdec_epsrel),
+            "pysecdec_epsabs": float(args.pysecdec_epsabs),
+            "pysecdec_maxeval": None
+            if args.pysecdec_maxeval is None
+            else int(args.pysecdec_maxeval),
             "rows": [
                 {key: _jsonable(value) for key, value in row.items()}
                 for row in rows
