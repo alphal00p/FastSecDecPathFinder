@@ -41,7 +41,6 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 TARGET_PROGRESS_UNITS = 10_000
 TARGET_TIME_WARMUP_DISCOUNT = 0.25
-EXPERIMENTAL_QMC_COMPONENT_SUPPORTS = False
 
 
 @dataclass
@@ -684,6 +683,7 @@ def qmc_support_groups(
     topology: TopologyDefinition,
     sector: SectorDefinition,
     global_support_dims: tuple[int, ...] | None = None,
+    support_mode: str = "boundary",
 ) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
     """Return coefficient groups and their effective QMC support axes.
 
@@ -705,6 +705,7 @@ def qmc_support_groups(
             topology,
             sector,
             global_support_dims,
+            support_mode=support_mode,
         )
     ]
 
@@ -713,6 +714,7 @@ def qmc_component_support_groups(
     topology: TopologyDefinition,
     sector: SectorDefinition,
     global_support_dims: tuple[int, ...] | None = None,
+    support_mode: str = "boundary",
 ) -> list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | None]]:
     """Return QMC groups, optionally down to explicit source components.
 
@@ -722,9 +724,13 @@ def qmc_component_support_groups(
     summed Laurent coefficient in the full sector dimension.
     """
     full_axes = tuple(range(int(sector.integration_dim)))
+    if support_mode == "full":
+        active = sector_active_coefficient_indices(topology, sector)
+        return [(active, full_axes, None)] if active else []
+
     explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
     formula = explicit_formula_for(sector) if explicit_formula_for is not None else None
-    if EXPERIMENTAL_QMC_COMPONENT_SUPPORTS and formula is not None and formula.qmc_component_layout:
+    if support_mode == "component" and formula is not None and formula.qmc_component_layout:
         by_coefficient: dict[int, dict[str, Any]] = {}
         for component_index, (coefficient_index, axes) in enumerate(formula.qmc_component_layout):
             if int(coefficient_index) < 0 or int(coefficient_index) >= topology.coefficient_count:
@@ -750,7 +756,6 @@ def qmc_component_support_groups(
             for axes, entry in sorted(grouped.items(), key=lambda item: (len(item[0]), item[0]))
         ]
 
-    full_dim = len(full_axes)
     endpoint_depth = sector_endpoint_pole_depth(topology, sector)
     sector_min_order = -endpoint_depth if endpoint_depth else 0
     local_support: dict[int, tuple[int, ...]] = {}
@@ -768,6 +773,13 @@ def qmc_component_support_groups(
             if boundary_axes:
                 local_support[deepest_index] = boundary_axes
 
+    if support_mode == "order":
+        return [
+            ((int(index),), axes, None)
+            for index, axes in sorted(local_support.items())
+        ]
+
+    full_dim = len(full_axes)
     grouped: dict[tuple[int, ...], list[int]] = {}
     for index in range(topology.coefficient_count):
         if index not in local_support:
@@ -789,6 +801,7 @@ def qmc_component_support_groups(
 def qmc_global_support_dims(
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
+    support_mode: str = "boundary",
 ) -> tuple[int, ...]:
     """Return pySecDec-style aggregate support dimensions per Laurent column."""
     if not sectors:
@@ -796,7 +809,7 @@ def qmc_global_support_dims(
     full_dim = int(sectors[0].integration_dim)
     dims = [0 for _ in range(topology.coefficient_count)]
     for sector in sectors:
-        groups = qmc_support_groups(topology, sector, None)
+        groups = qmc_support_groups(topology, sector, None, support_mode=support_mode)
         for coeff_indices, axes in groups:
             for index in coeff_indices:
                 dims[index] = max(dims[index], len(axes))
@@ -1555,9 +1568,21 @@ def autotune_request_for_target_time(
     iteration_budget = int(request.max_iter) if int(request.max_iter) > 0 else max(int(request.min_iter), 1)
     tuned_samples = int(request.samples_per_iter)
     if request.sampling_mode == "qmc":
-        global_support_dims = qmc_global_support_dims(topology, active_sectors)
+        support_mode = str(getattr(request, "qmc_support_mode", "boundary"))
+        global_support_dims = qmc_global_support_dims(
+            topology,
+            active_sectors,
+            support_mode=support_mode,
+        )
         qmc_group_count = sum(
-            len(qmc_component_support_groups(topology, sector, global_support_dims))
+            len(
+                qmc_component_support_groups(
+                    topology,
+                    sector,
+                    global_support_dims,
+                    support_mode=support_mode,
+                )
+            )
             for sector in active_sectors
         )
         records_per_iteration_unit = max(int(request.qmc_shifts) * max(int(qmc_group_count), 1), 1)
@@ -1837,9 +1862,21 @@ def integrate_qmc(
         for _sector in sectors
     ]
     correlated_qmc = bool(request.qmc_correlate_sectors)
-    global_support_dims = qmc_global_support_dims(topology, active_sectors)
+    support_mode = str(getattr(request, "qmc_support_mode", "boundary"))
+    global_support_dims = qmc_global_support_dims(
+        topology,
+        active_sectors,
+        support_mode=support_mode,
+    )
     qmc_group_count = sum(
-        len(qmc_component_support_groups(topology, sector, global_support_dims))
+        len(
+            qmc_component_support_groups(
+                topology,
+                sector,
+                global_support_dims,
+                support_mode=support_mode,
+            )
+        )
         for sector in active_sectors
     )
     aggregate_shift_stats = [
@@ -1864,7 +1901,7 @@ def integrate_qmc(
         "qmc_shifts": int(request.qmc_shifts),
         "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
         "qmc_correlate_sectors": correlated_qmc,
-        "qmc_support_grouping": "deepest-endpoint-boundary",
+        "qmc_support_grouping": support_mode,
         "qmc_global_support_dimensions": [int(value) for value in global_support_dims],
         "qmc_sector_group_count": int(qmc_group_count),
         "active_sector_count": len(active_sector_ids),
@@ -2003,6 +2040,7 @@ def integrate_qmc(
                     topology,
                     sector,
                     global_support_dims,
+                    support_mode=support_mode,
                 ):
                     sector_sums = np.zeros(
                         (int(request.qmc_shifts), topology.coefficient_count),
@@ -2334,7 +2372,12 @@ def integrate(
         "active_sector_count": len(active_sector_ids),
         "sector_support": sector_support_diagnostics(topology, sectors),
         "qmc_global_support_dimensions_for_reference": [
-            int(value) for value in qmc_global_support_dims(topology, active_sectors)
+            int(value)
+            for value in qmc_global_support_dims(
+                topology,
+                active_sectors,
+                support_mode=str(getattr(request, "qmc_support_mode", "boundary")),
+            )
         ],
         "lower_support_policy": (
             "Havana keeps every sector contribution in the full continuous "

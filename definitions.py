@@ -145,11 +145,12 @@ class IntegralRequest:
     test_boundary_retry_scales: tuple[float, ...] = (1.0e-2,)
     test_boundary_max_simultaneous_endpoint_approaches: int | None = None
     benchmark_samples_per_sector: int = 5
-    qmc_shifts: int = 16
+    qmc_shifts: int = 64
     qmc_korobov_alpha: int = 3
     qmc_lattice_backend: str = "cbcpt-dn1-100"
     qmc_order: str = "linear"
     qmc_correlate_sectors: bool = True
+    qmc_support_mode: str = "boundary"
     target_integration_time: float | None = None
     target_abs_error: float | None = None
     target_rel_error: float | None = None

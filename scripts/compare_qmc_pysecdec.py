@@ -441,6 +441,7 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         seed=int(args.seed),
         epsrel=1.0e-99,
         epsabs=1.0e-99,
+        evaluateminn=int(args.pysecdec_evaluateminn),
     )
     start = time.perf_counter()
     verbose_log = ""
@@ -501,6 +502,7 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         "elapsed_seconds": elapsed,
         "requested_maxeval_budget": int(n_points) * int(args.qmc_shifts),
         "requested_n_points": int(n_points),
+        "requested_evaluateminn": int(args.pysecdec_evaluateminn),
         "observed_max_n_points": max_observed_n,
         "observed_refinement_count": len(refinement_pairs),
         "observed_refinements": refinement_pairs[:20],
@@ -637,6 +639,16 @@ def main() -> int:
         choices=["default", "cbcpt_dn1_100", "cbcpt_dn2_6", "cbcpt_cfftw1_6", "cbcpt_cfftw2_10"],
         default="default",
         help="pySecDec generated-integrator generating vector table.",
+    )
+    parser.add_argument(
+        "--pysecdec-evaluateminn",
+        type=int,
+        default=1,
+        help=(
+            "Forwarded to pySecDec QMC as evaluateminn. Use 1 for an explicit "
+            "low floor; pySecDec's C++ default is 100000 when the wrapper "
+            "sentinel 0 is passed."
+        ),
     )
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=0)
@@ -885,6 +897,7 @@ def main() -> int:
             "qmc_order": str(args.qmc_order),
             "fsd_prefactor_convention": str(args.fsd_prefactor_convention),
             "pysecdec_generatingvectors": str(args.pysecdec_generatingvectors),
+            "pysecdec_evaluateminn": int(args.pysecdec_evaluateminn),
             "rows": [
                 {key: _jsonable(value) for key, value in row.items()}
                 for row in rows

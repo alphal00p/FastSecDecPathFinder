@@ -308,6 +308,8 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--qmc-lattice-backend supports 'qmcpy' and 'cbcpt-dn1-100'")
     if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
         raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
+    if request.qmc_support_mode not in {"boundary", "order", "full", "component"}:
+        raise ValueError("--qmc-support-mode must be 'boundary', 'order', 'full', or 'component'")
     if (
         request.sampling_mode == "qmc"
         and request.qmc_lattice_backend == "qmcpy"
@@ -653,11 +655,11 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--qmc-shifts",
         type=int,
-        default=int(defaults.get("qmc_shifts", 16)),
+        default=int(defaults.get("qmc_shifts", 64)),
         help=(
             "Number of independent random shifts for --sampling-mode qmc. "
             "The QMC one-sigma error is estimated from these shifted lattice "
-            "replicates. Default: 16."
+            "replicates. Default: 64."
         ),
     )
     parser.add_argument(
@@ -689,6 +691,21 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
             "QMCPy lattice ordering. 'linear' is closest to pySecDec's direct "
             "rank-1 lattice loop; 'radical-inverse' is QMCPy's historical "
             "default. Default: linear."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-support-mode",
+        choices=["boundary", "order", "full", "component"],
+        default=str(defaults.get("qmc_support_mode", "boundary")),
+        help=(
+            "QMC support grouping. 'boundary' uses FSD's current lower-support "
+            "boundary optimization for deepest pole terms; 'full' periodizes "
+            "every active Laurent coefficient in the full sector dimension, "
+            "'order' samples each sector/Laurent-order pair separately with "
+            "the same boundary support rule, matching pySecDec's generated "
+            "sector/order kernel structure more closely; 'component' enables "
+            "the experimental explicit component split when available. "
+            "Default: boundary."
         ),
     )
     qmc_correlate_default = bool(defaults.get("qmc_correlate_sectors", True))
@@ -1418,6 +1435,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         qmc_lattice_backend=str(args.qmc_lattice_backend),
         qmc_order=str(args.qmc_order),
         qmc_correlate_sectors=bool(args.qmc_correlate_sectors),
+        qmc_support_mode=str(args.qmc_support_mode),
         target_rel_accuracy=(
             None if args.target_rel_accuracy is None else float(args.target_rel_accuracy)
         ),
@@ -1912,6 +1930,7 @@ def _prepare_sector_runtime_artifacts(
     topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
     topology.allow_fallback_for_missing_caches = request.allow_fallback_for_missing_caches
+    topology.enable_qmc_component_outputs = request.qmc_support_mode == "component"
     bridge_already_prepared_dot_duals = (
         request.command == "generate" and request.integral == "dot"
         and request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}

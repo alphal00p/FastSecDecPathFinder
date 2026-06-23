@@ -1,6 +1,6 @@
 # Validation Notes
 
-This document records the current validation state of FSD as of 2026-06-17.
+This document records the current validation state of FSD as of 2026-06-23.
 Detailed commands and full metadata live in generated `result.json` files; this
 note keeps the main agreement, stability, and current limitation conclusions.
 
@@ -16,9 +16,16 @@ The intended checks are:
 rg "import (sympy|scipy)|from (sympy|scipy)" . -g'*.py'
 ```
 
-The last full recorded result was `103 passed, 2 skipped`.  The current
-development branch also passes the focused regular-Taylor tests covering the
-dualized and sparse formula builders.
+The last full targeted run was:
+
+```text
+.venv/bin/python -m pytest tests/test_integrals.py -q
+150 passed, 2 skipped
+```
+
+The current development branch also passes the focused prefactor tests covering
+the signed/scaled Gamma prefactor expansion used by DOT-generated pySecDec
+normalizations.
 
 ## Overview
 
@@ -27,9 +34,9 @@ generation comparison with pySecDec is meaningful.
 
 | topology | input | sectors | coefficients | target | FSD generation [s] | pySecDec generation [s] | runtime summary |
 |---|---|---:|---|---|---:|---:|---|
-| triangle | DOT | 3 | `eps^-2..eps^0` | pySecDec generated integrator | 0.223 | 9.095 | avg 2.35 us/smpl/wkr |
-| box | DOT | 12 | `eps^-2..eps^0` | pySecDec generated integrator | 0.240 | 9.075 | avg 7.00 us/smpl/wkr |
-| double box | DOT | 140 | `eps^-4..eps^0` | stored pySecDec-convention target | 0.615 | 272.81 | avg 18.23 us/smpl/wkr |
+| triangle | DOT | 2 | `eps^-2..eps^0` | pySecDec generated integrator / OneLOop-compatible kinematics | 0.22 | 9.10 | QMC agrees with target |
+| box | DOT | 3 | `eps^-2..eps^0` | pySecDec generated integrator / OneLOop-compatible kinematics | 0.24 | 9.08 | QMC agrees with target |
+| double box | DOT | 96 | `eps^-4..eps^0` | high-stat pySecDec numerical reference | 9.03 prepared explicit bundle | 272.81 historical package build | QMC compatible after prefactor fix, but much less precise than pySecDec |
 | triple box | DOT iterative | 1972 | `eps^-6..eps^0` | no pySecDec target completed | 38.46 recorded generation + 30.61 serialization | not completed | prepared bundle builds; performance study ongoing |
 
 ## DOT One-Loop Agreement
@@ -53,23 +60,43 @@ Massless box, pySecDec convention:
 Both DOT one-loop examples reproduce generated pySecDec targets at
 sub-percent level.
 
-## DOT Double Box Agreement
+## DOT Double Box Status
 
-The double box uses `--subtraction-backend projector-formula` and the target in
-`examples/outputs/dot_double_box_pysecdec_target.json`.
+There is no analytic truth value in the current FSD workflow for the two-loop
+double box.  OneLOopBridge is only used for one-loop triangle/box checks.  The
+best current double-box reference is the longer pySecDec numerical run
+`/tmp/pysecdec_double_box_178070.json`, whose reported finite part is
+`eps^0 = -14.8531901024 +/- 2.48e-7`.  This is the practical reference used
+below, not an exact value.
 
-| order | FSD | MC err | target | rel diff | pull |
+The main FSD discrepancy seen before 2026-06-23 was traced to the DOT global
+prefactor series, not to sector subtraction.  The pySecDec double-box prefactor
+contains `-gamma(3+2 eps)`.  FSD's generic Symbolica Gamma-series fallback
+expanded that signed factor inaccurately from `eps^2` onward.  The analytic
+single-affine-Gamma path now handles optional signs and numeric scales:
+
+```text
+-gamma(3+2 eps)
+  -> [-2.0, -3.6911373403938685, -4.985859983805386,
+      -4.599953351364897, -3.681199052065825]
+```
+
+With a regenerated prepared bundle using the corrected prefactor, a QMC run at
+`N=17807` with 16 random shifts gives:
+
+| order | FSD QMC | MC err | pySecDec reference | pull |
 |---|---:|---:|---:|---:|---:|
-| `eps^-4` | -8.29e-4 | 9.01e-4 | 0 | n/a | 0.92 |
-| `eps^-3` | 1.495225 | 0.011449 | 1.500180 | 0.330% | 0.43 |
-| `eps^-2` | 1.255916 | 0.071973 | 1.268409 | 0.985% | 0.17 |
-| `eps^-1` | 3.129779 | 0.272310 | 2.997033 | 4.43% | 0.49 |
-| `eps^0` | -14.064221 | 0.979197 | -14.857887 | 5.34% | 0.81 |
+| `eps^-4` | 8.24e-16 | 7.25e-16 | 6.94e-17 | 1.04 |
+| `eps^-3` | 1.499916 | 6.56e-5 | 1.500000 | 1.27 |
+| `eps^-2` | 1.268155 | 2.51e-4 | 1.268353 | 0.79 |
+| `eps^-1` | 3.002546 | 7.20e-4 | 3.003641 | 1.52 |
+| `eps^0` | -14.863046 | 4.08e-3 | -14.853190 | 2.41 |
 
-All double-box target pulls are below one sigma in this 3M-sample run.  The
-leading nonzero coefficients are already close to percent-level agreement; the
-finite-side coefficients still need more statistics or variance reduction for
-percent-level central-value claims.
+This run is statistically compatible with the high-stat pySecDec reference for
+all five coefficients.  It does not prove equal convergence quality.  pySecDec
+still obtains much smaller errors per wall time because its generated C++ QMC
+path adaptively refines individual sector/order kernels, whereas FSD currently
+uses a coarser independent sector-group lattice schedule.
 
 ## Triple Box Status
 

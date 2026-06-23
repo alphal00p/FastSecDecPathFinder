@@ -71,6 +71,8 @@ def require_pysecdec() -> dict[str, Any]:
             geometric_decomposition,
             geometric_decomposition_ku,
         )
+        from pySecDec.decomposition.common import squash_symmetry_redundant_sectors_sort
+        from pySecDec.decomposition.common import _collision_safe_hash, _sector2array
         from pySecDec.decomposition.iterative import (
             iterative_decomposition,
             primary_decomposition,
@@ -81,6 +83,8 @@ def require_pysecdec() -> dict[str, Any]:
             LoopIntegralFromPropagators,
             loop_package,
         )
+        from pySecDec.matrix_sort import Pak_sort, iterative_sort, light_Pak_sort
+        from pySecDec.misc import argsort_ND_array
     except Exception as exc:  # pragma: no cover - depends on optional external package.
         raise RuntimeError(
             "DOT mode requires pySecDec. Install it in this venv with "
@@ -93,12 +97,19 @@ def require_pysecdec() -> dict[str, Any]:
         "Cheng_Wu": Cheng_Wu,
         "geometric_decomposition": geometric_decomposition,
         "geometric_decomposition_ku": geometric_decomposition_ku,
+        "squash_symmetry_redundant_sectors_sort": squash_symmetry_redundant_sectors_sort,
+        "_collision_safe_hash": _collision_safe_hash,
+        "_sector2array": _sector2array,
         "iterative_decomposition": iterative_decomposition,
         "primary_decomposition": primary_decomposition,
         "IntegralLibrary": IntegralLibrary,
         "LoopIntegralFromGraph": LoopIntegralFromGraph,
         "LoopIntegralFromPropagators": LoopIntegralFromPropagators,
         "loop_package": loop_package,
+        "Pak_sort": Pak_sort,
+        "iterative_sort": iterative_sort,
+        "light_Pak_sort": light_Pak_sort,
+        "argsort_ND_array": argsort_ND_array,
     }
 
 
@@ -283,10 +294,27 @@ def _single_affine_gamma_series(text: str, max_order: int) -> tuple[int, list[co
     Symbolica builds the correct series structure for ``gamma(2+eps)``, but in
     the current development wheel its numerical evaluator gives an inaccurate
     value for ``polygamma(1,2)``.  This helper only handles a single
-    ``gamma(a+b*eps)`` with non-negative integer ``a``; other prefactors still
-    use the generic Symbolica series fallback below.
+    optionally signed/scaled ``gamma(a+b*eps)`` with non-negative integer
+    ``a``; other prefactors still use the generic Symbolica series fallback
+    below.
     """
-    match = _SINGLE_GAMMA_RE.match(text.replace(" ", ""))
+    cleaned = text.replace(" ", "")
+    scale = 1.0
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+    elif cleaned.startswith("-"):
+        scale = -1.0
+        cleaned = cleaned[1:]
+    if not cleaned.startswith("gamma("):
+        factor, separator, rest = cleaned.partition("*")
+        if not separator or not rest.startswith("gamma("):
+            return None
+        try:
+            scale *= float(factor)
+        except ValueError:
+            return None
+        cleaned = rest
+    match = _SINGLE_GAMMA_RE.match(cleaned)
     if match is None:
         return None
     affine = _affine_epsilon(match.group(1))
@@ -303,14 +331,14 @@ def _single_affine_gamma_series(text: str, max_order: int) -> tuple[int, list[co
     regular_max_order = int(max_order) - min_order
     coeffs = _gamma_one_plus_affine_eps_series(affine.eps_coeff, regular_max_order)
     if base == 0:
-        return min_order, [value / affine.eps_coeff for value in coeffs]
+        return min_order, [scale * value / affine.eps_coeff for value in coeffs]
     for offset in range(1, base):
         coeffs = _regular_series_multiply(
             coeffs,
             [float(offset) + 0.0j, float(affine.eps_coeff) + 0.0j],
             regular_max_order,
         )
-    return min_order, coeffs
+    return min_order, [scale * value for value in coeffs]
 
 
 def _prefactor_series(expr: Any, max_order: int) -> tuple[int, list[complex]]:
@@ -633,6 +661,7 @@ def _decompose(
 ) -> list[Any]:
     """Run the selected pySecDec decomposition and return pySecDec sectors."""
     Sector = modules["Sector"]
+    map_polynomial_count = len(list(li.integration_variables))
     initial = Sector(
         [li.U, li.F],
         other=_sector_other_polynomials(li, modules, numerator_polynomials),
@@ -647,7 +676,14 @@ def _decompose(
             sectors: list[Any] = []
             for primary in modules["primary_decomposition"](initial):
                 sectors.extend(list(modules["iterative_decomposition"](primary)))
-            return sectors
+            return _squash_pysecdec_sector_symmetries(
+                sectors,
+                request,
+                timings,
+                modules,
+                progress,
+                ignored_other_count=map_polynomial_count,
+            )
         workdir = f"normaliz_tmp_{os.getpid()}"
         shutil.rmtree(workdir, ignore_errors=True)
         if request.sector_method == "geometric_ku":
@@ -665,7 +701,14 @@ def _decompose(
                             )
                         )
                     )
-                return sectors
+                return _squash_pysecdec_sector_symmetries(
+                    sectors,
+                    request,
+                    timings,
+                    modules,
+                    progress,
+                    ignored_other_count=map_polynomial_count,
+                )
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
         cheng_wu = modules["Cheng_Wu"](initial, index=-1)
@@ -674,13 +717,140 @@ def _decompose(
         # parallel today, so use a process-local directory and remove it once
         # the generator has been consumed.
         try:
-            return list(
+            sectors = list(
                 modules["geometric_decomposition"](
                     cheng_wu, normaliz=normaliz, workdir=workdir
                 )
             )
+            return _squash_pysecdec_sector_symmetries(
+                sectors,
+                request,
+                timings,
+                modules,
+                progress,
+                ignored_other_count=map_polynomial_count,
+            )
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _squash_pysecdec_sector_symmetries(
+    sectors: list[Any],
+    request: IntegralRequest,
+    timings: GenerationTimings,
+    modules: dict[str, Any],
+    progress: GenerationProgress | None = None,
+    ignored_other_count: int = 0,
+) -> list[Any]:
+    """Apply pySecDec's package-writer sector symmetry reduction.
+
+    pySecDec's generated C++ package does not integrate the raw decomposed
+    sectors directly.  It first removes sectors related by integration-variable
+    permutations, adding their Jacobian coefficients to preserve the integral.
+    FSD must do the same before converting sectors; otherwise QMC comparisons
+    use a different sector partition from pySecDec and can have very different
+    variance at the same nominal lattice size.
+    """
+    reduced = list(sectors)
+    details: list[str] = [f"raw={len(reduced)}"]
+    with timings.measure("pySecDec sector symmetry squashing", progress=progress):
+        if getattr(request, "pysecdec_use_iterative_sort", True):
+            reduced = _squash_fsd_sector_symmetries_preserving_maps(
+                reduced,
+                modules["iterative_sort"],
+                modules,
+                ignored_other_count=ignored_other_count,
+            )
+            details.append(f"iterative={len(reduced)}")
+        if getattr(request, "pysecdec_use_light_pak", True):
+            reduced = _squash_fsd_sector_symmetries_preserving_maps(
+                reduced,
+                modules["light_Pak_sort"],
+                modules,
+                ignored_other_count=ignored_other_count,
+            )
+            details.append(f"lightPak={len(reduced)}")
+        if getattr(request, "pysecdec_use_pak", True):
+            reduced = _squash_fsd_sector_symmetries_preserving_maps(
+                reduced,
+                modules["Pak_sort"],
+                modules,
+                ignored_other_count=ignored_other_count,
+            )
+            details.append(f"Pak={len(reduced)}")
+    timings.add("pySecDec sector symmetry summary", 0.0, detail=", ".join(details))
+    return reduced
+
+
+def _sector_for_symmetry(sec: Any, modules: dict[str, Any], ignored_other_count: int) -> Any:
+    """Return a pySecDec sector view for symmetry tests.
+
+    FSD inserts identity Feynman-parameter maps in ``Sector.other`` solely to
+    recover the final sector map.  These maps are not part of pySecDec's
+    generated integrand and would artificially prevent permutation symmetry
+    detection.  Optional entries after those maps, such as numerator
+    polynomials, are retained because they are genuine integrand data.
+    """
+    if ignored_other_count <= 0:
+        return sec
+    return modules["Sector"](
+        sec.cast,
+        other=list(sec.other)[int(ignored_other_count):],
+        Jacobian=sec.Jacobian,
+    )
+
+
+def _squash_fsd_sector_symmetries_preserving_maps(
+    sectors: list[Any],
+    sort_function: Any,
+    modules: dict[str, Any],
+    ignored_other_count: int = 0,
+) -> list[Any]:
+    """pySecDec sort-based symmetry squashing while preserving FSD maps.
+
+    This mirrors ``squash_symmetry_redundant_sectors_sort`` but hashes a view
+    of each sector with FSD's bookkeeping map polynomials removed.  The output
+    sectors are copies of the original representatives, so their recovered maps
+    are still available.  Duplicate representatives are accounted for by adding
+    their Jacobian coefficients, as pySecDec does.
+    """
+    if not sectors:
+        return []
+    symmetry_sectors = [
+        _sector_for_symmetry(sec, modules, ignored_other_count)
+        for sec in sectors
+    ]
+    all_expolists: list[Any] = []
+    all_coeffs: list[Any] = []
+    for sec in symmetry_sectors:
+        expolist, coeffs = modules["_sector2array"](sec)
+        all_expolists.append(expolist)
+        all_coeffs.append(coeffs)
+    all_coeffs_array = np.array(all_coeffs)
+    all_coeffs_array = modules["_collision_safe_hash"](
+        all_coeffs_array.flatten()
+    ).reshape(all_coeffs_array.shape)
+    sector_arrays: list[Any] = []
+    for expolist, coeffs in zip(all_expolists, all_coeffs_array):
+        sector_array = np.hstack((coeffs.reshape(-1, 1), expolist))
+        sort_function(sector_array)
+        sector_arrays.append(sector_array)
+    all_sector_arrays = np.array(sector_arrays)
+    sorted_indices = modules["argsort_ND_array"](all_sector_arrays)
+    previous_index = int(sorted_indices[0])
+    previous_array = all_sector_arrays[previous_index]
+    previous_sector = sectors[previous_index].copy()
+    output = [previous_sector]
+    for sector_index_raw in sorted_indices[1:]:
+        sector_index = int(sector_index_raw)
+        if np.array_equal(all_sector_arrays[sector_index], previous_array):
+            previous_sector.Jacobian.coeffs[0] += sectors[sector_index].Jacobian.coeffs[0]
+            continue
+        previous_index = sector_index
+        previous_array = all_sector_arrays[previous_index]
+        previous_sector = sectors[previous_index].copy()
+        output.append(previous_sector)
+    return output
 
 
 def _split_one_term_monomial(poly: Any, dimension: int) -> tuple[list[int], str]:

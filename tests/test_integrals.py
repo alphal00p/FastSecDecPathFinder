@@ -3005,7 +3005,7 @@ def test_prepared_bundle_round_trips_symbolica_evaluators(tmp_path: Path) -> Non
     topology, sectors, manifest = load_prepared_bundle(output_dir, lru_size=2)
 
     assert manifest["artifact_counts"]["evaluator_files"] > 0
-    assert len(sectors) == 3
+    assert len(sectors) == 2
     values = topology.u_values(np.asarray([[0.2, 0.3, 0.5]], dtype=float))
     assert np.all(np.isfinite(values))
 
@@ -4004,6 +4004,21 @@ def test_symbolica_global_prefactor_series_handles_shifted_gamma() -> None:
     assert coeffs[2] == pytest.approx(expected_eps_2)
 
 
+def test_symbolica_global_prefactor_series_handles_signed_scaled_gamma() -> None:
+    """Signed pySecDec Gamma factors must stay on the analytic path."""
+    min_order, coeffs = _prefactor_series("-gamma(3+2*eps)", 4)
+
+    expected = [
+        -2.0,
+        -3.6911373403938686,
+        -4.9858599838053861,
+        -4.5999533513648978,
+        -3.681199052065825,
+    ]
+    assert min_order == 0
+    assert coeffs == pytest.approx(expected)
+
+
 def test_laurent_global_prefactor_convolution_extends_displayed_pole_range() -> None:
     """A singular DOT prefactor shifts raw sector orders into displayed orders."""
     request = make_request(
@@ -4131,11 +4146,10 @@ def test_dot_triangle_pysecdec_generation_matches_expected_endpoint_metadata() -
         pytest.skip(f"pySecDec unavailable: {exc}")
 
     assert topology.u_value([1.0, 2.0, 3.0]) == pytest.approx(6.0)
-    assert len(sectors) == 3
-    assert sorted(len(sector.singular_axes) for sector in sectors) == [1, 1, 2]
+    assert len(sectors) == 2
+    assert sorted(len(sector.singular_axes) for sector in sectors) == [1, 2]
     assert sorted(tuple(sector.f_monomial_powers) for sector in sectors) == [
         (0, 1),
-        (1, 0),
         (1, 1),
     ]
 
@@ -4160,19 +4174,19 @@ def test_dot_box_pysecdec_generation_matches_expected_polynomial() -> None:
     sample = [0.1, 0.2, 0.3, 0.4]
     assert topology.u_value(sample) == pytest.approx(1.0)
     assert topology.f_value(sample) == pytest.approx(0.11)
-    assert len(sectors) == 12
+    assert len(sectors) == 3
     assert sorted(set(len(sector.singular_axes) for sector in sectors)) == [1, 2]
 
 
 @pytest.mark.parametrize(
     ("name", "expected_loop_count", "expected_sector_count", "expected_dimension"),
     [
-        pytest.param("kite_2loop", 2, 16, 4, id="kite-2-loop"),
-        pytest.param("self_energy_3loop", 3, 117, 6, id="self-energy-3-loop"),
-        pytest.param("three_point_2loop", 2, 16, 4, id="three-point-2-loop"),
-        pytest.param("three_point_3loop", 3, 117, 6, id="three-point-3-loop"),
-        pytest.param("three_point_2loop_6line", 2, 22, 5, id="three-point-2-loop-6-line"),
-        pytest.param("three_point_3loop_8line", 3, 162, 7, id="three-point-3-loop-8-line"),
+        pytest.param("kite_2loop", 2, 4, 4, id="kite-2-loop"),
+        pytest.param("self_energy_3loop", 3, 74, 6, id="self-energy-3-loop"),
+        pytest.param("three_point_2loop", 2, 6, 4, id="three-point-2-loop"),
+        pytest.param("three_point_3loop", 3, 74, 6, id="three-point-3-loop"),
+        pytest.param("three_point_2loop_6line", 2, 6, 5, id="three-point-2-loop-6-line"),
+        pytest.param("three_point_3loop_8line", 3, 117, 7, id="three-point-3-loop-8-line"),
     ],
 )
 def test_dot_multiloop_two_and_three_point_examples_generate_finite_sector_sets(

@@ -58,9 +58,9 @@ Current topology overview:
 
 | topology | input | sectors | Laurent range | FSD generation [s] | pySecDec generated-integrator generation [s] | FSD timing notes |
 |---|---|---:|---|---:|---:|---|
-| triangle | DOT | 3 | `eps^-2..eps^0` | 0.223 | 9.095 | avg 2.35 us/smpl/wkr |
-| box | DOT | 12 | `eps^-2..eps^0` | 0.240 | 9.075 | avg 7.00 us/smpl/wkr |
-| double box | DOT | 140 | `eps^-4..eps^0` | 0.615 | 272.81 | avg 18.23 us/smpl/wkr |
+| triangle | DOT | 2 | `eps^-2..eps^0` | 0.223 | 9.095 | pySecDec symmetry-reduced sectors |
+| box | DOT | 3 | `eps^-2..eps^0` | 0.240 | 9.075 | pySecDec symmetry-reduced sectors |
+| double box | DOT | 96 | `eps^-4..eps^0` | 9.031 prepared explicit bundle | 272.81 historical package build | corrected prefactor bundle |
 | triple box | DOT iterative | 1972 | `eps^-6..eps^0` | 38.46 recorded generation + 30.61 serialization | not completed | compressed prepared bundle, 30 GiB guard |
 
 ## QMC Integration Probe
@@ -99,31 +99,52 @@ The first row comes from
 
 ### Double-box QMC status
 
-The scalar DOT double box now has a significant 10-core comparison in the same
-prefactor convention.  The trusted reference below is the stored pySecDec
-target in `examples/outputs/dot_double_box_pysecdec_target.json`.
+The scalar DOT double box was also compared in the same pySecDec prefactor
+convention.  The earlier stored file
+`examples/outputs/dot_double_box_pysecdec_target.json` must not be treated as a
+truth value: it is itself a finite-statistics result and has no reliable error
+stored with it.  The best available reference in the current logs is instead
+the longer pySecDec run in `/tmp/pysecdec_double_box_178070.json`.  This is a
+practical numerical reference, not an analytic ground truth.
 
-| engine | run setting | wall/integration time | sample accounting | eps^0 diff to target | eps^0 quoted err | all-coefficient target pulls |
+A bug found during the QMC comparison was in FSD's DOT global-prefactor series:
+`-gamma(3+2 eps)` was routed through the generic Symbolica Gamma-series
+fallback, which gave inaccurate coefficients from `eps^2` onward.  The
+analytic affine-Gamma path now handles optional signs and numeric scales.  The
+correct pySecDec-prefactor coefficients for this double-box run are:
+
+```text
+[-2.0,
+ -3.6911373403938685,
+ -4.985859983805386,
+ -4.599953351364897,
+ -3.681199052065825]
+```
+
+| engine | run setting | wall/integration time | sample accounting | eps^0 value | eps^0 quoted err | note |
 |---|---|---:|---|---:|---:|---|
-| FSD QMC | CBC/PT, `N=17807`, 16 shifts | 512.6 s | 45.6M raw sector samples | `5.59e-4` | `9.94e-3` | max `1.95 sigma` |
-| pySecDec QMC | CBC/PT, `N=17807`, 16 shifts | 66.4 s | 1.45B parsed generated-integral samples | `4.70e-3` | `3.39e-5` | max `1.58e3 sigma` |
-| pySecDec QMC | CBC/PT, `N=178070`, 16 shifts | 645.6 s | public budget 2.85M; verbose sample accounting not captured | `4.70e-3` | `2.48e-7` | max `1.24e6 sigma` |
+| FSD QMC, old prefactor bundle | CBC/PT, `N=17807`, 16 shifts | 512.6 s | 45.6M raw sector samples | `-14.8573283689` | `9.94e-3` | retained only as stale diagnostic |
+| FSD QMC, corrected prefactor bundle | CBC/PT, `N=17807`, 16 shifts | 126.1 s | 30.2M raw sector samples | `-14.8630462698` | `4.08e-3` | all coefficients within `2.5 sigma` of long pySecDec |
+| pySecDec QMC | CBC/PT, `N=17807`, 16 shifts | 66.4 s | 1.45B parsed generated-integral samples | `-14.8531825366` | `3.39e-5` | agrees with longer pySecDec run |
+| pySecDec QMC | CBC/PT, `N=178070`, 16 shifts | 645.6 s | public budget 2.85M; verbose sample accounting not captured | `-14.8531901024` | `2.48e-7` | best current reference |
 
-The key conclusion is that pySecDec's reported randomized-QMC errors are
-strongly under-covered for this double-box target at these settings.  Its
-central value remains about `4.7e-3` away from the trusted target even in the
-11-minute run, while the quoted `eps^0` error drops to `2.5e-7`.  FSD's
-8.5-minute run has a much larger quoted error but its central value is closer
-to the target, and all five Laurent coefficients are statistically compatible
-with the target using FSD's own shift error estimate.
+The corrected FSD run is compatible with the long pySecDec numerical reference
+for all five Laurent coefficients, but it is not competitive in precision per
+wall time.  At the same nominal requested lattice size, pySecDec is not doing
+the same effective work as FSD: even with `evaluateminn=1`, the generated QMC
+integrator refines many sector/order kernels to larger lattice sizes.  For
+example, a comparison run requested `N=1024` and `N=4096` with 16 shifts:
 
-This does not mean FSD has pySecDec's raw integrand throughput.  It means that
-for the stated convergence metric, actual error against the trusted target at a
-significant 10-core run length, FSD's QMC path has reached practical parity for
-this double-box case.  The remaining caveat is sample accounting: pySecDec's
-generated integration reports many hidden generated sector/order integrals, so
-its public `maxeval = N * shifts` is not directly comparable to FSD's explicit
-raw sector-sample count.
+| requested `N` | FSD raw sector samples | FSD eps^0 diff / err | pySecDec effective samples parsed from verbose log | pySecDec eps^0 diff / err |
+|---:|---:|---:|---:|---:|
+| 1024 | 1.90M | `+5.02e-1 / 2.06e0` | 86.0M | `+3.63e-4 / 4.12e-3` |
+| 4096 | 7.23M | `+7.60e-2 / 2.07e-1` | 326.6M | `+1.00e-4 / 4.53e-4` |
+
+This explains why pySecDec appears to converge much faster at equal user-facing
+`N`: its generated integrator is also allocating substantially more effective
+sector/order work.  FSD still needs a pySecDec-like adaptive per-sector/order
+QMC schedule if the comparison target is equal convergence quality at equal wall
+time.
 
 ### Havana comparison
 
@@ -132,10 +153,10 @@ A current Havana probe with the same double-box target used
 integration phase ran for `47.4 s` after generation and accumulated `17.2M`
 samples.  It is still much less reliable than QMC on this topology:
 
-| sampler | samples | integration time [s] | eps^0 diff | eps^0 err | largest target pull |
+| sampler | samples | integration time [s] | eps^0 diff to long pySecDec | eps^0 err | note |
 |---|---:|---:|---:|---:|---:|
-| FSD QMC | 45.6M raw sector samples | 512.6 | `5.59e-4` | `9.94e-3` | `1.95 sigma` |
-| FSD Havana | 17.2M samples | 47.4 | `2.49` | `0.318` | `27.6 sigma` |
+| FSD QMC | 30.2M raw sector samples | 126.1 | `-9.86e-3` | `4.08e-3` | corrected prefactor bundle |
+| FSD Havana | 17.2M samples | 47.4 | not rerun against the long pySecDec reference | `0.318` | still less reliable |
 
 Havana still needs more training/iterations for the multi-loop endpoint
 structure; QMC is the trustworthy default for the current double-box
@@ -149,6 +170,12 @@ The `--explicit` backend substitutes the sector maps into each sector
 integrand and builds one multi-output Symbolica evaluator per sector.  This is
 the pySecDec-like comparison path: it deliberately gives up the FSD black-box
 U/F derivative construction in exchange for a faster runtime evaluator.
+
+The one-loop timing tables in this subsection are older backend microbenchmarks
+and were recorded before the current pySecDec-style sector symmetry reduction
+was applied globally.  They remain useful for numerator/runtime trends, but the
+current scalar sector counts are the symmetry-reduced counts in the generation
+overview above.
 
 The table below compares the explicit FSD path against pySecDec's generated
 integrator on one-loop scalar and numerator examples.  All pySecDec runs were
@@ -195,11 +222,15 @@ path-finder goal of treating U/F as numerical black-box evaluators.
 
 ## Scalar Double-Box Three-Way Timing
 
-The scalar Euclidean double box was rerun on 2026-06-22 with a 30 GiB watchdog
-and no wall-time timeout.  FSD runtimes use the `benchmark` subcommand with 5
-ordinary f64 interior samples per sector.  pySecDec was run through
-`--dot-engine pysecdec` with `--keep-pysecdec-workdir`, then the generated
-shared library was loaded directly for an independent verbose timing pass.
+The scalar Euclidean double-box three-way timing below is a historical
+pre-symmetry-reduction microbenchmark from 2026-06-22.  It should not be mixed
+with the current 96-sector QMC convergence comparison above.  It is retained
+only because it records the relative cost of the projector and explicit
+evaluator backends on the same machine.  FSD runtimes used the `benchmark`
+subcommand with 5 ordinary f64 interior samples per sector.  pySecDec was run
+through `--dot-engine pysecdec` with `--keep-pysecdec-workdir`, then the
+generated shared library was loaded directly for an independent verbose timing
+pass.
 
 | method | sectors / generated integrals | generation setup [s] | compile [s] | integration/runtime metric |
 |---|---:|---:|---:|---|
