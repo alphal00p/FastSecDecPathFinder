@@ -15,6 +15,7 @@ from prettytable import PrettyTable
 
 from definitions import IntegralRequest, JsonDict, TargetDefinition
 from formatting import (
+    combine_uncorrelated_errors,
     compare_pull,
     format_complex,
     format_complex_with_error,
@@ -248,6 +249,7 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
     aggregate = data.get("aggregate_results", {})
     display = aggregate.get("display", data.get("display", {}))
     target_coeffs = target.get("coefficients", []) if target.get("source") != "none" else []
+    target_error_values = target.get("errors", []) if target.get("source") != "none" else []
     table = PrettyTable()
     table.field_names = [
         maybe_color("coeff", Fore.CYAN),
@@ -260,18 +262,21 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
     coeffs = complex_list_from_json(display.get("coefficients", []))
     errors = complex_list_from_json(display.get("errors", []))
     targets = complex_list_from_json(target_coeffs) if target_coeffs else []
+    target_errors = complex_list_from_json(target_error_values) if target_error_values else []
     for idx, coeff in enumerate(coeffs):
         error = errors[idx] if idx < len(errors) else 0.0 + 0.0j
         ref = targets[idx] if idx < len(targets) else None
+        target_error = target_errors[idx] if idx < len(target_errors) else 0.0 + 0.0j
+        comparison_error = combine_uncorrelated_errors(error, target_error)
         diff = coeff - ref if ref is not None else None
-        pull, color = compare_pull(diff, error)
+        pull, color = compare_pull(diff, comparison_error)
         table.add_row(
             [
                 maybe_color(labels[idx] if idx < len(labels) else f"#{idx}", Fore.MAGENTA),
                 maybe_color(format_complex_with_error(coeff, error), color),
                 format_percent(relative_error_percent(coeff, error)),
                 format_complex(ref) if ref is not None else maybe_color("N/A", Fore.WHITE),
-                maybe_color(format_complex_with_error(diff, error), color) if diff is not None else maybe_color("N/A", Fore.WHITE),
+                maybe_color(format_complex_with_error(diff, comparison_error), color) if diff is not None else maybe_color("N/A", Fore.WHITE),
                 maybe_color(pull, color),
             ]
         )

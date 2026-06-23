@@ -122,6 +122,15 @@ def actual_lattice_point_count(*, backend: str, n_points: int) -> int:
     raise ValueError(f"unsupported QMC lattice backend {backend!r}")
 
 
+def max_lattice_point_count(*, backend: str) -> int | None:
+    """Return the largest concrete point count supported by a finite backend."""
+    if backend == "qmcpy":
+        return None
+    if backend == "cbcpt-dn1-100":
+        return max(_CBCPT_DN1_100_VECTORS)
+    raise ValueError(f"unsupported QMC lattice backend {backend!r}")
+
+
 def shifted_lattice_points(
     *,
     backend: str,

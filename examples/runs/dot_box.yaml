@@ -6,7 +6,7 @@ prefactor-convention: pysecdec
 subtraction-backend: projector-formula
 symbolic-derivatives: true
 max-eps-order: 0
-target: ../outputs/dot_box_pysecdec_target.json
+target: oneloop
 samples-per-iter: 50000
 batch-size: 5000
 max-iter: 3

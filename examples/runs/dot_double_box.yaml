@@ -6,6 +6,8 @@ prefactor-convention: pysecdec
 subtraction-backend: projector-formula
 ibp-reduce-to-log-endpoint: true
 symbolic-derivatives: true
+evaluator-compile-mode: eager
+real-evaluator: false
 max-weight-precision-xi: 0.9
 stability-threshold: 1.0e-3
 medium-precision-stability-threshold: 1.0e-6

@@ -16,6 +16,7 @@ import copy
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
@@ -50,6 +51,7 @@ from dot_topology import get_dot_bundle
 from generation_timing import GenerationProgress
 from integrand import build_topology
 from integrator import integrate
+from kinematics import load_kinematics
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
 from pysecdec_bridge import ensure_pysecdec_package, run_pysecdec_package
 from pysecdec_kernel_benchmark import (
@@ -549,7 +551,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
             tokens = value if isinstance(value, list) else [value]
             resolved_tokens: list[str] = []
             for token in tokens:
-                if str(token) == "pysecdec" or _is_numeric_token(token):
+                if str(token) in {"pysecdec", "oneloop"} or _is_numeric_token(token):
                     resolved_tokens.append(str(token))
                 else:
                     resolved_tokens.append(_resolve_yaml_path(token, base_dir))
@@ -1914,6 +1916,107 @@ def _oneloop_target(request: IntegralRequest, topology) -> TargetDefinition:
     )
 
 
+def _convolve_regular_series(
+    coeffs: list[complex],
+    factor: list[complex],
+) -> list[complex]:
+    """Multiply equal-window Laurent coefficients by a regular epsilon series."""
+    out = [0.0 + 0.0j for _ in coeffs]
+    for coeff_index, coeff in enumerate(coeffs):
+        for factor_index, factor_coeff in enumerate(factor):
+            out_index = coeff_index + factor_index
+            if out_index >= len(out):
+                break
+            out[out_index] += factor_coeff * coeff
+    return out
+
+
+def _dot_box_oneloop_target(request: IntegralRequest, topology) -> TargetDefinition:
+    """Use OneLOopBridge as an exact target for the compatible DOT box example."""
+    if request.dot_file is None or Path(request.dot_file).expanduser().stem != "box":
+        raise ValueError("--target oneloop in DOT mode is currently implemented for examples/graphs/box.dot")
+    if request.kinematics_file is None:
+        raise ValueError("--target oneloop for DOT box requires --kinematics")
+    if request.prefactor_convention not in {"sector", "pysecdec"}:
+        raise ValueError("--target oneloop for DOT box requires --prefactor-convention sector or pysecdec")
+    kinematics = load_kinematics(request.kinematics_file)
+    missing = [name for name in ("s12", "s23", "mt") if name not in kinematics.values]
+    if missing:
+        raise ValueError(
+            "--target oneloop for DOT box requires kinematics values "
+            + ", ".join(missing)
+        )
+    mass = float(kinematics.values["mt"])
+    builtin_request = replace(
+        request,
+        integral="box",
+        dot_file=None,
+        kinematics_file=None,
+        graph_name=None,
+        target_args=None,
+        prefactor_convention="raw",
+        mode=resolve_mode(mass, request.mode),
+        s12=float(kinematics.values["s12"]),
+        s23=float(kinematics.values["s23"]),
+        m=mass,
+    )
+    benchmark = compute_benchmark_quietly(builtin_request)
+
+    # The DOT sector convention for the one-loop massless box differs from
+    # OneLOopBridge's stripped raw convention by this regular normalization.
+    # The pySecDec convention is then obtained by applying the DOT global
+    # prefactor in the same way as for FSD integration output.
+    sector_coeffs = _convolve_regular_series(
+        list(benchmark.raw),
+        [
+            1.0 + 0.0j,
+            -1.0 + 0.0j,
+            (1.0 - math.pi * math.pi / 6.0) + 0.0j,
+        ],
+    )
+    sector_errors = [0.0 + 0.0j for _ in sector_coeffs]
+    if request.prefactor_convention == "pysecdec":
+        target_coeffs, target_errors = apply_global_convention(
+            sector_coeffs,
+            sector_errors,
+            request,
+            tuple(topology.global_prefactor_coeffs or []),
+            int(getattr(topology, "global_prefactor_min_order", 0)),
+        )
+    else:
+        target_coeffs, target_errors = sector_coeffs, sector_errors
+    return TargetDefinition(
+        source="oneloop",
+        convention=request.prefactor_convention,
+        coefficients=target_coeffs,
+        errors=target_errors,
+        metadata={
+            "mapped_from": "dot_box",
+            "s12": float(kinematics.values["s12"]),
+            "s23": float(kinematics.values["s23"]),
+            "m": mass,
+            "factor": benchmark.factor,
+            "dot_sector_normalization": [
+                1.0,
+                -1.0,
+                1.0 - math.pi * math.pi / 6.0,
+            ],
+        },
+    )
+
+
+def _dot_oneloop_target(request: IntegralRequest, topology) -> TargetDefinition:
+    """Resolve a validated DOT topology to a OneLOopBridge comparison target."""
+    if request.dot_file is None:
+        raise ValueError("--target oneloop in DOT mode requires --dot-file")
+    stem = Path(request.dot_file).expanduser().stem
+    if stem == "box":
+        return _dot_box_oneloop_target(request, topology)
+    raise ValueError(
+        "--target oneloop in DOT mode is currently implemented only for the one-loop box"
+    )
+
+
 def _generation_progress(
     request: IntegralRequest,
     logger: logging.Logger,
@@ -2023,6 +2126,13 @@ def resolve_target(
             token = args[0]
             if token == "pysecdec":
                 target = _pysecdec_target(request, summary, logger=logger)
+                return _align_target_to_topology(target, topology, request)
+            if token == "oneloop":
+                target = (
+                    _dot_oneloop_target(request, topology)
+                    if request.integral == "dot"
+                    else _oneloop_target(request, topology)
+                )
                 return _align_target_to_topology(target, topology, request)
             candidate_path = Path(token).expanduser()
             if candidate_path.is_file() and not request.refresh_target:

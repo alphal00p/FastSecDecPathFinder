@@ -930,6 +930,14 @@ def pull_value(diff: complex | None, err: complex) -> float | None:
     return max(pulls) if pulls else 0.0
 
 
+def combine_uncorrelated_errors(left: complex, right: complex) -> complex:
+    """Combine two complex component-wise one-sigma errors in quadrature."""
+    return complex(
+        math.hypot(float(complex(left).real), float(complex(right).real)),
+        math.hypot(float(complex(left).imag), float(complex(right).imag)),
+    )
+
+
 def apply_global_convention(
     sector_coeffs: list[complex],
     sector_errors: list[complex],
@@ -1249,9 +1257,13 @@ def make_output(
         coeff - ref if target is not None else None
         for coeff, ref in zip(display_coeffs, target_coeffs)
     ]
+    comparison_errors = [
+        combine_uncorrelated_errors(error, target_error)
+        for error, target_error in zip(display_errors, target_errors)
+    ]
     pulls = [
         pull_value(diff, err) if diff is not None else None
-        for diff, err in zip(diffs, display_errors)
+        for diff, err in zip(diffs, comparison_errors)
     ]
     return {
         "schema_version": 1,
@@ -1306,6 +1318,7 @@ def make_output(
             "raw": {"coefficients": raw_coeffs, "errors": raw_errors},
             "display": {"coefficients": display_coeffs, "errors": display_errors},
             "target": {"coefficients": target_coeffs if target is not None else [], "errors": target_errors if target is not None else []},
+            "comparison_errors": comparison_errors if target is not None else [],
             "diff": diffs,
             "pull": pulls,
         },
@@ -1388,15 +1401,18 @@ def print_result_table(output: JsonDict) -> None:
         fsd_value = display["coefficients"][idx]
         err = display["errors"][idx]
         bench_value = display["benchmark"][idx] if benchmark_available else None
+        target_errors = output.get("target", {}).get("errors", [])
+        target_err = target_errors[idx] if idx < len(target_errors) else 0.0 + 0.0j
+        comparison_err = combine_uncorrelated_errors(err, target_err)
         diff = fsd_value - bench_value if bench_value is not None else None
-        pull_text, row_color = compare_pull(diff, err)
+        pull_text, row_color = compare_pull(diff, comparison_err)
         table.add_row(
             [
                 maybe_color(label, Fore.MAGENTA),
                 maybe_color(format_complex_with_error(fsd_value, err), row_color),
                 format_percent(relative_error_percent(fsd_value, err)),
                 format_complex(bench_value) if bench_value is not None else maybe_color("N/A", Fore.WHITE),
-                maybe_color(format_complex_with_error(diff, err), row_color) if diff is not None else maybe_color("N/A", Fore.WHITE),
+                maybe_color(format_complex_with_error(diff, comparison_err), row_color) if diff is not None else maybe_color("N/A", Fore.WHITE),
                 maybe_color(pull_text, row_color),
             ]
         )
@@ -1415,7 +1431,7 @@ def print_result_table(output: JsonDict) -> None:
         + maybe_color("MC err", Fore.YELLOW)
         + " is relative 1σ in percent; "
         + maybe_color("pull", Fore.MAGENTA)
-        + " uses the absolute 1σ error; N/A means no reference backend was run."
+        + " uses combined FSD/reference 1σ errors when available; N/A means no reference backend was run."
     )
     total_timing = max(
         output["eval_seconds"] + output["python_seconds"] + output["havana_seconds"],

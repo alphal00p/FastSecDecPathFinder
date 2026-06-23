@@ -26,6 +26,7 @@ from symbolica import NumericalIntegrator
 from definitions import HotPathTiming, IntegralRequest, IntegrationResult, SectorIntegrationResult, TargetDefinition
 from formatting import (
     apply_global_convention,
+    combine_uncorrelated_errors,
     format_complex,
     format_complex_error,
     pull_value,
@@ -33,7 +34,7 @@ from formatting import (
     summed_relative_error_percent,
 )
 from integrand import SectorProcessor, TopologyDefinition
-from qmc_lattice import actual_lattice_point_count, shifted_lattice_points
+from qmc_lattice import actual_lattice_point_count, max_lattice_point_count, shifted_lattice_points
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty
 
@@ -380,6 +381,11 @@ def _evaluate_records(
                 inactive[list(active_indices)] = False
                 coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
                 coeffs[:, inactive] = 0.0
+        # Use all requested Laurent coefficients for Havana training.  Training
+        # on only the finite part can undersample sectors whose dominant
+        # contribution sits in a pole coefficient, which is exactly the failure
+        # mode seen in multi-loop double-box runs.
+        train = np.sum(np.abs(np.asarray(coeffs, dtype=np.complex128)), axis=1)
         sector_weights = weights[mask]
         weighted_coeffs = coeffs * sector_weights[:, np.newaxis]
         if (
@@ -412,7 +418,7 @@ def _evaluate_records(
                     coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
                     train = np.array(train, dtype=float, copy=True)
                     coeffs[rescue_mask] = rescue_coeffs
-                    train[rescue_mask] = rescue_train
+                    train = np.sum(np.abs(np.asarray(coeffs, dtype=np.complex128)), axis=1)
                     weighted_coeffs = coeffs * sector_weights[:, np.newaxis]
         timing.absorb(sector_timing)
         precision_counts[sector_index, :] += np.asarray(
@@ -1366,8 +1372,13 @@ def live_progress_metrics(
     if target is None:
         return relerr, abserr, None
     pulls = [
-        pull_value(coeff - ref, err)
-        for coeff, err, ref in zip(display_coeffs, display_errors, target.coefficients)
+        pull_value(coeff - ref, combine_uncorrelated_errors(err, target_err))
+        for coeff, err, ref, target_err in zip(
+            display_coeffs,
+            display_errors,
+            target.coefficients,
+            target.errors,
+        )
     ]
     numeric_pulls = [pull for pull in pulls if pull is not None]
     return relerr, abserr, max(numeric_pulls) if numeric_pulls else None
@@ -1859,27 +1870,56 @@ def autotune_request_for_target_time(
             if str(request.qmc_lattice_backend) == "qmcpy"
             else max(raw_lattice_points, 1)
         )
+        backend_max_points = max_lattice_point_count(backend=str(request.qmc_lattice_backend))
+        qmc_lattice_limit_applied = False
+        if backend_max_points is not None and tuned_samples > int(backend_max_points):
+            tuned_samples = int(backend_max_points)
+            qmc_lattice_limit_applied = True
         tuning_extra = {
             "qmc_group_count": int(qmc_group_count),
             "qmc_shifts": int(request.qmc_shifts),
             "qmc_refine_sectors": str(request.qmc_refine_sectors),
             "qmc_adaptive_target_time_group_fraction": float(adaptive_fraction),
             "qmc_effective_group_iterations": float(effective_group_iterations),
+            "qmc_lattice_backend_max_points": (
+                None if backend_max_points is None else int(backend_max_points)
+            ),
+            "qmc_lattice_backend_limit_applied": bool(qmc_lattice_limit_applied),
         }
     else:
         tuned_samples = max(target_records // max(iteration_budget, 1), 1)
         tuning_extra = {}
-    tuned_request = replace(
-        request,
-        max_iter=iteration_budget,
-        samples_per_iter=max(int(tuned_samples), 1),
-    )
+    tuned_samples = max(int(tuned_samples), 1)
+    tuned_request_kwargs: dict[str, Any] = {
+        "max_iter": iteration_budget,
+        "samples_per_iter": tuned_samples,
+    }
+    if request.sampling_mode == "qmc":
+        # Target-time tuning is the user's explicit request to spend roughly
+        # the requested wall time.  The ordinary safety cap is still useful for
+        # untuned runs, but if left unchanged it can silently shrink a tuned
+        # one-loop run back to the default 4096-point lattice and make it
+        # finish almost instantly.
+        current_cap = int(getattr(request, "qmc_max_samples_per_iter", 0))
+        if current_cap > 0 and tuned_samples > current_cap:
+            tuned_request_kwargs["qmc_max_samples_per_iter"] = tuned_samples
+        tuned_request_kwargs["qmc_initial_samples_per_iter"] = max(
+            int(getattr(request, "qmc_initial_samples_per_iter", 1)),
+            tuned_samples,
+        )
+        tuned_request_kwargs["qmc_initial_shifts"] = max(
+            int(getattr(request, "qmc_initial_shifts", 2)),
+            int(getattr(request, "qmc_shifts", 2)),
+        )
+    tuned_request = replace(request, **tuned_request_kwargs)
     diagnostics = {
         "target_integration_time_s": target_seconds,
         "original_max_iter": int(request.max_iter),
         "original_samples_per_iter": int(request.samples_per_iter),
+        "original_qmc_max_samples_per_iter": int(getattr(request, "qmc_max_samples_per_iter", 0)),
         "tuned_max_iter": int(tuned_request.max_iter),
         "tuned_samples_per_iter": int(tuned_request.samples_per_iter),
+        "tuned_qmc_max_samples_per_iter": int(getattr(tuned_request, "qmc_max_samples_per_iter", 0)),
         "estimated_target_records": int(target_records),
         "tuning_records_per_second": float(tuning_records_per_second),
         **warmup,
@@ -3277,9 +3317,10 @@ def integrate(
                 hot_timing.add_python(time.perf_counter() - aggregate_start)
 
                 havana_batch_start = time.perf_counter()
-                # The training observable is the norm of the last requested
-                # Laurent coefficient.  It steers the adaptive grid, while all
-                # coefficients themselves are accumulated in RunningStats above.
+                # The training observable is the sum of absolute values of all
+                # requested Laurent coefficients.  It steers the adaptive grid,
+                # while all coefficients themselves are accumulated in
+                # RunningStats above.
                 training_grid.add_training_samples(batch_samples, t_part)
                 hot_timing.add_havana(time.perf_counter() - havana_batch_start)
 

@@ -43,6 +43,7 @@ from dot_topology import GammaLoopDotTopologyBuilder, clear_dot_bundle_cache
 from formatting import (
     _ellipsis_table_text,
     apply_global_convention,
+    combine_uncorrelated_errors,
     make_output,
     print_result_table,
     pull_value,
@@ -81,7 +82,12 @@ from kinematics import load_kinematics
 from kinematics import KinematicsDefinition
 from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
-from qmc_lattice import cbcpt_dn1_shifted_lattice_points, is_power_of_two, qmcpy_shifted_lattice_points
+from qmc_lattice import (
+    cbcpt_dn1_shifted_lattice_points,
+    is_power_of_two,
+    max_lattice_point_count,
+    qmcpy_shifted_lattice_points,
+)
 from pysecdec_bridge import (
     _make_loop_integral,
     _prefactor_series,
@@ -3673,6 +3679,113 @@ def test_target_time_tuning_uses_steady_state_warmup_rate(monkeypatch: pytest.Mo
     assert tuned_request.samples_per_iter == expected_samples
 
 
+def test_target_time_tuning_raises_qmc_lattice_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Target-time QMC tuning must not be silently clipped by the safety cap."""
+    request = make_request(
+        integral="box",
+        mode="massless",
+        s12=-1.0,
+        s23=-1.0,
+        sampling_mode="qmc",
+        qmc_refine_sectors="democratic",
+        qmc_lattice_backend="cbcpt-dn1-100",
+        qmc_shifts=64,
+        qmc_max_samples_per_iter=4096,
+        samples_per_iter=50_000,
+        max_iter=3,
+        min_iter=1,
+        workers=1,
+        target_integration_time=30.0,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    def fake_warmup(_request, _topology, _active_sectors):
+        return {
+            "warmup_records": 100,
+            "warmup_seconds": 0.1,
+            "warmup_setup_seconds": 0.0,
+            "records_per_second": 1.0e6,
+            "records_per_second_for_tuning": 1.0e6,
+            "steady_state_warmup_seconds_for_tuning": 0.1,
+            "discounted_warmup_seconds_for_tuning": 0.025,
+            "workers": 1,
+            "avg_eval_us_per_sample_per_worker": 0.1,
+            "profile": {
+                "python_fraction": 0.0,
+                "evaluator_fraction": 1.0,
+                "havana_fraction": 0.0,
+            },
+        }
+
+    monkeypatch.setattr(integrator_module, "_measure_record_throughput", fake_warmup)
+    tuned_request, diagnostics = integrator_module.autotune_request_for_target_time(
+        request,
+        topology,
+        sectors,
+    )
+
+    assert diagnostics is not None
+    assert tuned_request.samples_per_iter > request.qmc_max_samples_per_iter
+    assert tuned_request.qmc_max_samples_per_iter == tuned_request.samples_per_iter
+    assert tuned_request.qmc_initial_samples_per_iter == tuned_request.samples_per_iter
+    assert diagnostics["tuned_qmc_max_samples_per_iter"] == tuned_request.samples_per_iter
+
+
+def test_target_time_tuning_respects_cbc_lattice_table_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Target-time QMC tuning should not request unavailable CBC/PT vectors."""
+    request = make_request(
+        integral="box",
+        mode="massless",
+        s12=-1.0,
+        s23=-1.0,
+        sampling_mode="qmc",
+        qmc_refine_sectors="democratic",
+        qmc_lattice_backend="cbcpt-dn1-100",
+        qmc_shifts=64,
+        qmc_max_samples_per_iter=4096,
+        samples_per_iter=50_000,
+        max_iter=3,
+        min_iter=1,
+        workers=1,
+        target_integration_time=30.0,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+
+    def fake_warmup(_request, _topology, _active_sectors):
+        return {
+            "warmup_records": 100,
+            "warmup_seconds": 0.1,
+            "warmup_setup_seconds": 0.0,
+            "records_per_second": 1.0e9,
+            "records_per_second_for_tuning": 1.0e9,
+            "steady_state_warmup_seconds_for_tuning": 0.1,
+            "discounted_warmup_seconds_for_tuning": 0.025,
+            "workers": 1,
+            "avg_eval_us_per_sample_per_worker": 0.1,
+            "profile": {
+                "python_fraction": 0.0,
+                "evaluator_fraction": 1.0,
+                "havana_fraction": 0.0,
+            },
+        }
+
+    monkeypatch.setattr(integrator_module, "_measure_record_throughput", fake_warmup)
+    tuned_request, diagnostics = integrator_module.autotune_request_for_target_time(
+        request,
+        topology,
+        sectors,
+    )
+
+    assert diagnostics is not None
+    assert tuned_request.samples_per_iter == max_lattice_point_count(backend="cbcpt-dn1-100")
+    assert tuned_request.qmc_max_samples_per_iter == tuned_request.samples_per_iter
+    assert diagnostics["qmc_lattice_backend_limit_applied"] is True
+
+
 def test_dot_triangle_qmc_auto_defaults_match_target(tmp_path: Path) -> None:
     """Automatic QMC evaluator defaults should reproduce the pySecDec target."""
     result_path = tmp_path / "triangle_qmc.json"
@@ -3895,6 +4008,66 @@ def test_supported_integrals_match_oneloopbridge_smoke(
         pull = pull_value(coeff - reference, error)
         assert pull is not None
         assert pull <= 8.0
+
+
+def test_dot_box_oneloop_target_matches_pysecdec_convention() -> None:
+    """The DOT box preset should use a high-precision OneLOopBridge target."""
+    try:
+        request = build_request(
+            parse_args(
+                [
+                    "--run",
+                    "examples/runs/dot_box.yaml",
+                    "--no-progress",
+                    "--quiet-summary",
+                ]
+            )
+        )
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+        configure_laurent_range(request, topology, sectors)
+        target = resolve_target(request, topology, summary_data(request, topology, sectors, False))
+    except RuntimeError as exc:
+        pytest.skip(f"OneLOopBridge unavailable: {exc}")
+
+    assert target is not None
+    assert target.source == "oneloop"
+    assert target.convention == "pysecdec"
+    assert target.errors == [0.0 + 0.0j for _ in target.coefficients]
+    assert target.coefficients[0].real == pytest.approx(4.0, abs=1.0e-14)
+    assert target.coefficients[1].real == pytest.approx(-2.30886265960613, abs=1.0e-13)
+    assert target.coefficients[2].real == pytest.approx(-12.4931166871698, abs=1.0e-12)
+
+
+def test_dot_double_box_havana_preset_uses_safe_evaluator_mode() -> None:
+    """The double-box Havana preset must avoid the known real-JIT mismatch."""
+    request = build_request(
+        parse_args(
+            [
+                "--run",
+                "examples/runs/dot_double_box.yaml",
+                "--sampling-mode",
+                "havana",
+                "--quiet-summary",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert request.evaluator_compile_mode == "eager"
+    assert request.real_evaluator is False
+
+
+def test_pull_combines_target_uncertainty() -> None:
+    """A noisy target file should not create an artificial many-sigma pull."""
+    diff = 1.25e-11 + 0.0j
+    fsd_error = 8.3e-13 + 0.0j
+    target_error = 3.1e-10 + 0.0j
+    fsd_only_pull = pull_value(diff, fsd_error)
+    combined_pull = pull_value(diff, combine_uncorrelated_errors(fsd_error, target_error))
+
+    assert fsd_only_pull is not None and fsd_only_pull > 10.0
+    assert combined_pull is not None and combined_pull < 0.1
 
 
 @pytest.mark.parametrize(
