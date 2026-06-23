@@ -74,8 +74,10 @@ estimates errors from the shift-to-shift spread.
 As of 2026-06-23, QMC defaults are deliberately conservative: unless the user
 explicitly requests an evaluator mode, QMC uses eager complex Symbolica
 evaluators.  This avoids the known real-JIT evaluator bug documented by the
-standalone MREs.  Explicit `--jit-compile` is still available for reproducing
-that bug and for future Symbolica fixes.
+standalone MREs.  The default lattice backend is now the local
+`cbcpt-dn1-100` CBC/PT generating-vector table because it is much closer to
+pySecDec's QMC convergence on the double box.  `--qmc-lattice-backend qmcpy`
+remains available and is still useful for independent one-loop checks.
 
 ### One-loop parity
 
@@ -90,9 +92,9 @@ finite-coefficient comparisons are:
 | box | QMCPy | 1024 | 16 | 20 | 327,680 | 3.38e-6 | 4.06e-6 | 7.96e-11 | 1.44e-10 |
 
 Using the bundled CBC lattice table gives the same qualitative result for the
-triangle.  For the box it is less convenient at small requested `N` because the
-table rounds to the nearest available lattice size (`1021` or `1123` points in
-these probes), so the QMCPy backend remains the clearer FSD-side parity check.
+triangle and box.  The table rounds to the nearest available prime rule size
+(`1021`, `4261`, ...), so the raw sample count can differ from the requested
+`N/shift`.
 
 ### Double-box status
 
@@ -107,6 +109,8 @@ the nominal request.  The comparison helper now reports this as
 
 | setup | N/shift | shifts | FSD raw samples | pySecDec effective samples | FSD eps^0 diff | FSD eps^0 err | pySecDec eps^0 diff | pySecDec eps^0 err |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
+| QMCPy, small | 256 | 8 | 0.328M | 5.32M | 3.44 | 5.90 | 7.92e-1 | 4.60e-1 |
+| CBC/PT, small | 256 -> 1021 | 8 | 1.31M | 5.32M | 2.58e-1 | 6.95e-1 | 7.92e-1 | 4.60e-1 |
 | matched nominal N | 1024 | 16 | 2.62M | 86.0M | 7.88e-2 | 1.46 | 5.06e-3 | 4.12e-3 |
 | larger FSD probe | 4096, 3 iter | 16 | 31.5M | n/a | 6.09e-1 | 8.50e-1 | n/a | n/a |
 | more shifts | 256, 3 iter | 64 | 7.86M | n/a | 2.34 | 1.25 | n/a | n/a |
@@ -116,15 +120,17 @@ coefficients were statistically compatible with the target (`eps^0` pull
 `0.72 sigma`).  The error is nevertheless orders of magnitude larger than
 pySecDec's generated QMC result for the same topology.
 
-The current diagnosis is structural rather than a precision or bias problem.
-FSD's explicit sector evaluator returns one summed value per Laurent
-coefficient.  The QMC driver can only choose a support dimension per coefficient
-group, so most plus-distribution/source terms are periodized in the full sector
-dimension after they have already been summed.  pySecDec's generated
-representation keeps many endpoint/source contributions as separate generated
-integrals with their natural lower-dimensional supports.  That support-resolved
-term decomposition is the likely source of the variance advantage and is the
-next required implementation step for double-box QMC parity.
+The current diagnosis is mostly a lattice/generating-vector issue, with a
+remaining representation question.  Switching from QMCPy to the local CBC/PT
+table reduces the double-box eps^0 error by nearly an order of magnitude at
+similar requested settings and brings FSD much closer to pySecDec when errors
+are scaled by the actual generated-integral sample count.  A first
+support-resolved component experiment was deliberately left disabled by
+default: splitting below the Laurent-coefficient level separated endpoint
+constants from variable subtraction terms, which preserved the mean but
+underestimated random-shift errors at one loop.  Any future support
+decomposition must preserve coefficient-level cancellations, or reproduce
+pySecDec's generated term grouping more faithfully.
 
 ### Havana comparison
 

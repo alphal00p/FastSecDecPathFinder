@@ -672,12 +672,13 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--qmc-lattice-backend",
         choices=["qmcpy", "cbcpt-dn1-100"],
-        default=str(defaults.get("qmc_lattice_backend", "qmcpy")),
+        default=str(defaults.get("qmc_lattice_backend", "cbcpt-dn1-100")),
         help=(
             "Rank-1 lattice source for --sampling-mode qmc. QMC integration "
             "is implemented independently of pySecDec. 'qmcpy' uses QMCPy's "
             "base-two lattice; 'cbcpt-dn1-100' uses a bundled CBC/PT rank-1 "
-            "vector table with pySecDec-like prime rule sizes. Default: qmcpy."
+            "vector table with pySecDec-like prime rule sizes. Default: "
+            "cbcpt-dn1-100."
         ),
     )
     parser.add_argument(

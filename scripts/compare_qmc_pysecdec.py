@@ -597,13 +597,13 @@ def main() -> int:
         "--qmc-order",
         choices=["linear", "radical-inverse", "gray"],
         default="linear",
-        help="QMCPy lattice order used by FSD. Linear is closest to pySecDec's direct lattice loop.",
+        help="QMCPy lattice order used when --qmc-lattice-backend qmcpy is selected.",
     )
     parser.add_argument(
         "--qmc-lattice-backend",
         choices=["qmcpy", "cbcpt-dn1-100"],
-        default="qmcpy",
-        help="Independent FSD lattice backend used for the comparison.",
+        default="cbcpt-dn1-100",
+        help="Independent FSD lattice backend used for the comparison. Default: cbcpt-dn1-100.",
     )
     parser.add_argument(
         "--pysecdec-generatingvectors",

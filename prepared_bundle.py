@@ -943,6 +943,13 @@ def _explicit_formula_json(
     formula: ExplicitSectorFormulaDefinition,
 ) -> dict[str, Any]:
     """Serialize one sector-specific explicit evaluator."""
+    qmc_evaluator_ref = None
+    if formula.qmc_component_evaluator is not None:
+        qmc_evaluator_ref = writer.save_evaluator(
+            formula.qmc_component_evaluator,
+            "explicit_sector_qmc_components",
+            formula.sector_name,
+        )
     return {
         "sector_name": formula.sector_name,
         "input_names": formula.input_names,
@@ -952,10 +959,17 @@ def _explicit_formula_json(
             "explicit_sector",
             formula.sector_name,
         ),
+        "qmc_component_evaluator": qmc_evaluator_ref,
+        "qmc_component_layout": [
+            [int(coeff_index), [int(axis) for axis in axes]]
+            for coeff_index, axes in formula.qmc_component_layout
+        ],
         "expression_build_seconds": formula.expression_build_seconds,
         "evaluator_build_seconds": formula.evaluator_build_seconds,
         "expression_bytes": formula.expression_bytes,
         "evaluator_bytes": formula.evaluator_bytes,
+        "qmc_expression_bytes": formula.qmc_expression_bytes,
+        "qmc_evaluator_bytes": formula.qmc_evaluator_bytes,
         "source_kind": formula.source_kind,
     }
 
@@ -970,10 +984,21 @@ def _load_explicit_formula(
         input_names=[str(name) for name in data["input_names"]],
         laurent_orders=[int(order) for order in data["laurent_orders"]],
         evaluator=_ref(store, data["evaluator"]),
+        qmc_component_evaluator=(
+            None
+            if data.get("qmc_component_evaluator") is None
+            else _ref(store, data["qmc_component_evaluator"])
+        ),
+        qmc_component_layout=[
+            (int(item[0]), tuple(int(axis) for axis in item[1]))
+            for item in data.get("qmc_component_layout", [])
+        ],
         expression_build_seconds=float(data.get("expression_build_seconds", 0.0)),
         evaluator_build_seconds=float(data.get("evaluator_build_seconds", 0.0)),
         expression_bytes=int(data.get("expression_bytes", 0)),
         evaluator_bytes=int(data.get("evaluator_bytes", 0)),
+        qmc_expression_bytes=int(data.get("qmc_expression_bytes", 0)),
+        qmc_evaluator_bytes=int(data.get("qmc_evaluator_bytes", 0)),
         source_kind=str(data.get("source_kind", "explicit-sector-expression")),
     )
 

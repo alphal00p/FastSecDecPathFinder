@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 TARGET_PROGRESS_UNITS = 10_000
 TARGET_TIME_WARMUP_DISCOUNT = 0.85
+EXPERIMENTAL_QMC_COMPONENT_SUPPORTS = False
 
 
 @dataclass
@@ -202,6 +203,7 @@ class QmcBatch:
     shift_count: int
     coefficient_indices: tuple[int, ...]
     support_axes: tuple[int, ...]
+    component_indices: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -502,7 +504,33 @@ def _evaluate_qmc_batch(
         )
 
     active_indices = sector_active_coefficient_indices(processor.topology, sector)
-    if not active_indices:
+    component_indices = batch.component_indices
+    if component_indices is not None:
+        component_values, component_layout = processor.explicit_qmc_component_batch(
+            sector,
+            coords,
+            timing,
+        )
+        coeffs = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
+        for component_index in component_indices:
+            if component_index < 0 or component_index >= len(component_layout):
+                raise RuntimeError(
+                    f"{sector.name}: QMC component index {component_index} is outside "
+                    f"the prepared layout of length {len(component_layout)}"
+                )
+            coeff_index, _support = component_layout[int(component_index)]
+            if coeff_index < 0 or coeff_index >= coeff_count:
+                raise RuntimeError(
+                    f"{sector.name}: QMC component {component_index} maps to invalid "
+                    f"coefficient index {coeff_index}"
+                )
+            coeffs[:, int(coeff_index)] += component_values[:, int(component_index)]
+        selected = np.asarray(
+            sorted({int(component_layout[int(index)][0]) for index in component_indices}),
+            dtype=np.int64,
+        )
+        sector_timing = HotPathTiming()
+    elif not active_indices:
         sector_timing = HotPathTiming()
         sector_timing.add_precision_samples(ordinary=int(coords.shape[0]))
         coeffs = np.zeros((coords.shape[0], processor.topology.coefficient_count), dtype=np.complex128)
@@ -513,9 +541,11 @@ def _evaluate_qmc_batch(
             inactive[list(active_indices)] = False
             coeffs = np.array(coeffs, dtype=np.complex128, copy=True)
             coeffs[:, inactive] = 0.0
-    timing.absorb(sector_timing)
+    if component_indices is None:
+        timing.absorb(sector_timing)
     weighted = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
-    selected = np.asarray(batch.coefficient_indices, dtype=np.int64)
+    if component_indices is None:
+        selected = np.asarray(batch.coefficient_indices, dtype=np.int64)
     if selected.size:
         weighted[:, selected] = (
             np.asarray(coeffs, dtype=np.complex128)[:, selected]
@@ -531,6 +561,7 @@ def _evaluate_qmc_batch(
         )
     hot_elapsed = time.perf_counter() - hot_start
     timing.add_python(hot_elapsed - timing.total_seconds)
+    precision_source = timing if component_indices is not None else sector_timing
     return QmcReducedBatch(
         sector_id=int(batch.sector_id),
         coefficient_indices=tuple(int(index) for index in batch.coefficient_indices),
@@ -540,10 +571,10 @@ def _evaluate_qmc_batch(
         max_abs=np.max(np.abs(weighted), axis=0),
         precision_counts=np.asarray(
             [
-                sector_timing.ordinary_precision_samples,
-                sector_timing.stability_precision_samples,
-                sector_timing.medium_precision_samples,
-                sector_timing.high_precision_samples,
+                precision_source.ordinary_precision_samples,
+                precision_source.stability_precision_samples,
+                precision_source.medium_precision_samples,
+                precision_source.high_precision_samples,
             ],
             dtype=np.int64,
         ),
@@ -668,7 +699,57 @@ def qmc_support_groups(
     higher Laurent coefficients keep the full support because they contain
     plus-distribution/logarithmic pieces depending on endpoint coordinates.
     """
+    return [
+        (coefficients, axes)
+        for coefficients, axes, _components in qmc_component_support_groups(
+            topology,
+            sector,
+            global_support_dims,
+        )
+    ]
+
+
+def qmc_component_support_groups(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    global_support_dims: tuple[int, ...] | None = None,
+) -> list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | None]]:
+    """Return QMC groups, optionally down to explicit source components.
+
+    Fully explicit sectors can expose one evaluator output per endpoint-source
+    component.  Sampling those components in their natural support dimension is
+    closer to pySecDec's generated representation than periodizing the already
+    summed Laurent coefficient in the full sector dimension.
+    """
     full_axes = tuple(range(int(sector.integration_dim)))
+    explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
+    formula = explicit_formula_for(sector) if explicit_formula_for is not None else None
+    if EXPERIMENTAL_QMC_COMPONENT_SUPPORTS and formula is not None and formula.qmc_component_layout:
+        by_coefficient: dict[int, dict[str, Any]] = {}
+        for component_index, (coefficient_index, axes) in enumerate(formula.qmc_component_layout):
+            if int(coefficient_index) < 0 or int(coefficient_index) >= topology.coefficient_count:
+                continue
+            entry = by_coefficient.setdefault(
+                int(coefficient_index),
+                {"axes": set(), "components": []},
+            )
+            entry["axes"].update(int(axis) for axis in axes)
+            entry["components"].append(int(component_index))
+        grouped: dict[tuple[int, ...], dict[str, Any]] = {}
+        for coefficient_index, coefficient_data in by_coefficient.items():
+            key = tuple(sorted(int(axis) for axis in coefficient_data["axes"]))
+            entry = grouped.setdefault(key, {"coefficients": set(), "components": []})
+            entry["coefficients"].add(int(coefficient_index))
+            entry["components"].extend(int(index) for index in coefficient_data["components"])
+        return [
+            (
+                tuple(sorted(int(index) for index in entry["coefficients"])),
+                tuple(int(axis) for axis in axes),
+                tuple(int(index) for index in entry["components"]),
+            )
+            for axes, entry in sorted(grouped.items(), key=lambda item: (len(item[0]), item[0]))
+        ]
+
     full_dim = len(full_axes)
     endpoint_depth = sector_endpoint_pole_depth(topology, sector)
     sector_min_order = -endpoint_depth if endpoint_depth else 0
@@ -702,7 +783,7 @@ def qmc_support_groups(
                 # avoids silently guessing pySecDec's local coordinate lift.
                 axes = full_axes
         grouped.setdefault(axes, []).append(index)
-    return [(tuple(indices), axes) for axes, indices in grouped.items()]
+    return [(tuple(indices), axes, None) for axes, indices in grouped.items()]
 
 
 def qmc_global_support_dims(
@@ -806,6 +887,7 @@ def qmc_batches_for_sector(
     raw_points: np.ndarray | None = None,
     support_axes: tuple[int, ...] | None = None,
     coefficient_indices: tuple[int, ...] | None = None,
+    component_indices: tuple[int, ...] | None = None,
 ) -> list[QmcBatch]:
     """Generate Korobov-transformed shifted-lattice chunks for one sector."""
     n_points = int(request.samples_per_iter)
@@ -815,9 +897,9 @@ def qmc_batches_for_sector(
     if not coeffs:
         raise ValueError(f"{sector.name}: empty QMC coefficient group")
     support_dim = len(axes)
-    if support_dim <= 0:
-        raise ValueError(f"{sector.name}: zero-dimensional QMC support is not implemented")
-    if raw_points is None:
+    if raw_points is None and support_dim <= 0:
+        raw_points = np.empty((shift_count, 1, 0), dtype=float)
+    elif raw_points is None:
         seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
         raw_points = shifted_lattice_points(
             backend=str(request.qmc_lattice_backend),
@@ -839,13 +921,18 @@ def qmc_batches_for_sector(
     step = actual_n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
     step = max(step, 1)
     flat_points = raw_points.reshape(shift_count * actual_n_points, support_dim)
-    support_coords, weights = korobov_transform(flat_points, int(request.qmc_korobov_alpha))
+    if support_dim <= 0:
+        support_coords = flat_points
+        weights = np.ones(shift_count * actual_n_points, dtype=float)
+    else:
+        support_coords, weights = korobov_transform(flat_points, int(request.qmc_korobov_alpha))
     coords = np.full(
         (shift_count * actual_n_points, int(sector.integration_dim)),
         0.5,
         dtype=float,
     )
-    coords[:, list(axes)] = support_coords
+    if axes:
+        coords[:, list(axes)] = support_coords
     shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), actual_n_points)
     return [
         QmcBatch(
@@ -857,6 +944,11 @@ def qmc_batches_for_sector(
             shift_count=shift_count,
             coefficient_indices=coeffs,
             support_axes=axes,
+            component_indices=(
+                None
+                if component_indices is None
+                else tuple(int(index) for index in component_indices)
+            ),
         )
         for start in range(0, shift_count * actual_n_points, step)
     ]
@@ -1465,7 +1557,7 @@ def autotune_request_for_target_time(
     if request.sampling_mode == "qmc":
         global_support_dims = qmc_global_support_dims(topology, active_sectors)
         qmc_group_count = sum(
-            len(qmc_support_groups(topology, sector, global_support_dims))
+            len(qmc_component_support_groups(topology, sector, global_support_dims))
             for sector in active_sectors
         )
         records_per_iteration_unit = max(int(request.qmc_shifts) * max(int(qmc_group_count), 1), 1)
@@ -1747,7 +1839,7 @@ def integrate_qmc(
     correlated_qmc = bool(request.qmc_correlate_sectors)
     global_support_dims = qmc_global_support_dims(topology, active_sectors)
     qmc_group_count = sum(
-        len(qmc_support_groups(topology, sector, global_support_dims))
+        len(qmc_component_support_groups(topology, sector, global_support_dims))
         for sector in active_sectors
     )
     aggregate_shift_stats = [
@@ -1906,7 +1998,7 @@ def integrate_qmc(
                 dtype=np.complex128,
             )
             for sector_position, (sector_id, sector) in enumerate(zip(active_sector_ids, active_sectors)):
-                for coefficient_indices, support_axes in qmc_support_groups(
+                for coefficient_indices, support_axes, component_indices in qmc_component_support_groups(
                     topology,
                     sector,
                     global_support_dims,
@@ -1918,7 +2010,7 @@ def integrate_qmc(
                     sector_counts = np.zeros(int(request.qmc_shifts), dtype=np.int64)
                     shared_raw_points: np.ndarray | None = None
                     if correlated_qmc:
-                        group_key = (tuple(int(index) for index in coefficient_indices), len(support_axes))
+                        group_key = (tuple(int(axis) for axis in support_axes), len(support_axes))
                         shared_raw_points = shared_raw_points_by_group.get(group_key)
                         if shared_raw_points is None:
                             shared_seed = (
@@ -1926,14 +2018,20 @@ def integrate_qmc(
                                 + 97_003 * int(iteration)
                                 + 53_021 * len(shared_raw_points_by_group)
                             )
-                            shared_raw_points = shifted_lattice_points(
-                                backend=str(request.qmc_lattice_backend),
-                                dimension=int(len(support_axes)),
-                                n_points=int(request.samples_per_iter),
-                                shift_count=int(request.qmc_shifts),
-                                seed=shared_seed,
-                                order=str(request.qmc_order),
-                            )
+                            if len(support_axes) <= 0:
+                                shared_raw_points = np.empty(
+                                    (int(request.qmc_shifts), 1, 0),
+                                    dtype=float,
+                                )
+                            else:
+                                shared_raw_points = shifted_lattice_points(
+                                    backend=str(request.qmc_lattice_backend),
+                                    dimension=int(len(support_axes)),
+                                    n_points=int(request.samples_per_iter),
+                                    shift_count=int(request.qmc_shifts),
+                                    seed=shared_seed,
+                                    order=str(request.qmc_order),
+                                )
                             shared_raw_points_by_group[group_key] = shared_raw_points
                     batches = qmc_batches_for_sector(
                         request,
@@ -1944,6 +2042,7 @@ def integrate_qmc(
                         raw_points=shared_raw_points,
                         support_axes=support_axes,
                         coefficient_indices=coefficient_indices,
+                        component_indices=component_indices,
                     )
                     if executor is None:
                         assert processor is not None

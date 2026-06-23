@@ -147,7 +147,7 @@ class IntegralRequest:
     benchmark_samples_per_sector: int = 5
     qmc_shifts: int = 16
     qmc_korobov_alpha: int = 3
-    qmc_lattice_backend: str = "qmcpy"
+    qmc_lattice_backend: str = "cbcpt-dn1-100"
     qmc_order: str = "linear"
     qmc_correlate_sectors: bool = True
     target_integration_time: float | None = None

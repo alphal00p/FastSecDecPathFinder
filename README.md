@@ -282,14 +282,17 @@ records per-sector sample counts, timing, precision-rescue fractions, and
 maximum observed weights in `result.json`.  It is intended as a diagnostic
 mode; the default adaptive mode remains the production integration path.
 
-QMC integration is also available through QMCPy's randomized shifted rank-1
-lattices with the Korobov periodizing transform used in the pySecDec/QMC
-literature.  This path is independent of pySecDec's QMC internals; pySecDec is
-only used for DOT sector finding or as an external generated-integrator
-baseline.  In this mode `--samples-per-iter` is the number of lattice points
-per sector and per random shift, while `--qmc-shifts` is the number of
-independent shifts used for the one-sigma error estimate.  The lattice point
-count must be a power of two for the current QMCPy backend:
+QMC integration is also available through randomized shifted rank-1 lattices
+with the Korobov periodizing transform used in the pySecDec/QMC literature.
+This path is independent of pySecDec's QMC internals; pySecDec is only used for
+DOT sector finding or as an external generated-integrator baseline.  The
+default `--qmc-lattice-backend cbcpt-dn1-100` uses a small bundled CBC/PT
+generating-vector table implemented directly in NumPy.  The alternative
+`--qmc-lattice-backend qmcpy` uses QMCPy's base-two lattices and requires
+`--samples-per-iter` to be a power of two.  In this mode `--samples-per-iter`
+is the requested number of lattice points per support group and per random
+shift, while `--qmc-shifts` is the number of independent shifts used for the
+one-sigma error estimate:
 
 ```sh
 .venv/bin/python FSD.py \

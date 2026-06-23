@@ -405,6 +405,7 @@ class TopologyDefinition:
     skip_evaluator_build: bool = False
     strict_prepared_bundle: bool = False
     chain_rule_metadata_only: bool = False
+    enable_qmc_component_outputs: bool = False
     parametric_representation: ParametricRepresentation | None = None
     streaming_evaluator_cache_dir: str | None = None
     _u_evaluator: Any = field(init=False, repr=False)
@@ -5792,10 +5793,14 @@ class ExplicitSectorFormulaDefinition:
     input_names: list[str]
     laurent_orders: list[int]
     evaluator: Any
+    qmc_component_evaluator: Any | None = None
+    qmc_component_layout: list[tuple[int, tuple[int, ...]]] = field(default_factory=list)
     expression_build_seconds: float = 0.0
     evaluator_build_seconds: float = 0.0
     expression_bytes: int = 0
     evaluator_bytes: int = 0
+    qmc_expression_bytes: int = 0
+    qmc_evaluator_bytes: int = 0
     source_kind: str = "explicit-sector-expression"
 
     def evaluate_complex_batch(
@@ -5807,6 +5812,26 @@ class ExplicitSectorFormulaDefinition:
         sample_rows = np.asarray(rows, dtype=np.complex128)
         start = time.perf_counter()
         values = np.asarray(self.evaluator.evaluate_complex(sample_rows), dtype=np.complex128)
+        if values.ndim == 1:
+            values = values.reshape(sample_rows.shape[0], 1)
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return values
+
+    def evaluate_qmc_component_batch(
+        self,
+        rows: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate support-resolved QMC components for a double batch."""
+        if self.qmc_component_evaluator is None or not self.qmc_component_layout:
+            return self.evaluate_complex_batch(rows, timing)
+        sample_rows = np.asarray(rows, dtype=np.complex128)
+        start = time.perf_counter()
+        values = np.asarray(
+            self.qmc_component_evaluator.evaluate_complex(sample_rows),
+            dtype=np.complex128,
+        )
         if values.ndim == 1:
             values = values.reshape(sample_rows.shape[0], 1)
         if timing is not None:
@@ -5853,10 +5878,21 @@ def _build_explicit_sector_formula_process_worker(index: int) -> dict[str, Any]:
         "input_names": list(formula.input_names),
         "laurent_orders": list(formula.laurent_orders),
         "evaluator_bytes_raw": serialize_evaluator(formula.evaluator),
+        "qmc_component_evaluator_bytes_raw": (
+            None
+            if formula.qmc_component_evaluator is None
+            else serialize_evaluator(formula.qmc_component_evaluator)
+        ),
+        "qmc_component_layout": [
+            [int(coeff_index), [int(axis) for axis in axes]]
+            for coeff_index, axes in formula.qmc_component_layout
+        ],
         "expression_build_seconds": float(formula.expression_build_seconds),
         "evaluator_build_seconds": float(formula.evaluator_build_seconds),
         "expression_bytes": int(formula.expression_bytes),
         "evaluator_bytes": int(formula.evaluator_bytes),
+        "qmc_expression_bytes": int(formula.qmc_expression_bytes),
+        "qmc_evaluator_bytes": int(formula.qmc_evaluator_bytes),
         "source_kind": str(formula.source_kind),
     }
 
@@ -5864,15 +5900,24 @@ def _build_explicit_sector_formula_process_worker(index: int) -> dict[str, Any]:
 def _explicit_formula_from_worker_payload(payload: dict[str, Any]) -> ExplicitSectorFormulaDefinition:
     """Rebuild an explicit sector formula returned by a forked worker."""
     raw = bytes(payload["evaluator_bytes_raw"])
+    qmc_raw = payload.get("qmc_component_evaluator_bytes_raw")
+    qmc_evaluator = None if qmc_raw is None else deserialize_evaluator(bytes(qmc_raw))
     return ExplicitSectorFormulaDefinition(
         sector_name=str(payload["sector_name"]),
         input_names=[str(item) for item in payload["input_names"]],
         laurent_orders=[int(item) for item in payload["laurent_orders"]],
         evaluator=deserialize_evaluator(raw),
+        qmc_component_evaluator=qmc_evaluator,
+        qmc_component_layout=[
+            (int(item[0]), tuple(int(axis) for axis in item[1]))
+            for item in payload.get("qmc_component_layout", [])
+        ],
         expression_build_seconds=float(payload["expression_build_seconds"]),
         evaluator_build_seconds=float(payload["evaluator_build_seconds"]),
         expression_bytes=int(payload["expression_bytes"]),
         evaluator_bytes=int(payload["evaluator_bytes"]),
+        qmc_expression_bytes=int(payload.get("qmc_expression_bytes", 0)),
+        qmc_evaluator_bytes=int(payload.get("qmc_evaluator_bytes", 0)),
         source_kind=str(payload["source_kind"]),
     )
 
@@ -6338,6 +6383,38 @@ def _endpoint_coordinate_exprs(
     return out
 
 
+def _support_axes_for_endpoint_key(
+    sector: SectorDefinition,
+    boundary: tuple[int, ...],
+    zero: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return runtime coordinates left free by one endpoint projector key."""
+    singular_position = {
+        axis: position for position, axis in enumerate(sector.singular_axes)
+    }
+    fixed_positions = {int(value) for value in boundary} | {
+        int(value) for value in zero
+    }
+    return tuple(
+        int(axis)
+        for axis in range(int(sector.integration_dim))
+        if singular_position.get(axis) not in fixed_positions
+    )
+
+
+def _support_axes_for_expression(
+    expr: Any,
+    y_symbols: list[Any],
+) -> tuple[int, ...]:
+    """Return sector coordinates that an expression actually depends on."""
+    expression = _as_expression(expr)
+    axes: list[int] = []
+    for axis, symbol in enumerate(y_symbols):
+        if str(expression.derivative(symbol)) != "0":
+            axes.append(int(axis))
+    return tuple(axes)
+
+
 def _expr_derivative_coefficient(
     expr: Any,
     symbols: list[Any],
@@ -6760,6 +6837,8 @@ def _two_stage_derivative_fused_components(
     list[str],
     list[tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...]]],
     list[Any],
+    list[Any],
+    list[tuple[int, tuple[int, ...]]],
 ]:
     """Build derivative-fused assembler outputs and source derivative slots.
 
@@ -6993,6 +7072,7 @@ def _two_stage_derivative_fused_components(
         )
 
     coefficient_replacements: list[tuple[str, Any]] = []
+    coefficient_value_exprs: list[Any] = []
     for index, key in enumerate(coefficient_keys):
         boundary, zero, multi_index, regular_order = key
         group = g_expr_cache.get((tuple(boundary), tuple(zero)))
@@ -7001,12 +7081,38 @@ def _two_stage_derivative_fused_components(
             if group is None
             else group[int(regular_order)].get(tuple(multi_index), E("0"))
         )
+        coefficient_value_exprs.append(expr)
         coefficient_replacements.append((f"c{index}", expr))
 
     assembler_outputs = [
         _replace_many(_as_expression(expr), coefficient_replacements)
         for expr in coefficient_assembler_outputs
     ]
+    qmc_component_outputs: list[Any] = []
+    qmc_component_layout: list[tuple[int, tuple[int, ...]]] = []
+    # The endpoint projector is linear in the regular Taylor coefficients.
+    # Different coefficient keys carry different endpoint supports.  Keeping
+    # them as separate QMC outputs lets the sampler periodize each lower-
+    # support source term in its natural dimension, matching pySecDec's
+    # generated sector/order structure more closely than a single summed
+    # Laurent coefficient can.
+    coefficient_symbols = [S(f"c{index}") for index in range(len(coefficient_keys))]
+    for output_index, output_expr in enumerate(coefficient_assembler_outputs):
+        expression = _as_expression(output_expr)
+        for coeff_index, symbol in enumerate(coefficient_symbols):
+            factor = expression.derivative(symbol)
+            if str(factor) == "0":
+                continue
+            component = factor * coefficient_value_exprs[coeff_index]
+            if str(component) == "0":
+                continue
+            qmc_component_outputs.append(component)
+            qmc_component_layout.append(
+                (
+                    int(output_index),
+                    _support_axes_for_expression(component, y_symbols),
+                )
+            )
     assembler_input_names = [
         *[f"y{axis}" for axis in range(sector.integration_dim)],
         *[f"d{index}" for index in range(len(derivative_slots))],
@@ -7044,7 +7150,14 @@ def _two_stage_derivative_fused_components(
         if params_replacements:
             expr = _replace_many(expr, params_replacements)
         source_outputs.append(expr)
-    return assembler_outputs, assembler_input_names, derivative_slots, source_outputs
+    return (
+        assembler_outputs,
+        assembler_input_names,
+        derivative_slots,
+        source_outputs,
+        qmc_component_outputs,
+        qmc_component_layout,
+    )
 
 
 def _two_stage_sector_cache_dir() -> Path:
@@ -7241,6 +7354,8 @@ def build_two_stage_sector_formula(
         assembler_input_names,
         derivative_slots,
         source_outputs,
+        _qmc_component_outputs,
+        _qmc_component_layout,
     ) = _two_stage_derivative_fused_components(
         topology,
         sector,
@@ -7406,6 +7521,7 @@ def build_explicit_sector_formula(
 ) -> ExplicitSectorFormulaDefinition:
     """Build a single multi-output explicit sector evaluator."""
     expr_start = time.perf_counter()
+    build_qmc_components = bool(getattr(topology, "enable_qmc_component_outputs", False))
     if progress is not None:
         progress.update(
             max(int(progress_index) - 1, 0),
@@ -7417,7 +7533,14 @@ def build_explicit_sector_formula(
             topology,
             sector,
         )
-        assembler_outputs, _assembler_input_names, derivative_slots, source_outputs = (
+        (
+            assembler_outputs,
+            _assembler_input_names,
+            derivative_slots,
+            source_outputs,
+            qmc_component_outputs,
+            qmc_component_layout,
+        ) = (
             _two_stage_derivative_fused_components(
                 topology,
                 sector,
@@ -7436,9 +7559,26 @@ def build_explicit_sector_formula(
             _replace_many(expr, replacements)
             for expr in assembler_outputs
         ]
+        qmc_outputs = [
+            _replace_many(expr, replacements)
+            for expr in qmc_component_outputs
+        ] if build_qmc_components else []
+        if not build_qmc_components:
+            qmc_component_layout = []
+        qmc_outputs_are_laurent_outputs = False
         source_kind = "fused-source-assembler-explicit"
     else:
         outputs = _explicit_finite_sector_outputs(topology, sector)
+        qmc_outputs = list(outputs) if build_qmc_components else []
+        qmc_component_layout = (
+            [
+                (index, tuple(range(int(sector.integration_dim))))
+                for index in range(len(outputs))
+            ]
+            if build_qmc_components
+            else []
+        )
+        qmc_outputs_are_laurent_outputs = True
         source_kind = "direct-explicit-finite"
     expr_seconds = time.perf_counter() - expr_start
 
@@ -7456,19 +7596,41 @@ def build_explicit_sector_formula(
         real_evaluator=topology.real_evaluator,
         name_hint=f"{sector.name}_explicit",
     )
+    qmc_evaluator = None
+    qmc_evaluator_bytes = 0
+    if qmc_outputs and qmc_outputs_are_laurent_outputs:
+        qmc_evaluator = evaluator
+    elif qmc_outputs:
+        qmc_evaluator = build_evaluator_multiple(
+            qmc_outputs,
+            [S(f"y{axis}") for axis in range(sector.integration_dim)],
+            evaluator_compile_mode=topology.evaluator_compile_mode,
+            real_evaluator=topology.real_evaluator,
+            name_hint=f"{sector.name}_explicit_qmc_components",
+        )
     eval_seconds = time.perf_counter() - eval_start
     evaluator_bytes = serialize_evaluator(evaluator)
+    if qmc_evaluator is evaluator:
+        qmc_evaluator_bytes = len(evaluator_bytes)
+    elif qmc_evaluator is not None:
+        qmc_evaluator_bytes = len(serialize_evaluator(qmc_evaluator))
     return ExplicitSectorFormulaDefinition(
         sector_name=sector.name,
         input_names=[f"y{axis}" for axis in range(sector.integration_dim)],
         laurent_orders=list(topology.laurent_orders),
         evaluator=evaluator,
+        qmc_component_evaluator=qmc_evaluator,
+        qmc_component_layout=qmc_component_layout,
         expression_build_seconds=float(expr_seconds),
         evaluator_build_seconds=float(eval_seconds),
         expression_bytes=int(
             sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in outputs)
         ),
         evaluator_bytes=len(evaluator_bytes),
+        qmc_expression_bytes=int(
+            sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in qmc_outputs)
+        ),
+        qmc_evaluator_bytes=qmc_evaluator_bytes,
         source_kind=source_kind,
     )
 
@@ -9712,6 +9874,47 @@ class SectorProcessor:
                     sector.name,
                 )
         return coeffs, complex_abs_for_training_array(coeffs[:, self.topology.training_index])
+
+    def explicit_qmc_component_batch(
+        self,
+        sector: SectorDefinition,
+        y_values: np.ndarray,
+        timing: HotPathTiming,
+    ) -> tuple[np.ndarray, list[tuple[int, tuple[int, ...]]]]:
+        """Evaluate support-resolved explicit components for QMC sampling."""
+        formula = self.topology.explicit_sector_formula_for(sector)
+        if formula is None or not formula.qmc_component_layout:
+            coeffs, _training, sector_timing = self.evaluate_batch(sector, y_values)
+            timing.absorb(sector_timing)
+            layout = [
+                (index, tuple(range(int(sector.integration_dim))))
+                for index in range(self.topology.coefficient_count)
+            ]
+            return coeffs, layout
+        rows = np.asarray(y_values, dtype=float)
+        precision_digits = timing.precision_digits
+        if precision_digits is None:
+            values = formula.evaluate_qmc_component_batch(rows, timing)
+            timing.add_precision_samples(ordinary=int(rows.shape[0]))
+        else:
+            # The support-resolved QMC path is a double-precision variance
+            # optimization.  If a point is routed through the high-precision
+            # rescue machinery, fall back to the summed evaluator so the
+            # stability path remains correct.  The QMC driver currently only
+            # calls this method on ordinary f64 batches.
+            coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
+            for row_index, row in enumerate(rows):
+                coeffs[row_index, :] = self._select_active_laurent_list(
+                    formula.evaluate_complex_prec(row, int(precision_digits), timing),
+                    formula.laurent_orders,
+                    sector.name,
+                )
+            layout = [
+                (index, tuple(range(int(sector.integration_dim))))
+                for index in range(self.topology.coefficient_count)
+            ]
+            return coeffs, layout
+        return np.asarray(values, dtype=np.complex128), list(formula.qmc_component_layout)
 
     def _convolve_regular_prefactor_array(
         self,

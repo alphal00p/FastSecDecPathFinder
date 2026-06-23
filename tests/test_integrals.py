@@ -484,6 +484,37 @@ def test_explicit_sector_backend_matches_projector_triangle() -> None:
     assert max_diff < 1.0e-12
 
 
+def test_explicit_qmc_components_reconstruct_triangle_coefficients() -> None:
+    """Support-resolved QMC components must sum back to explicit coefficients."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        sector_evaluator_backend="explicit",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    topology.enable_qmc_component_outputs = True
+    topology.prepare_endpoint_projector_formulas(sectors)
+    topology.prepare_explicit_sector_formulas(sectors)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+
+    for sector in sectors:
+        point = np.array([[0.37, 0.43]], dtype=float)
+        coeffs, _training, _timing = processor.evaluate_batch(sector, point)
+        component_values, component_layout = processor.explicit_qmc_component_batch(
+            sector,
+            point,
+            HotPathTiming(),
+        )
+        reconstructed = np.zeros_like(coeffs)
+        for component_index, (coefficient_index, _axes) in enumerate(component_layout):
+            reconstructed[:, int(coefficient_index)] += component_values[:, component_index]
+        assert np.max(np.abs(reconstructed - coeffs)) < 1.0e-12
+
+
 def test_explicit_sector_backend_matches_projector_box_with_numerator() -> None:
     """Explicit singular sectors include numerator epsilon-polynomial Taylor data."""
     request = make_request(
@@ -820,6 +851,28 @@ def test_explicit_backend_cli_shortcut() -> None:
 
     assert default_request.sector_evaluator_backend == "explicit"
     assert request.sector_evaluator_backend == "explicit"
+
+
+def test_qmc_cli_default_uses_cbcpt_lattice() -> None:
+    """The QMC auto-default should use the pySecDec-like local CBC/PT table."""
+    request = build_request(
+        parse_args(
+            [
+                "--sampling-mode",
+                "qmc",
+                "--samples-per-iter",
+                "123",
+                "--s",
+                "1.0",
+                "--m",
+                "1.0",
+                "--no-progress",
+            ]
+        )
+    )
+
+    assert request.qmc_lattice_backend == "cbcpt-dn1-100"
+    validate_request(request)
 
 
 def test_projector_generation_cli_shortcut() -> None:
