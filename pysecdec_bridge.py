@@ -52,6 +52,15 @@ class PySecDecRunResult:
     timings: GenerationTimings
 
 
+@dataclass(frozen=True)
+class PySecDecPackagePaths:
+    """Filesystem locations for a generated pySecDec package."""
+
+    package_dir: Path
+    integral_dir: Path
+    shared_library: Path
+
+
 def require_pysecdec() -> dict[str, Any]:
     """Import pySecDec pieces and raise a setup-oriented error if unavailable."""
     try:
@@ -91,6 +100,75 @@ def require_pysecdec() -> dict[str, Any]:
         "LoopIntegralFromPropagators": LoopIntegralFromPropagators,
         "loop_package": loop_package,
     }
+
+
+def pysecdec_package_paths(bundle: DotBuildBundle, request: IntegralRequest) -> PySecDecPackagePaths:
+    """Return canonical package paths for a DOT pySecDec generated package."""
+    workdir = Path(request.pysecdec_workdir).expanduser().resolve()
+    name = f"fsd_psd_{bundle.parsed_graph.graph_name}"
+    package_dir = workdir / name
+    integral_dir = package_dir / f"{name}_integral"
+    return PySecDecPackagePaths(
+        package_dir=package_dir,
+        integral_dir=integral_dir,
+        shared_library=package_dir / f"{name}_pylink.so",
+    )
+
+
+def ensure_pysecdec_package(
+    bundle: DotBuildBundle,
+    request: IntegralRequest,
+    *,
+    progress: GenerationProgress | None = None,
+) -> tuple[PySecDecPackagePaths, GenerationTimings]:
+    """Ensure pySecDec generated C++ package artifacts exist on disk."""
+    modules = require_pysecdec()
+    timings = GenerationTimings()
+    paths = pysecdec_package_paths(bundle, request)
+    if paths.package_dir.exists() and not request.keep_pysecdec_workdir:
+        shutil.rmtree(paths.package_dir)
+    paths.package_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = paths.integral_dir / "disteval" / f"{paths.integral_dir.name}.json"
+    static_library = paths.integral_dir / f"lib{paths.integral_dir.name}.a"
+    if (
+        request.keep_pysecdec_workdir
+        and paths.package_dir.exists()
+        and paths.shared_library.is_file()
+        and metadata.is_file()
+        and static_library.is_file()
+    ):
+        timings.add(
+            "pySecDec package generation",
+            0.0,
+            detail="reused existing generated package",
+        )
+        timings.add(
+            "pySecDec package compile",
+            0.0,
+            detail="reused existing compiled package",
+        )
+        return paths, timings
+
+    cwd = Path.cwd()
+    try:
+        os.chdir(paths.package_dir.parent)
+        with timings.measure("pySecDec package generation", progress=progress):
+            modules["loop_package"](
+                paths.package_dir.name,
+                bundle.loop_integral,
+                requested_orders=[bundle.topology.laurent_max_order],
+                real_parameters=bundle.kinematics.parameter_names,
+                contour_deformation=False,
+                decomposition_method=request.sector_method,
+                normaliz_executable=request.normaliz_executable,
+                enforce_complex=True,
+            )
+        with timings.measure("pySecDec package compile", "make pylink", progress=progress):
+            subprocess.run(["make", "-C", str(paths.package_dir), "pylink", "-j"], check=True)
+    finally:
+        os.chdir(cwd)
+    return paths, timings
 
 
 def _symbolica_text(text: Any) -> str:
@@ -823,7 +901,20 @@ def build_dot_bundle(
         f"{len(sectors)} sectors",
         progress=progress,
     ):
-        prepare_sector_evaluators(sectors, progress=progress, include_dual=False)
+        if request.sector_evaluator_backend == "explicit":
+            # The fully explicit backend substitutes the sector map and regular
+            # Jacobian into one sector-level evaluator during the later
+            # explicit-sector build.  Compiling separate map/Jacobian support
+            # evaluators is therefore pure generation overhead, and it is
+            # especially expensive in ``--compile`` mode because it launches a
+            # compiler invocation for every tiny map/Jacobian callback.
+            timings.add(
+                "Symbolica sector evaluator build skipped",
+                0.0,
+                detail="explicit backend uses sector-level evaluators directly",
+            )
+        else:
+            prepare_sector_evaluators(sectors, progress=progress, include_dual=False)
     if request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}:
         with timings.measure(
             "Symbolica Taylor evaluator build",
@@ -857,32 +948,11 @@ def run_pysecdec_package(
 ) -> PySecDecRunResult:
     """Generate, compile, and run pySecDec's own integrator for comparison."""
     modules = require_pysecdec()
-    timings = GenerationTimings()
-    workdir = Path(request.pysecdec_workdir).expanduser().resolve()
-    name = f"fsd_psd_{bundle.parsed_graph.graph_name}"
-    package_dir = workdir / name
-    if package_dir.exists() and not request.keep_pysecdec_workdir:
-        shutil.rmtree(package_dir)
-    workdir.mkdir(parents=True, exist_ok=True)
+    paths, timings = ensure_pysecdec_package(bundle, request, progress=progress)
     cwd = Path.cwd()
     try:
-        os.chdir(workdir)
-        with timings.measure("pySecDec package generation", progress=progress):
-            modules["loop_package"](
-                name,
-                bundle.loop_integral,
-                requested_orders=[bundle.topology.laurent_max_order],
-                real_parameters=bundle.kinematics.parameter_names,
-                contour_deformation=False,
-                decomposition_method=request.sector_method,
-                normaliz_executable=request.normaliz_executable,
-                enforce_complex=True,
-            )
-        with timings.measure("pySecDec package compile", "make pylink", progress=progress):
-            subprocess.run(["make", "-C", str(package_dir), "pylink", "-j"], check=True)
-        shared = package_dir / f"{name}_pylink.so"
         with timings.measure("pySecDec package load", progress=progress):
-            integral = modules["IntegralLibrary"](str(shared))
+            integral = modules["IntegralLibrary"](str(paths.shared_library))
         with timings.measure("pySecDec integration", progress=progress):
             series = integral(
                 real_parameters=bundle.kinematics.parameter_values,

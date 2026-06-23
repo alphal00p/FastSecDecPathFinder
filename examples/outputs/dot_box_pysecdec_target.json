@@ -1,0 +1,3048 @@
+{
+  "schema_version": 1,
+  "integral": "dot",
+  "mode": "massless",
+  "gamma_scheme": "oneloop",
+  "prefactor_convention": "pysecdec",
+  "to_feynman": 1.0,
+  "samples": 5000,
+  "elapsed_seconds": 43.853092166013084,
+  "avg_eval_us_per_sample_per_worker": 1.8200838472694159,
+  "eval_seconds": 0.00910041923634708,
+  "python_seconds": 0.04517266363836825,
+  "havana_seconds": 0.005220791092142463,
+  "dual_evaluator_build_seconds": 0.0025249560130760074,
+  "chain_rule_formula_build_seconds": 0.0,
+  "chain_rule_formula_count": 5,
+  "chain_rule_formulas_skipped": 0,
+  "python_overhead_fraction": 0.7592826055256134,
+  "precision_stats": {
+    "total_samples": 5000,
+    "ordinary": {
+      "samples": 4994,
+      "fraction": 0.9988
+    },
+    "stability": {
+      "samples": 6,
+      "fraction": 0.0012,
+      "threshold": 0.001,
+      "precision_digits": 32
+    },
+    "medium_precision": {
+      "samples": 0,
+      "fraction": 0.0,
+      "threshold": 1e-06,
+      "precision_digits": 100
+    },
+    "high_precision": {
+      "samples": 0,
+      "fraction": 0.0,
+      "threshold": 1e-08,
+      "precision_digits": 1000
+    }
+  },
+  "interrupted": true,
+  "benchmark_available": true,
+  "summary": {
+    "header": {
+      "integral": "dot",
+      "mode": "massless",
+      "family": "DOT[box]",
+      "s": null,
+      "s12": null,
+      "s23": null,
+      "m": 0.0,
+      "gamma_scheme": "oneloop",
+      "prefactor_convention": "pysecdec",
+      "benchmark": "pysecdec",
+      "seed": 1,
+      "max_iter": 3,
+      "samples_per_iter": 50000,
+      "batch_size": 5000,
+      "sampling_mode": "havana",
+      "qmc_shifts": "n/a",
+      "qmc_korobov_alpha": "n/a",
+      "target_rel_accuracy_percent": null,
+      "bins": 64,
+      "workers": 1,
+      "jit_compile_evaluators": true,
+      "evaluator_compile_mode": "jit",
+      "real_evaluator": true,
+      "dual_evaluator_mode": "symbolic-derivatives",
+      "subtraction_backend": "projector-formula",
+      "sector_evaluator_backend": "projector",
+      "IBP_reduce_to_log_endpoint": false,
+      "ibp_power_goal": null,
+      "direct_projector_cache_term_threshold": 54,
+      "direct_projector_cache_override_sectors": 0,
+      "direct_projector_cache_override_signatures": 0,
+      "force_regular_taylor_formulas": false,
+      "regular_taylor_signature_limit": 256,
+      "regular_taylor_formula_volume_limit": 8192,
+      "regular_taylor_formula_axis_limit": 6,
+      "chain_rule_formula_signature_limit": 256,
+      "chain_rule_formula_output_length_limit": 0,
+      "allow_fallback_for_missing_caches": false,
+      "runtime_ready": "all endpoint subtraction and coefficient evaluators pregenerated",
+      "sectors": "all",
+      "stability_threshold": 0.001,
+      "medium_precision_stability_threshold": 1e-06,
+      "high_precision_stability_threshold": 1e-08,
+      "stability_precision": 32,
+      "medium_precision_stability_precision": 100,
+      "high_precision_stability_precision": 1000,
+      "dot_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/box.dot"
+    },
+    "symanzik": {
+      "U": "x1+x2+x0+x3",
+      "F": "x1\u00b7x3+x2\u00b7x0",
+      "parameter_order": [
+        "x0",
+        "x1",
+        "x2",
+        "x3",
+        "s12",
+        "s23",
+        "mt"
+      ],
+      "parameter_values": [
+        -1.0,
+        -1.0,
+        0.0
+      ],
+      "dual_shape_summary": {
+        "sector_count_with_shape": 12,
+        "unique_shape_count": 2,
+        "max_entries": 4,
+        "max_rank": 2,
+        "max_total_degree": 2,
+        "preview": [
+          {
+            "rank": 2,
+            "entries": 4,
+            "max_orders": [
+              1,
+              1
+            ],
+            "max_total_degree": 2,
+            "sector_count": 8
+          },
+          {
+            "rank": 1,
+            "entries": 2,
+            "max_orders": [
+              1
+            ],
+            "max_total_degree": 1,
+            "sector_count": 4
+          }
+        ],
+        "preview_limit": 20
+      },
+      "dual_evaluator_mode": "symbolic-derivatives",
+      "formula_cache_dir": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/cache/subtraction_formulae",
+      "dual_evaluator_build_seconds": 0.0025249560130760074,
+      "chain_rule_formula_build_seconds": 0.0,
+      "chain_rule_formula_count": 5,
+      "chain_rule_formulas_from_cache": 5,
+      "chain_rule_formulas_generated": 0,
+      "chain_rule_formula_cache_seconds": 0.006069582072086632,
+      "chain_rule_formula_generation_seconds": 0.0,
+      "chain_rule_formulas_skipped": 0,
+      "chain_rule_formula_output_length_limit": 0,
+      "subtraction_formula_count": 0,
+      "endpoint_projector_formula_count": 2,
+      "endpoint_projector_formulas_from_cache": 2,
+      "endpoint_projector_formulas_generated": 0,
+      "endpoint_projector_formula_cache_seconds": 0.0029944999841973186,
+      "endpoint_projector_formula_generation_seconds": 0.0,
+      "direct_projector_cache_term_threshold": 54,
+      "direct_projector_cache_override_sectors": 0,
+      "direct_projector_cache_override_signatures": 0,
+      "regular_taylor_formula_count": 2,
+      "regular_taylor_formulas_from_cache": 2,
+      "regular_taylor_formulas_generated": 0,
+      "regular_taylor_formula_cache_seconds": 0.0013151669409126043,
+      "regular_taylor_formula_generation_seconds": 0.0,
+      "regular_taylor_formulas_from_curated_cache": 0,
+      "regular_taylor_formulas_skipped": 0,
+      "regular_taylor_formula_policy": "curated endpoint projectors and regular Taylor formulas default-on; uncached high-axis formulas guarded",
+      "two_stage_sector_formula_count": 0,
+      "two_stage_sector_formula_build_seconds": 0.0,
+      "explicit_sector_formula_count": 0,
+      "explicit_sector_formula_build_seconds": 0.0,
+      "subtraction_formula_build_seconds": 0.004309666925109923,
+      "parametric": {
+        "loops": 1,
+        "propagator_powers": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "D": "4-2\u00b7\u03b5",
+        "Gamma argument": "0",
+        "U exponent": "2\u00b7\u03b5",
+        "F exponent": "-2-\u03b5",
+        "parameter weights": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "prefactor": "pySecDec Gamma/global factor: gamma(eps + 2)",
+        "prefactor min order": 0,
+        "prefactor coefficients": [
+          {
+            "re": 1.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.42278433509846713,
+            "im": 0.0
+          },
+          {
+            "re": 0.41068158239349095,
+            "im": 0.0
+          }
+        ],
+        "convention": "FSD coefficients are before convolution with the pySecDec global prefactor"
+      }
+    },
+    "sectors": [
+      {
+        "id": 0,
+        "name": "PSD0",
+        "variables": [
+          "x1",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=1",
+          "x1=x1",
+          "x2=x1\u00b7x2",
+          "x3=x2\u00b7x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1\u00b7x2",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x1",
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x1^(-1-\u03b5)",
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 1,
+        "name": "PSD1",
+        "variables": [
+          "x1",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=1",
+          "x1=x1",
+          "x2=x1\u00b7x2\u00b7x3",
+          "x3=x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1\u00b7x3",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x1",
+          "x3"
+        ],
+        "endpoint_powers": [
+          "x1^(-1-\u03b5)",
+          "x3^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 2,
+        "name": "PSD2",
+        "variables": [
+          "x1",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=1",
+          "x1=x1\u00b7x2",
+          "x2=x2",
+          "x3=x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x2",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          0,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 3,
+        "name": "PSD3",
+        "variables": [
+          "x0",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=1",
+          "x2=x2",
+          "x3=x2\u00b7x0\u00b7x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x2\u00b7x0",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 4,
+        "name": "PSD4",
+        "variables": [
+          "x0",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=1",
+          "x2=x2\u00b7x3",
+          "x3=x0\u00b7x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x0\u00b7x3",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x3"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x3^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 5,
+        "name": "PSD5",
+        "variables": [
+          "x0",
+          "x2",
+          "x3"
+        ],
+        "map": [
+          "x0=x0\u00b7x3",
+          "x1=1",
+          "x2=x2",
+          "x3=x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x3",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          0,
+          0,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          0,
+          1
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x3"
+        ],
+        "endpoint_powers": [
+          "x3^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 6,
+        "name": "PSD6",
+        "variables": [
+          "x0",
+          "x1",
+          "x3"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=x1\u00b7x0",
+          "x2=1",
+          "x3=x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x0",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          0,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          0,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 7,
+        "name": "PSD7",
+        "variables": [
+          "x0",
+          "x1",
+          "x3"
+        ],
+        "map": [
+          "x0=x1\u00b7x0",
+          "x1=x1",
+          "x2=1",
+          "x3=x0\u00b7x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1\u00b7x0",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x1"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x1^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 8,
+        "name": "PSD8",
+        "variables": [
+          "x0",
+          "x1",
+          "x3"
+        ],
+        "map": [
+          "x0=x1\u00b7x0\u00b7x3",
+          "x1=x1",
+          "x2=1",
+          "x3=x3"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1\u00b7x3",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          0,
+          1,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          1,
+          1
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x1",
+          "x3"
+        ],
+        "endpoint_powers": [
+          "x1^(-1-\u03b5)",
+          "x3^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 9,
+        "name": "PSD9",
+        "variables": [
+          "x0",
+          "x1",
+          "x2"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=x1\u00b7x0",
+          "x2=x1\u00b7x2",
+          "x3=1"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1\u00b7x0",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x1"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x1^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 10,
+        "name": "PSD10",
+        "variables": [
+          "x0",
+          "x1",
+          "x2"
+        ],
+        "map": [
+          "x0=x0",
+          "x1=x1\u00b7x2\u00b7x0",
+          "x2=x2",
+          "x3=1"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x2\u00b7x0",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "jacobian_monomial_powers": [
+          1,
+          0,
+          1
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x0",
+          "x2"
+        ],
+        "endpoint_powers": [
+          "x0^(-1-\u03b5)",
+          "x2^(-1-\u03b5)"
+        ],
+        "subtraction": "2-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      },
+      {
+        "id": 11,
+        "name": "PSD11",
+        "variables": [
+          "x0",
+          "x1",
+          "x2"
+        ],
+        "map": [
+          "x0=x1\u00b7x0",
+          "x1=x1",
+          "x2=x2",
+          "x3=1"
+        ],
+        "regular_jacobian": "1",
+        "numerator": "1",
+        "u_monomial": "1",
+        "f_monomial": "x1",
+        "u_monomial_powers": [
+          0,
+          0,
+          0
+        ],
+        "f_monomial_powers": [
+          0,
+          1,
+          0
+        ],
+        "jacobian_monomial_powers": [
+          0,
+          1,
+          0
+        ],
+        "measure_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "numerator_monomial_powers": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "singular_axes": [
+          "x1"
+        ],
+        "endpoint_powers": [
+          "x1^(-1-\u03b5)"
+        ],
+        "subtraction": "1-axis recursive Taylor endpoint subtraction",
+        "description": "pySecDec-generated DOT sector"
+      }
+    ],
+    "sector_stats": {
+      "total_sector_count": 12,
+      "count_by_singular_axes": {
+        "1": 4,
+        "2": 8
+      },
+      "count_by_f_monomial": {
+        "(1, 1, 0)": 4,
+        "(1, 0, 1)": 3,
+        "(0, 1, 0)": 2,
+        "(0, 0, 1)": 1,
+        "(1, 0, 0)": 1,
+        "(0, 1, 1)": 1
+      },
+      "count_by_u_monomial": {
+        "(0, 0, 0)": 12
+      },
+      "count_by_endpoint_pole_depth": {
+        "1": 4,
+        "2": 8
+      },
+      "max_integration_dimension": 3,
+      "max_laurent_pole_order": 2
+    },
+    "validation": {
+      "sector_count": 12,
+      "continuous_dimension": 3,
+      "expected_laurent_orders": [
+        "eps^-2",
+        "eps^-1",
+        "eps^0"
+      ],
+      "benchmark_available": true,
+      "kinematic_restrictions": "scalar Euclidean DOT topology; unit propagator powers; no FSD contour deformation",
+      "max_endpoint_taylor_order": 0
+    },
+    "generation_timings": {
+      "headline": [
+        {
+          "name": "Generation U and F polynomial",
+          "seconds": 0.19478108396288007
+        },
+        {
+          "name": "Generating sectors",
+          "seconds": 0.006039666011929512
+        },
+        {
+          "name": "Generating Symbolica evaluators",
+          "seconds": 0.007787663955241442
+        }
+      ],
+      "details": [
+        {
+          "name": "DOT parse",
+          "seconds": 0.14793504099361598,
+          "detail": ""
+        },
+        {
+          "name": "kinematics load/evaluation",
+          "seconds": 0.01701149996370077,
+          "detail": ""
+        },
+        {
+          "name": "pySecDec LoopIntegralFromGraph",
+          "seconds": 0.023812333936803043,
+          "detail": ""
+        },
+        {
+          "name": "U/F extraction",
+          "seconds": 0.006022209068760276,
+          "detail": ""
+        },
+        {
+          "name": "Symbolica scalar evaluator build",
+          "seconds": 0.00047979201190173626,
+          "detail": ""
+        },
+        {
+          "name": "pySecDec sector decomposition",
+          "seconds": 0.0014245409984141588,
+          "detail": "iterative"
+        },
+        {
+          "name": "FSD SectorDefinition conversion",
+          "seconds": 0.004615125013515353,
+          "detail": "12 sectors"
+        },
+        {
+          "name": "Symbolica sector evaluator build",
+          "seconds": 0.00045029097236692905,
+          "detail": "12 sectors"
+        },
+        {
+          "name": "Symbolica Taylor evaluator build",
+          "seconds": 0.0011528750183060765,
+          "detail": "symbolic-derivatives"
+        },
+        {
+          "name": "Symbolica subtraction formula build",
+          "seconds": 0.004309666925109923,
+          "detail": "2 endpoint projector signature(s), 2 regular Taylor signature(s), endpoint cache hits/generated=2/0, regular cache hits/generated=2/0"
+        },
+        {
+          "name": "Symbolica dual evaluator build",
+          "seconds": 0.001395039027556777,
+          "detail": "regular Taylor source shapes"
+        }
+      ],
+      "total": 0.20860841393005103
+    },
+    "pysecdec_timings": [
+      {
+        "name": "pySecDec package generation",
+        "seconds": 0.9200484999455512,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec package compile",
+        "seconds": 5.6847185409860685,
+        "detail": "make pylink"
+      },
+      {
+        "name": "pySecDec package load",
+        "seconds": 0.0025330838980153203,
+        "detail": ""
+      },
+      {
+        "name": "pySecDec integration",
+        "seconds": 0.098696667002514,
+        "detail": ""
+      }
+    ]
+  },
+  "laurent_labels": [
+    "eps^-2",
+    "eps^-1",
+    "eps^0"
+  ],
+  "target": {
+    "source": "pysecdec",
+    "convention": "pysecdec",
+    "coefficients": [
+      {
+        "re": 4.0,
+        "im": 0.0
+      },
+      {
+        "re": -2.3088626596072386,
+        "im": 0.0
+      },
+      {
+        "re": -12.493116687182301,
+        "im": 0.0
+      }
+    ],
+    "errors": [
+      {
+        "re": 1.800655920241179e-16,
+        "im": 0.0
+      },
+      {
+        "re": 1.6772546548736222e-11,
+        "im": 0.0
+      },
+      {
+        "re": 3.123755578645524e-10,
+        "im": 0.0
+      }
+    ],
+    "metadata": {
+      "workdir": ".pysecdec_build",
+      "orders": [
+        -2,
+        -1,
+        0
+      ]
+    }
+  },
+  "raw": {
+    "coefficients": [
+      {
+        "re": 4.05728898597798,
+        "im": 0.0
+      },
+      {
+        "re": -2.2486575779158686,
+        "im": 0.0
+      },
+      {
+        "re": -12.702043969883741,
+        "im": 0.0
+      }
+    ],
+    "errors": [
+      {
+        "re": 0.04911440832790478,
+        "im": 0.0
+      },
+      {
+        "re": 0.06872932997242827,
+        "im": 0.0
+      },
+      {
+        "re": 0.15906360260092078,
+        "im": 0.0
+      }
+    ]
+  },
+  "display": {
+    "coefficients": [
+      {
+        "re": 4.05728898597798,
+        "im": 0.0
+      },
+      {
+        "re": -2.2486575779158686,
+        "im": 0.0
+      },
+      {
+        "re": -12.702043969883741,
+        "im": 0.0
+      }
+    ],
+    "errors": [
+      {
+        "re": 0.04911440832790478,
+        "im": 0.0
+      },
+      {
+        "re": 0.06872932997242827,
+        "im": 0.0
+      },
+      {
+        "re": 0.15906360260092078,
+        "im": 0.0
+      }
+    ],
+    "benchmark": [
+      {
+        "re": 4.0,
+        "im": 0.0
+      },
+      {
+        "re": -2.3088626596072386,
+        "im": 0.0
+      },
+      {
+        "re": -12.493116687182301,
+        "im": 0.0
+      }
+    ]
+  },
+  "aggregate_results": {
+    "labels": [
+      "eps^-2",
+      "eps^-1",
+      "eps^0"
+    ],
+    "raw": {
+      "coefficients": [
+        {
+          "re": 4.05728898597798,
+          "im": 0.0
+        },
+        {
+          "re": -2.2486575779158686,
+          "im": 0.0
+        },
+        {
+          "re": -12.702043969883741,
+          "im": 0.0
+        }
+      ],
+      "errors": [
+        {
+          "re": 0.04911440832790478,
+          "im": 0.0
+        },
+        {
+          "re": 0.06872932997242827,
+          "im": 0.0
+        },
+        {
+          "re": 0.15906360260092078,
+          "im": 0.0
+        }
+      ]
+    },
+    "display": {
+      "coefficients": [
+        {
+          "re": 4.05728898597798,
+          "im": 0.0
+        },
+        {
+          "re": -2.2486575779158686,
+          "im": 0.0
+        },
+        {
+          "re": -12.702043969883741,
+          "im": 0.0
+        }
+      ],
+      "errors": [
+        {
+          "re": 0.04911440832790478,
+          "im": 0.0
+        },
+        {
+          "re": 0.06872932997242827,
+          "im": 0.0
+        },
+        {
+          "re": 0.15906360260092078,
+          "im": 0.0
+        }
+      ]
+    },
+    "target": {
+      "coefficients": [
+        {
+          "re": 4.0,
+          "im": 0.0
+        },
+        {
+          "re": -2.3088626596072386,
+          "im": 0.0
+        },
+        {
+          "re": -12.493116687182301,
+          "im": 0.0
+        }
+      ],
+      "errors": [
+        {
+          "re": 1.800655920241179e-16,
+          "im": 0.0
+        },
+        {
+          "re": 1.6772546548736222e-11,
+          "im": 0.0
+        },
+        {
+          "re": 3.123755578645524e-10,
+          "im": 0.0
+        }
+      ]
+    },
+    "diff": [
+      {
+        "re": 0.057288985977979934,
+        "im": 0.0
+      },
+      {
+        "re": 0.060205081691369955,
+        "im": 0.0
+      },
+      {
+        "re": -0.20892728270144012,
+        "im": 0.0
+      }
+    ],
+    "pull": [
+      1.166439501734376,
+      0.8759736449565574,
+      1.3134826527576127
+    ]
+  },
+  "sector_results": [
+    {
+      "sector_id": 0,
+      "name": "PSD0",
+      "samples": 404,
+      "precision_stats": {
+        "total_samples": 404,
+        "ordinary": {
+          "samples": 404,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x1",
+        "x2"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.49917571918184933,
+            "im": 0.0
+          },
+          {
+            "re": 0.0650066166503035,
+            "im": 0.0
+          },
+          {
+            "re": -0.9685882929860656,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025837567458460987,
+            "im": 0.0
+          },
+          {
+            "re": 0.01823362963729845,
+            "im": 0.0
+          },
+          {
+            "re": 0.06829615898860925,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.49917571918184933,
+            "im": 0.0
+          },
+          {
+            "re": -0.1460370578812938,
+            "im": 0.0
+          },
+          {
+            "re": -1.1118483868159972,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025837567458460987,
+            "im": 0.0
+          },
+          {
+            "re": 0.00730991085881123,
+            "im": 0.0
+          },
+          {
+            "re": 0.05459463009749834,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.49917571918184933,
+            "im": 0.0
+          },
+          {
+            "re": 0.0650066166503035,
+            "im": 0.0
+          },
+          {
+            "re": -0.9685882929860656,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025837567458460987,
+            "im": 0.0
+          },
+          {
+            "re": 0.01823362963729845,
+            "im": 0.0
+          },
+          {
+            "re": 0.06829615898860925,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 23.057058953058913,
+        "max_abs_by_order": [
+          11.942283502131172,
+          2.2072742351573758,
+          23.057058953058913
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.9685882929860656,
+        "abs_error": 0.06829615898860925
+      }
+    },
+    {
+      "sector_id": 1,
+      "name": "PSD1",
+      "samples": 404,
+      "precision_stats": {
+        "total_samples": 404,
+        "ordinary": {
+          "samples": 404,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x1",
+        "x3"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.4935828254335977,
+            "im": 0.0
+          },
+          {
+            "re": 0.06230703807824228,
+            "im": 0.0
+          },
+          {
+            "re": -1.452566518965542,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02563951718658507,
+            "im": 0.0
+          },
+          {
+            "re": 0.018177013720215848,
+            "im": 0.0
+          },
+          {
+            "re": 0.09703659408008133,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.4935828254335977,
+            "im": 0.0
+          },
+          {
+            "re": -0.1463720485887241,
+            "im": 0.0
+          },
+          {
+            "re": -1.5933880855172777,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02563951718658507,
+            "im": 0.0
+          },
+          {
+            "re": 0.007337027494239759,
+            "im": 0.0
+          },
+          {
+            "re": 0.08340493629933814,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.4935828254335977,
+            "im": 0.0
+          },
+          {
+            "re": 0.06230703807824228,
+            "im": 0.0
+          },
+          {
+            "re": -1.452566518965542,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02563951718658507,
+            "im": 0.0
+          },
+          {
+            "re": 0.018177013720215848,
+            "im": 0.0
+          },
+          {
+            "re": 0.09703659408008133,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 41.796804807838726,
+        "max_abs_by_order": [
+          11.955713960885507,
+          2.2072744813367358,
+          41.796804807838726
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 1.452566518965542,
+        "abs_error": 0.09703659408008133
+      }
+    },
+    {
+      "sector_id": 2,
+      "name": "PSD2",
+      "samples": 435,
+      "precision_stats": {
+        "total_samples": 435,
+        "ordinary": {
+          "samples": 435,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x2"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7289113744629695,
+            "im": 0.0
+          },
+          {
+            "re": -0.7054217149655548,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.034901271387609845,
+            "im": 0.0
+          },
+          {
+            "re": 0.03690359681149906,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7289113744629695,
+            "im": 0.0
+          },
+          {
+            "re": -0.39724940416751847,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.034901271387609845,
+            "im": 0.0
+          },
+          {
+            "re": 0.022147885993797276,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7289113744629695,
+            "im": 0.0
+          },
+          {
+            "re": -0.7054217149655548,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.034901271387609845,
+            "im": 0.0
+          },
+          {
+            "re": 0.03690359681149906,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 14.987917481969443,
+        "max_abs_by_order": [
+          0.0,
+          11.995315604036058,
+          14.987917481969443
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.7289113744629695,
+        "abs_error": 0.03690359681149906
+      }
+    },
+    {
+      "sector_id": 3,
+      "name": "PSD3",
+      "samples": 442,
+      "precision_stats": {
+        "total_samples": 442,
+        "ordinary": {
+          "samples": 441,
+          "fraction": 0.997737556561086
+        },
+        "stability": {
+          "samples": 1,
+          "fraction": 0.0022624434389140274,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0",
+        "x2"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.5244640953492502,
+            "im": 0.0
+          },
+          {
+            "re": 0.05785161204178377,
+            "im": 0.0
+          },
+          {
+            "re": -1.5387617684233026,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02591125381366288,
+            "im": 0.0
+          },
+          {
+            "re": 0.018720077662714496,
+            "im": 0.0
+          },
+          {
+            "re": 0.09808553219484314,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.5244640953492502,
+            "im": 0.0
+          },
+          {
+            "re": -0.16388359179346804,
+            "im": 0.0
+          },
+          {
+            "re": -1.6848620976199533,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02591125381366288,
+            "im": 0.0
+          },
+          {
+            "re": 0.007765205447537416,
+            "im": 0.0
+          },
+          {
+            "re": 0.0841612502548086,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.5244640953492502,
+            "im": 0.0
+          },
+          {
+            "re": 0.05785161204178377,
+            "im": 0.0
+          },
+          {
+            "re": -1.5387617684233026,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02591125381366288,
+            "im": 0.0
+          },
+          {
+            "re": 0.018720077662714496,
+            "im": 0.0
+          },
+          {
+            "re": 0.09808553219484314,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 45.11384007208903,
+        "max_abs_by_order": [
+          11.998280483629845,
+          2.207276634311607,
+          45.11384007208903
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 1.5387617684233026,
+        "abs_error": 0.09808553219484314
+      }
+    },
+    {
+      "sector_id": 4,
+      "name": "PSD4",
+      "samples": 379,
+      "precision_stats": {
+        "total_samples": 379,
+        "ordinary": {
+          "samples": 377,
+          "fraction": 0.9947229551451188
+        },
+        "stability": {
+          "samples": 2,
+          "fraction": 0.005277044854881266,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0",
+        "x3"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.45167307469714396,
+            "im": 0.0
+          },
+          {
+            "re": 0.05027170963981764,
+            "im": 0.0
+          },
+          {
+            "re": -0.8986688174159047,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.024173092260510485,
+            "im": 0.0
+          },
+          {
+            "re": 0.01744934677676626,
+            "im": 0.0
+          },
+          {
+            "re": 0.06504150707834624,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.45167307469714396,
+            "im": 0.0
+          },
+          {
+            "re": -0.14068859092789465,
+            "im": 0.0
+          },
+          {
+            "re": -1.024681698085671,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.024173092260510485,
+            "im": 0.0
+          },
+          {
+            "re": 0.0072293420381324336,
+            "im": 0.0
+          },
+          {
+            "re": 0.05205761073066473,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.45167307469714396,
+            "im": 0.0
+          },
+          {
+            "re": 0.05027170963981764,
+            "im": 0.0
+          },
+          {
+            "re": -0.8986688174159047,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.024173092260510485,
+            "im": 0.0
+          },
+          {
+            "re": 0.01744934677676626,
+            "im": 0.0
+          },
+          {
+            "re": 0.06504150707834624,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 22.49608817347257,
+        "max_abs_by_order": [
+          11.994005785801875,
+          2.2072763177341055,
+          22.49608817347257
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.8986688174159047,
+        "abs_error": 0.06504150707834624
+      }
+    },
+    {
+      "sector_id": 5,
+      "name": "PSD5",
+      "samples": 389,
+      "precision_stats": {
+        "total_samples": 389,
+        "ordinary": {
+          "samples": 389,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x3"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6392586780523347,
+            "im": 0.0
+          },
+          {
+            "re": -0.6204341226064591,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03259643690948819,
+            "im": 0.0
+          },
+          {
+            "re": 0.0345047199392703,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6392586780523347,
+            "im": 0.0
+          },
+          {
+            "re": -0.35016556745017774,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03259643690948819,
+            "im": 0.0
+          },
+          {
+            "re": 0.0207234570339132,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6392586780523347,
+            "im": 0.0
+          },
+          {
+            "re": -0.6204341226064591,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03259643690948819,
+            "im": 0.0
+          },
+          {
+            "re": 0.0345047199392703,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 15.178610315286676,
+        "max_abs_by_order": [
+          0.0,
+          11.996757981353236,
+          15.178610315286676
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.6392586780523347,
+        "abs_error": 0.0345047199392703
+      }
+    },
+    {
+      "sector_id": 6,
+      "name": "PSD6",
+      "samples": 425,
+      "precision_stats": {
+        "total_samples": 425,
+        "ordinary": {
+          "samples": 425,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7193847138595246,
+            "im": 0.0
+          },
+          {
+            "re": -0.6884030412879735,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03490327352354938,
+            "im": 0.0
+          },
+          {
+            "re": 0.036411564226289106,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7193847138595246,
+            "im": 0.0
+          },
+          {
+            "re": -0.3842584533588733,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03490327352354938,
+            "im": 0.0
+          },
+          {
+            "re": 0.02165500693687535,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.7193847138595246,
+            "im": 0.0
+          },
+          {
+            "re": -0.6884030412879735,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03490327352354938,
+            "im": 0.0
+          },
+          {
+            "re": 0.036411564226289106,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 15.619013917525047,
+        "max_abs_by_order": [
+          0.0,
+          11.987487210808746,
+          15.619013917525047
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.7193847138595246,
+        "abs_error": 0.036411564226289106
+      }
+    },
+    {
+      "sector_id": 7,
+      "name": "PSD7",
+      "samples": 421,
+      "precision_stats": {
+        "total_samples": 421,
+        "ordinary": {
+          "samples": 419,
+          "fraction": 0.995249406175772
+        },
+        "stability": {
+          "samples": 2,
+          "fraction": 0.004750593824228029,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0",
+        "x1"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.49406660242661893,
+            "im": 0.0
+          },
+          {
+            "re": 0.05249101400044989,
+            "im": 0.0
+          },
+          {
+            "re": -0.9954126584557269,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0251301565187343,
+            "im": 0.0
+          },
+          {
+            "re": 0.018216651619213483,
+            "im": 0.0
+          },
+          {
+            "re": 0.06815591544792433,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.49406660242661893,
+            "im": 0.0
+          },
+          {
+            "re": -0.1563926060008469,
+            "im": 0.0
+          },
+          {
+            "re": -1.132196368605682,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0251301565187343,
+            "im": 0.0
+          },
+          {
+            "re": 0.007592015104519993,
+            "im": 0.0
+          },
+          {
+            "re": 0.05462563794499243,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.49406660242661893,
+            "im": 0.0
+          },
+          {
+            "re": 0.05249101400044989,
+            "im": 0.0
+          },
+          {
+            "re": -0.9954126584557269,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0251301565187343,
+            "im": 0.0
+          },
+          {
+            "re": 0.018216651619213483,
+            "im": 0.0
+          },
+          {
+            "re": 0.06815591544792433,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 22.24271435826654,
+        "max_abs_by_order": [
+          11.999139252804579,
+          2.20725818353907,
+          22.24271435826654
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.9954126584557269,
+        "abs_error": 0.06815591544792433
+      }
+    },
+    {
+      "sector_id": 8,
+      "name": "PSD8",
+      "samples": 454,
+      "precision_stats": {
+        "total_samples": 454,
+        "ordinary": {
+          "samples": 454,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x1",
+        "x3"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.56957807035838,
+            "im": 0.0
+          },
+          {
+            "re": 0.07758507231119538,
+            "im": 0.0
+          },
+          {
+            "re": -1.6923658115833344,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02757553759831999,
+            "im": 0.0
+          },
+          {
+            "re": 0.01932783982808281,
+            "im": 0.0
+          },
+          {
+            "re": 0.10573076150567703,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.56957807035838,
+            "im": 0.0
+          },
+          {
+            "re": -0.16322361345194025,
+            "im": 0.0
+          },
+          {
+            "re": -1.8572726479290973,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02757553759831999,
+            "im": 0.0
+          },
+          {
+            "re": 0.00766933449959431,
+            "im": 0.0
+          },
+          {
+            "re": 0.09116352160238907,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.56957807035838,
+            "im": 0.0
+          },
+          {
+            "re": 0.07758507231119538,
+            "im": 0.0
+          },
+          {
+            "re": -1.6923658115833344,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.02757553759831999,
+            "im": 0.0
+          },
+          {
+            "re": 0.01932783982808281,
+            "im": 0.0
+          },
+          {
+            "re": 0.10573076150567703,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 45.58437249063263,
+        "max_abs_by_order": [
+          11.994634591005164,
+          2.2072761394673615,
+          45.58437249063263
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 1.6923658115833344,
+        "abs_error": 0.10573076150567703
+      }
+    },
+    {
+      "sector_id": 9,
+      "name": "PSD9",
+      "samples": 422,
+      "precision_stats": {
+        "total_samples": 422,
+        "ordinary": {
+          "samples": 421,
+          "fraction": 0.9976303317535545
+        },
+        "stability": {
+          "samples": 1,
+          "fraction": 0.002369668246445498,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0",
+        "x1"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.5051917348410471,
+            "im": 0.0
+          },
+          {
+            "re": 0.05878025930380407,
+            "im": 0.0
+          },
+          {
+            "re": -1.0021335668453581,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025667663426242274,
+            "im": 0.0
+          },
+          {
+            "re": 0.01840400421214708,
+            "im": 0.0
+          },
+          {
+            "re": 0.06876269458427367,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.5051917348410471,
+            "im": 0.0
+          },
+          {
+            "re": -0.15480689240820913,
+            "im": 0.0
+          },
+          {
+            "re": -1.1441565788465275,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025667663426242274,
+            "im": 0.0
+          },
+          {
+            "re": 0.007552118196951996,
+            "im": 0.0
+          },
+          {
+            "re": 0.05502854068155757,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.5051917348410471,
+            "im": 0.0
+          },
+          {
+            "re": 0.05878025930380407,
+            "im": 0.0
+          },
+          {
+            "re": -1.0021335668453581,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025667663426242274,
+            "im": 0.0
+          },
+          {
+            "re": 0.01840400421214708,
+            "im": 0.0
+          },
+          {
+            "re": 0.06876269458427367,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 22.78101234613507,
+        "max_abs_by_order": [
+          11.894493664753906,
+          2.20727624663994,
+          22.78101234613507
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 1.0021335668453581,
+        "abs_error": 0.06876269458427367
+      }
+    },
+    {
+      "sector_id": 10,
+      "name": "PSD10",
+      "samples": 438,
+      "precision_stats": {
+        "total_samples": 438,
+        "ordinary": {
+          "samples": 438,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x0",
+        "x2"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.5195568636900908,
+            "im": 0.0
+          },
+          {
+            "re": 0.05616324051115065,
+            "im": 0.0
+          },
+          {
+            "re": -1.5346463296601194,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025689951176760012,
+            "im": 0.0
+          },
+          {
+            "re": 0.01862320551717097,
+            "im": 0.0
+          },
+          {
+            "re": 0.09778949351099459,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.5195568636900908,
+            "im": 0.0
+          },
+          {
+            "re": -0.1634972626499093,
+            "im": 0.0
+          },
+          {
+            "re": -1.6788946831039038,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025689951176760012,
+            "im": 0.0
+          },
+          {
+            "re": 0.007761896590192403,
+            "im": 0.0
+          },
+          {
+            "re": 0.0839574954211237,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.5195568636900908,
+            "im": 0.0
+          },
+          {
+            "re": 0.05616324051115065,
+            "im": 0.0
+          },
+          {
+            "re": -1.5346463296601194,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.025689951176760012,
+            "im": 0.0
+          },
+          {
+            "re": 0.01862320551717097,
+            "im": 0.0
+          },
+          {
+            "re": 0.09778949351099459,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 41.941224994312506,
+        "max_abs_by_order": [
+          11.968075910061527,
+          2.2072747359071734,
+          41.941224994312506
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 1.5346463296601194,
+        "abs_error": 0.09778949351099459
+      }
+    },
+    {
+      "sector_id": 11,
+      "name": "PSD11",
+      "samples": 387,
+      "precision_stats": {
+        "total_samples": 387,
+        "ordinary": {
+          "samples": 387,
+          "fraction": 1.0
+        },
+        "stability": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 0.001,
+          "precision_digits": 32
+        },
+        "medium_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-06,
+          "precision_digits": 100
+        },
+        "high_precision": {
+          "samples": 0,
+          "fraction": 0.0,
+          "threshold": 1e-08,
+          "precision_digits": 1000
+        }
+      },
+      "singular_axes": [
+        "x1"
+      ],
+      "raw": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6415593740777875,
+            "im": 0.0
+          },
+          {
+            "re": -0.6046413266883999,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03284497695603383,
+            "im": 0.0
+          },
+          {
+            "re": 0.03352066228944091,
+            "im": 0.0
+          }
+        ]
+      },
+      "raw_sector": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6415593740777875,
+            "im": 0.0
+          },
+          {
+            "re": -0.3334000732927337,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03284497695603383,
+            "im": 0.0
+          },
+          {
+            "re": 0.019634320545759667,
+            "im": 0.0
+          }
+        ]
+      },
+      "display": {
+        "coefficients": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": -0.6415593740777875,
+            "im": 0.0
+          },
+          {
+            "re": -0.6046413266883999,
+            "im": 0.0
+          }
+        ],
+        "errors": [
+          {
+            "re": 0.0,
+            "im": 0.0
+          },
+          {
+            "re": 0.03284497695603383,
+            "im": 0.0
+          },
+          {
+            "re": 0.03352066228944091,
+            "im": 0.0
+          }
+        ]
+      },
+      "diagnostics": {
+        "max_abs_weight": 15.29907819905483,
+        "max_abs_by_order": [
+          0.0,
+          11.98635824033897,
+          15.29907819905483
+        ]
+      },
+      "sort_keys": {
+        "abs_central": 0.6415593740777875,
+        "abs_error": 0.03352066228944091
+      }
+    }
+  ],
+  "request": {
+    "run_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/runs/dot_box.yaml",
+    "integral": "dot",
+    "dot_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/box.dot",
+    "kinematics_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/box_kinematics.yaml",
+    "graph_name": null,
+    "sector_method": "iterative",
+    "normaliz_executable": null,
+    "dot_engine": "fsd",
+    "numerator_reducer": "symbolica",
+    "sectors": null,
+    "pysecdec_workdir": ".pysecdec_build",
+    "pysecdec_epsrel": 1e-12,
+    "pysecdec_maxeval": 200000,
+    "keep_pysecdec_workdir": false,
+    "progress_value_order": "eps^0",
+    "max_eps_order": 0,
+    "target_args": [
+      "pysecdec"
+    ],
+    "refresh_target": false,
+    "show_results": null,
+    "sort_sector_results": "index",
+    "result_path": "examples/outputs/dot_box_pysecdec_target.json",
+    "log_level": "INFO",
+    "log_file": null,
+    "mode": "massless",
+    "s": null,
+    "s12": null,
+    "s23": null,
+    "m": 0.0,
+    "gamma_scheme": "oneloop",
+    "prefactor_convention": "pysecdec",
+    "seed": 1,
+    "max_iter": 3,
+    "min_iter": 1,
+    "samples_per_iter": 50000,
+    "batch_size": 5000,
+    "sampling_mode": "havana",
+    "democratic_samples_per_sector": 1000,
+    "target_rel_accuracy": null,
+    "min_error": 0.0002,
+    "bins": 64,
+    "workers": 1,
+    "jit_compile_evaluators": true,
+    "evaluator_compile_mode": "jit",
+    "real_evaluator": true,
+    "dual_evaluator_mode": "symbolic-derivatives",
+    "subtraction_backend": "projector-formula",
+    "ibp_reduce_to_log_endpoint": false,
+    "ibp_power_goal": null,
+    "direct_projector_cache_term_threshold": 54,
+    "allow_fallback_for_missing_caches": false,
+    "force_regular_taylor_formulas": false,
+    "regular_taylor_signature_limit": 256,
+    "regular_taylor_formula_volume_limit": 8192,
+    "regular_taylor_formula_axis_limit": 6,
+    "chain_rule_formula_signature_limit": 256,
+    "chain_rule_formula_output_length_limit": 0,
+    "stability_threshold": 0.001,
+    "medium_precision_stability_threshold": 1e-06,
+    "high_precision_stability_threshold": 1e-08,
+    "stability_precision": 32,
+    "medium_precision_stability_precision": 100,
+    "high_precision_stability_precision": 1000,
+    "max_weight_precision_xi": 0.9,
+    "show_stats": false,
+    "no_progress": true,
+    "quiet_summary": true,
+    "json": true,
+    "mu": null,
+    "onshell_threshold": null,
+    "command": "run",
+    "sector_evaluator_backend": "projector",
+    "output": null,
+    "evaluator_lru_size": 128,
+    "dot_global_prefactor_coeffs": [
+      {
+        "re": 1.0,
+        "im": 0.0
+      },
+      {
+        "re": 0.42278433509846713,
+        "im": 0.0
+      },
+      {
+        "re": 0.41068158239349095,
+        "im": 0.0
+      }
+    ],
+    "dot_global_prefactor_min_order": 0,
+    "dot_sector_laurent_min_order": -2,
+    "dot_sector_laurent_max_order": 0,
+    "max_eps_order_explicit": true,
+    "cache_loop_counts": [
+      1,
+      2
+    ],
+    "cache_cases": null,
+    "cache_report_path": "docs/universal_cache_report.json",
+    "cache_workdir": ".cache_warm",
+    "cache_verify_samples_per_sector": 16,
+    "cache_estimate_3l": true,
+    "test_boundary_distances": [
+      1e-06,
+      1e-08
+    ],
+    "test_boundary_growth_power_tolerance": 0.5,
+    "test_report_path": null,
+    "test_boundary_retry_scales": [
+      0.01
+    ],
+    "test_boundary_max_simultaneous_endpoint_approaches": null,
+    "benchmark_samples_per_sector": 5,
+    "qmc_shifts": 16,
+    "qmc_korobov_alpha": 3,
+    "qmc_lattice_backend": "pysecdec",
+    "qmc_generating_vectors": "default"
+  },
+  "environment": {
+    "python": "3.12.6 (main, Sep 30 2024, 14:08:47) [Clang 16.0.0 (clang-1600.0.26.3)]",
+    "platform": "macOS-15.0-arm64-arm-64bit",
+    "executable": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/.venv/bin/python"
+  },
+  "created_utc": "2026-06-22T17:59:33.557370+00:00",
+  "command": [
+    "FSD.py",
+    "--run",
+    "examples/runs/dot_box.yaml",
+    "--target",
+    "pysecdec",
+    "--pysecdec-maxeval",
+    "200000",
+    "--pysecdec-epsrel",
+    "1e-12",
+    "--no-progress",
+    "--quiet-summary",
+    "--json",
+    "--result-path",
+    "examples/outputs/dot_box_pysecdec_target.json"
+  ],
+  "result_path": "examples/outputs/dot_box_pysecdec_target.json",
+  "input_metadata": {
+    "dot_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/box.dot",
+    "kinematics_file": "/Users/vjhirsch/Documents/Work/pygloop/FSD_v2/examples/graphs/box_kinematics.yaml",
+    "graph_name": "box",
+    "kinematics": {
+      "values": {
+        "s12": -1.0,
+        "s23": -1.0,
+        "mt": 0.0
+      },
+      "replacements": [
+        [
+          "p1*p1",
+          "0"
+        ],
+        [
+          "p2*p2",
+          "0"
+        ],
+        [
+          "p3*p3",
+          "0"
+        ],
+        [
+          "p4*p4",
+          "0"
+        ],
+        [
+          "p1*p2",
+          "s12/2"
+        ],
+        [
+          "p2*p3",
+          "s23/2"
+        ],
+        [
+          "p1*p3",
+          "-(s12+s23)/2"
+        ],
+        [
+          "p1*p4",
+          "s23/2"
+        ],
+        [
+          "p2*p4",
+          "-(s12+s23)/2"
+        ],
+        [
+          "p3*p4",
+          "s12/2"
+        ]
+      ]
+    }
+  }
+}

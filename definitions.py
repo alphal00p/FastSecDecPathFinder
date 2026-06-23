@@ -150,6 +150,9 @@ class IntegralRequest:
     qmc_lattice_backend: str = "qmcpy"
     qmc_order: str = "linear"
     qmc_correlate_sectors: bool = True
+    target_integration_time: float | None = None
+    target_abs_error: float | None = None
+    target_rel_error: float | None = None
 
 
 @dataclass(frozen=True)

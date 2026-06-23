@@ -49,7 +49,12 @@ from generation_timing import GenerationProgress
 from integrand import build_topology
 from integrator import integrate
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
-from pysecdec_bridge import run_pysecdec_package
+from pysecdec_bridge import ensure_pysecdec_package, run_pysecdec_package
+from pysecdec_kernel_benchmark import (
+    benchmark_pysecdec_generated_kernels,
+    output_pysecdec_kernel_benchmark_json,
+    print_pysecdec_kernel_benchmark_report,
+)
 from result_io import (
     environment_metadata,
     print_saved_results,
@@ -311,6 +316,12 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--sampling-mode qmc requires --samples-per-iter to be a power of two")
     if request.target_rel_accuracy is not None and request.target_rel_accuracy <= 0.0:
         raise ValueError("--target-rel-accuracy must be > 0 and is interpreted as a percent")
+    if request.target_rel_error is not None and request.target_rel_error <= 0.0:
+        raise ValueError("--target-rel-error must be > 0 and is interpreted as a dimensionless ratio")
+    if request.target_abs_error is not None and request.target_abs_error <= 0.0:
+        raise ValueError("--target-abs-error must be > 0 in the selected prefactor convention")
+    if request.target_integration_time is not None and request.target_integration_time <= 0.0:
+        raise ValueError("--target-integration-time must be > 0 seconds")
     if request.stability_threshold < 0.0:
         raise ValueError("--stability-threshold must be non-negative")
     if request.medium_precision_stability_threshold < 0.0:
@@ -715,10 +726,43 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         "--target-relative-accuracy",
         dest="target_rel_accuracy",
         type=float,
-        default=None,
+        default=defaults.get("target_rel_accuracy", None),
         help=(
             "Optional target for the displayed summed relative MC error in percent. "
             "When enabled, progress and ETA are extrapolated with err ~ 1/sqrt(N)."
+        ),
+    )
+    parser.add_argument(
+        "--target-rel-error",
+        "--target-relative-error",
+        dest="target_rel_error",
+        type=float,
+        default=defaults.get("target_rel_error", None),
+        help=(
+            "Optional stop target for SUM(|MC errors|)/SUM(|coefficients|) as a "
+            "dimensionless ratio. For example, 3e-4 is equivalent to "
+            "--target-rel-accuracy 0.03."
+        ),
+    )
+    parser.add_argument(
+        "--target-abs-error",
+        "--target-absolute-error",
+        dest="target_abs_error",
+        type=float,
+        default=defaults.get("target_abs_error", None),
+        help=(
+            "Optional stop target for SUM(|MC errors|), in the selected "
+            "prefactor convention."
+        ),
+    )
+    parser.add_argument(
+        "--target-integration-time",
+        type=float,
+        default=defaults.get("target_integration_time", None),
+        help=(
+            "Requested integration wall time in seconds. FSD performs a short "
+            "same-worker-count warm-up and adjusts sampling statistics to get "
+            "close to this budget; the elapsed-time stop remains active as a guard."
         ),
     )
     parser.add_argument("--min-error", type=float, default=2.0e-4)
@@ -885,14 +929,14 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--sector-evaluator-backend",
         choices=["projector", "two-stage-explicit", "explicit"],
-        default="projector",
+        default=str(defaults.get("sector_evaluator_backend", "explicit")),
         help=(
-            "Singular-sector runtime evaluator layout. 'projector' keeps the "
-            "current endpoint-projector path. 'two-stage-explicit' prepares "
-            "one source-coefficient evaluator and one assembler evaluator per "
-            "singular sector; this is an experimental PSD2-derived path for "
-            "prepared DOT bundles. 'explicit' builds one fully substituted "
-            "multi-output Symbolica evaluator per sector."
+            "Singular-sector runtime evaluator layout. 'explicit' builds one "
+            "fully substituted multi-output Symbolica evaluator per sector and "
+            "is the default. 'projector' keeps the fast-generation parametric "
+            "black-box U/F path. 'two-stage-explicit' prepares one "
+            "source-coefficient evaluator and one assembler evaluator per "
+            "singular sector."
         ),
     )
     parser.add_argument(
@@ -900,7 +944,25 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         dest="sector_evaluator_backend",
         action="store_const",
         const="explicit",
-        help="Shortcut for --sector-evaluator-backend explicit.",
+        help="Shortcut for --sector-evaluator-backend explicit; this is the default.",
+    )
+    parser.add_argument(
+        "--projector-generation",
+        dest="sector_evaluator_backend",
+        action="store_const",
+        const="projector",
+        help=(
+            "Use the fast-generation projector backend: keep U/F as black-box "
+            "evaluators and assemble sector weights from universal projector "
+            "formulae. This is slower at evaluation time than --explicit."
+        ),
+    )
+    parser.add_argument(
+        "--parametric-generation",
+        dest="sector_evaluator_backend",
+        action="store_const",
+        const="projector",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--regular-taylor-signature-limit",
@@ -1324,7 +1386,16 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         qmc_lattice_backend=str(args.qmc_lattice_backend),
         qmc_order=str(args.qmc_order),
         qmc_correlate_sectors=bool(args.qmc_correlate_sectors),
-        target_rel_accuracy=args.target_rel_accuracy,
+        target_rel_accuracy=(
+            None if args.target_rel_accuracy is None else float(args.target_rel_accuracy)
+        ),
+        target_abs_error=None if args.target_abs_error is None else float(args.target_abs_error),
+        target_rel_error=None if args.target_rel_error is None else float(args.target_rel_error),
+        target_integration_time=(
+            None
+            if args.target_integration_time is None
+            else float(args.target_integration_time)
+        ),
         min_error=args.min_error,
         bins=args.bins,
         workers=args.workers,
@@ -1801,6 +1872,7 @@ def _prepare_sector_runtime_artifacts(
     generation_progress: GenerationProgress | None,
 ) -> float:
     """Apply CLI generation options and build all runtime evaluator artifacts."""
+    topology.generation_workers = max(int(request.workers), 1)
     topology.regular_taylor_formula_signature_limit = request.regular_taylor_signature_limit
     topology.regular_taylor_formula_volume_limit = request.regular_taylor_formula_volume_limit
     topology.regular_taylor_formula_axis_limit = request.regular_taylor_formula_axis_limit
@@ -1949,7 +2021,13 @@ def _main_impl() -> int:
         if request.command == "cache":
             run_universal_cache_mode(request, logger)
             return 0
-        if request.command == "integrate":
+        legacy_prepared_output = (
+            request.command == "run"
+            and request.integral == "dot"
+            and request.output is not None
+            and (Path(request.output).expanduser() / "manifest.json").is_file()
+        )
+        if request.command == "integrate" or legacy_prepared_output:
             topology, sectors, prepared_manifest = load_prepared_bundle(
                 request.output or "",
                 lru_size=request.evaluator_lru_size,
@@ -2027,7 +2105,7 @@ def _main_impl() -> int:
         print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
         return 2
 
-    if request.command != "integrate":
+    if request.command != "integrate" and prepared_manifest is None:
         if request.command == "generate" and request.integral == "dot" and generation_progress is None:
             generation_progress = _generation_progress(request, logger, "FSD generation")
         topology = build_topology(request)
@@ -2040,7 +2118,7 @@ def _main_impl() -> int:
         sectors = generate_sectors(request)
     try:
         validate_sector_selection(request, sectors)
-        if request.command != "integrate":
+        if request.command != "integrate" and prepared_manifest is None:
             configure_laurent_range(request, topology, sectors)
     except Exception as exc:
         if generation_progress is not None:
@@ -2053,7 +2131,12 @@ def _main_impl() -> int:
         else sectors
     )
 
-    if request.command != "integrate":
+    skip_fsd_runtime_prepare = (
+        request.command == "benchmark"
+        and request.integral == "dot"
+        and request.dot_engine == "pysecdec"
+    )
+    if request.command != "integrate" and prepared_manifest is None and not skip_fsd_runtime_prepare:
         extra_dual_build_before = _prepare_sector_runtime_artifacts(
             request,
             topology,
@@ -2064,8 +2147,11 @@ def _main_impl() -> int:
             generation_progress.close()
             generation_progress = None
         _record_generation_artifact_timings(request, topology, extra_dual_build_before)
+    elif generation_progress is not None:
+        generation_progress.close()
+        generation_progress = None
     summary = summary_data(request, topology, sectors, benchmark_available=False)
-    if request.command == "integrate" and prepared_manifest is not None:
+    if prepared_manifest is not None:
         summary["prepared_bundle"] = prepared_manifest
         timings_file = Path(request.output or "") / "generation_timings.json"
         if timings_file.is_file():
@@ -2118,11 +2204,71 @@ def _main_impl() -> int:
             )
         return 0
 
+    if (
+        request.command == "run"
+        and request.integral == "dot"
+        and request.output is not None
+        and request.dot_engine in {"fsd", "both"}
+        and prepared_manifest is None
+    ):
+        try:
+            prepared_manifest = save_prepared_bundle(
+                request.output,
+                request,
+                topology,
+                sectors,
+                generation_timings=summary.get("generation_timings", {}),
+            )
+            summary["prepared_bundle"] = prepared_manifest
+            summary["prepared_bundle"]["saved_during_run"] = True
+        except Exception as exc:
+            print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+            return 1
+        if not request.json and not request.quiet_summary:
+            print(
+                f"{Fore.GREEN}prepared bundle written:{Style.RESET_ALL} "
+                f"{Path(request.output).expanduser().resolve()}"
+            )
+
     if request.command == "benchmark":
         try:
-            if not request.json and not request.quiet_summary:
-                print_generation_report(request, summary)
-            run_sector_runtime_benchmark(request, topology, sectors, summary)
+            if request.integral == "dot" and request.dot_engine == "pysecdec":
+                pysecdec_progress = _generation_progress(
+                    request,
+                    logger,
+                    "pySecDec benchmark package",
+                )
+                try:
+                    paths, pysecdec_timings = ensure_pysecdec_package(
+                        get_dot_bundle(request),
+                        request,
+                        progress=pysecdec_progress,
+                    )
+                finally:
+                    pysecdec_progress.close()
+                pysecdec_timings.log(logger)
+                summary["pysecdec_timings"] = pysecdec_timings.to_summary_dict()
+                if not request.json and not request.quiet_summary:
+                    print_generation_report(request, summary)
+                report = benchmark_pysecdec_generated_kernels(
+                    paths.integral_dir,
+                    samples_per_sector=int(request.benchmark_samples_per_sector),
+                    sectors=list(request.sectors) if request.sectors is not None else None,
+                    real_parameters=list(get_dot_bundle(request).kinematics.parameter_values),
+                    repeats=1,
+                    seed=int(request.seed),
+                )
+                if request.json:
+                    print(output_pysecdec_kernel_benchmark_json(report))
+                else:
+                    print_pysecdec_kernel_benchmark_report(
+                        report,
+                        show_all=bool(request.show_stats),
+                    )
+            else:
+                if not request.json and not request.quiet_summary:
+                    print_generation_report(request, summary)
+                run_sector_runtime_benchmark(request, topology, sectors, summary)
         except Exception as exc:
             print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
             return 1
@@ -2151,7 +2297,13 @@ def _main_impl() -> int:
     summary["header"]["benchmark"] = target.source if target is not None else "unavailable"
 
     if not request.json and not request.quiet_summary:
-        print_preintegration_summary(request, topology, sectors, benchmark_available=target is not None)
+        print_preintegration_summary(
+            request,
+            topology,
+            sectors,
+            benchmark_available=target is not None,
+            data=summary,
+        )
 
     try:
         if request.integral == "dot" and request.command != "integrate":

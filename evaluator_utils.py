@@ -60,22 +60,11 @@ class HotEvaluatorWithPrecisionFallback:
 
     def evaluate(self, inputs: Any) -> Any:
         """Evaluate with the hot f64 backend."""
-        if self.kind == "jit" and self.real_evaluator:
-            # Symbolica's eager real evaluator is correct, but the current JIT
-            # real dispatch can mis-evaluate some generated FSD formulae.  Keep
-            # the JIT hot path, but route it through the complex API for now;
-            # the eager evaluator remains attached for all precision-rescue and
-            # dualization paths.
-            rows = np.ascontiguousarray(np.asarray(inputs), dtype=np.complex128)
-            return self.hot_evaluator.evaluate_complex(rows)
         return self.hot_evaluator.evaluate(inputs)
 
     def evaluate_complex(self, inputs: Any) -> Any:
         """Evaluate complex rows, using real hot code for real-valued rows."""
         rows = np.asarray(inputs)
-        if self.kind == "jit" and self.real_evaluator:
-            rows = np.ascontiguousarray(rows, dtype=np.complex128)
-            return self.hot_evaluator.evaluate_complex(rows)
         if self.real_evaluator and (
             not np.iscomplexobj(rows) or np.all(np.imag(rows) == 0.0)
         ):
@@ -289,8 +278,6 @@ def evaluate_f64(
     real_evaluator: bool,
 ) -> Any:
     """Evaluate f64 rows using real APIs whenever possible."""
-    if isinstance(evaluator, HotEvaluatorWithPrecisionFallback) and evaluator.kind == "jit":
-        return evaluator.evaluate_complex(np.ascontiguousarray(rows))
     if real_evaluator and not has_nonzero_imaginary_part(rows):
         return evaluator.evaluate(np.ascontiguousarray(np.real(np.asarray(rows)), dtype=float))
     return evaluator.evaluate_complex(np.ascontiguousarray(rows))

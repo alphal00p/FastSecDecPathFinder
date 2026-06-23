@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 import json
 import math
+from pathlib import Path
 import textwrap
 from typing import Any
 
@@ -173,6 +174,9 @@ def summary_data(
         if request.sampling_mode == "qmc"
         else "n/a",
         "target_rel_accuracy_percent": request.target_rel_accuracy,
+        "target_rel_error": request.target_rel_error,
+        "target_abs_error": request.target_abs_error,
+        "target_integration_time_s": request.target_integration_time,
         "bins": request.bins,
         "workers": request.workers,
         "jit_compile_evaluators": request.jit_compile_evaluators,
@@ -487,26 +491,58 @@ def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
     """Print consolidated generation timings and cache/fallback statistics."""
     if request.integral != "dot":
         return
-    try:
-        from dot_topology import get_dot_bundle
+    prepared_bundle = data.get("prepared_bundle")
+    generation_summary = data.get("generation_timings")
+    timings = None
+    if prepared_bundle is None:
+        try:
+            from dot_topology import get_dot_bundle
 
-        timings = get_dot_bundle(request).timings
-    except Exception:
+            timings = get_dot_bundle(request).timings
+            generation_summary = timings.to_summary_dict()
+        except Exception:
+            return
+    elif not isinstance(generation_summary, dict):
         return
 
-    print(maybe_color("\nFSD generation report", Fore.CYAN))
+    if isinstance(prepared_bundle, dict):
+        bundle_path = request.output or prepared_bundle.get("output") or "."
+        print(
+            maybe_color("\nFSD prepared-bundle report", Fore.CYAN)
+            + " "
+            + maybe_color("(loaded from disk; timings are saved generation metadata)", Fore.YELLOW)
+        )
+        print(
+            maybe_color("bundle:", Fore.CYAN)
+            + " "
+            + maybe_color(str(Path(bundle_path).expanduser()), Fore.MAGENTA)
+        )
+    else:
+        print(maybe_color("\nFSD generation report", Fore.CYAN))
 
     headline_table = PrettyTable()
     headline_table.field_names = [
         maybe_color("headline bucket", Fore.CYAN),
         maybe_color("time", Fore.CYAN),
     ]
-    for name, seconds in timings.bucket_totals().items():
+    if timings is not None:
+        headline_items = list(timings.bucket_totals().items())
+        total_seconds = timings.total()
+    else:
+        headline_items = [
+            (str(record.get("name")), float(record.get("seconds", 0.0)))
+            for record in generation_summary.get("headline", [])
+            if isinstance(record, dict)
+        ]
+        total_seconds = float(generation_summary.get("total", 0.0))
+    for name, seconds in headline_items:
         headline_table.add_row([maybe_color(name, Fore.MAGENTA), format_seconds(seconds)])
-    headline_table.add_row([
-        maybe_color("total recorded generation", Fore.MAGENTA),
-        format_seconds(timings.total()),
-    ])
+    headline_table.add_row(
+        [
+            maybe_color("total recorded generation", Fore.MAGENTA),
+            format_seconds(total_seconds),
+        ]
+    )
     print(headline_table)
 
     details_table = PrettyTable()
@@ -520,13 +556,28 @@ def print_generation_report(request: IntegralRequest, data: JsonDict) -> None:
     details_table.align["detail"] = "l"
     details_table.max_width["stage"] = 34
     details_table.max_width["detail"] = 72
-    for index, record in enumerate(timings.records, start=1):
+    if timings is not None:
+        detail_records = [
+            {
+                "name": record.name,
+                "seconds": record.seconds,
+                "detail": record.detail or "-",
+            }
+            for record in timings.records
+        ]
+    else:
+        detail_records = [
+            record
+            for record in generation_summary.get("records", generation_summary.get("details", []))
+            if isinstance(record, dict)
+        ]
+    for index, record in enumerate(detail_records, start=1):
         details_table.add_row(
             [
                 index,
-                _color_table_cell_lines(_wrapped_table_text(record.name, 34), Fore.MAGENTA),
-                format_seconds(record.seconds),
-                _wrapped_table_text(record.detail or "-", 72),
+                _color_table_cell_lines(_wrapped_table_text(record.get("name", "-"), 34), Fore.MAGENTA),
+                format_seconds(float(record.get("seconds", 0.0))),
+                _wrapped_table_text(record.get("detail") or "-", 72),
             ]
         )
     print(details_table)
@@ -613,9 +664,11 @@ def print_preintegration_summary(
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
     benchmark_available: bool,
+    data: JsonDict | None = None,
 ) -> None:
     """Print colored pre-integration tables for topology and sectors."""
-    data = summary_data(request, topology, sectors, benchmark_available)
+    if data is None:
+        data = summary_data(request, topology, sectors, benchmark_available)
     print(maybe_color("\nFSD run summary", Fore.CYAN))
 
     header = PrettyTable()
@@ -1447,7 +1500,14 @@ def print_result_table(output: JsonDict) -> None:
         if total is not None:
             parts.append(colored_kv("total", format_seconds(float(total)), Fore.CYAN))
         if parts:
-            print(maybe_color("Generation:", Fore.CYAN) + " " + "  ".join(parts))
+            prepared_bundle = output.get("summary", {}).get("prepared_bundle")
+            if isinstance(prepared_bundle, dict):
+                label = "Precomputed generation"
+                suffix = maybe_color(" (loaded bundle)", Fore.YELLOW)
+            else:
+                label = "Generation"
+                suffix = ""
+            print(maybe_color(f"{label}:", Fore.CYAN) + suffix + " " + "  ".join(parts))
 
 
 def json_default(obj: Any) -> Any:

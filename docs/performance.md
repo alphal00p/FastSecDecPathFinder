@@ -9,10 +9,10 @@ pySecDec is used only at the DOT generation boundary.
 
 | item | value |
 |---|---|
-| machine | Darwin arm64 |
+| machine | Apple M3 Pro, 12 logical CPUs, Darwin arm64 |
 | Python | 3.12.6 |
 | Symbolica | 2.0.0 local `symbolica-community` wheel patched to `symbolica/dev` |
-| Symbolica dev commit | `07f1de5fc119b01e2875c8d0163b25eacabadf21` |
+| Symbolica dev commit | `5f61332d8b21391f40712f42e499b3cf6a9ae7fa` |
 | pySecDec | 1.6.6 |
 | Normaliz | not found on `PATH`; iterative/geometric_ku paths used |
 | default precision thresholds | `1e-3`, `1e-6`, and `1e-8` |
@@ -28,12 +28,21 @@ six-axis dual shape `[3,3,3,3,3,4]`, i.e. 5120 requested Taylor coefficients.
 | Symbolica source | scalar evaluator build [s] | copied evaluator dualize [s] | speedup |
 |---|---:|---:|---:|
 | previous venv wheel | 0.000282 | 191.316 | 1x |
-| local community/dev wheel | 0.000200 | 11.385 | 16.8x |
+| local community/dev wheel | 0.000196 | 11.926 | 16.0x |
 
 This removes the original several-minute U/F dualization bottleneck.  It does
 not by itself make every high-axis regular-source formula fast: the cost has
 moved to how much source algebra/evaluator fragmentation we ask Symbolica and
 Python to perform.
+
+The current local wheel was built in release mode from `symbolica-community`
+with its `Cargo.toml` patched to the Symbolica dev commit above.  The
+standalone `MRE_JIT_compile_real_bug.py` still reproduces a real-JIT
+multi-output evaluation bug on the DOT double-box `PSD50` sector: real
+`evaluate(...)` differs from the eager evaluator at order one, while complex
+`evaluate_complex(...)` agrees at about `1e-11`.  FSD therefore keeps using the
+complex JIT entry point as the f64 hot path when `--jit-compile
+--real-evaluator` is selected.
 
 ## Generation Timing
 
@@ -181,10 +190,10 @@ black-box U/F source evaluation plus universal endpoint algebra:
 | box high-rank numerator | 0.390 | 183.42 | 65.62 / 882.12 |
 
 This confirms that the explicit backend is the right comparison point when the
-question is pySecDec-style runtime speed.  It is not the default FSD strategy,
-because it relies on explicitly substituting sector maps into U/F, whereas the
-projector backend preserves the path-finder goal of treating U/F as numerical
-black-box evaluators.
+question is pySecDec-style runtime speed.  It is now the default DOT runtime
+backend, but it is not the black-box FSD strategy: it relies on explicitly
+substituting sector maps into U/F, whereas the projector backend preserves the
+path-finder goal of treating U/F as numerical black-box evaluators.
 
 ## Scalar Double-Box Three-Way Timing
 
@@ -201,12 +210,81 @@ shared library was loaded directly for an independent verbose timing pass.
 | pySecDec generated | 302 sector/order integrals | 7.837 | 338.752 | 3.682 s recorded integration wall time |
 
 The pySecDec direct-library cross-check is more informative than simply
-dividing by `--pysecdec-maxeval`.  A verbose direct call reported 302
-generated sector/order integrals, each with `n = 10061`, for 3,038,422
-generated-integrand evaluations.  The measured wall time was 3.552 s, giving
-about 1.17 us per generated sector/order integrand evaluation.  The summed
-per-integral timings gave 3.426 s, or 1.13 us/evaluation.  Per-integral timing
-spread was 0.33 to 11.78 us/evaluation, with a median of 0.56 us.
+dividing by `--pysecdec-maxeval`, but the most precise comparison is the direct
+generated-kernel benchmark now exposed through FSD's `benchmark` subcommand:
+
+```sh
+.venv/bin/python FSD.py benchmark \
+  --run examples/runs/dot_double_box.yaml \
+  --dot-engine pysecdec \
+  --pysecdec-workdir .pysecdec_build_double_box \
+  --keep-pysecdec-workdir \
+  --benchmark-samples-per-sector 1000000 \
+  --quiet-summary \
+  --no-progress
+```
+
+This compiles a temporary C++ driver against the persistent pySecDec generated
+static library and directly times the generated sector/order kernels.  A
+verbose public `IntegralLibrary` call is still useful as a whole-package timing
+cross-check, but it is not the same metric.
+
+For an apples-to-apples sector-kernel comparison, a small C++ driver was
+compiled directly against the generated pySecDec sector headers in the
+persistent `.pysecdec_build_double_box` artifact and run with 1,000,000 fixed
+interior sample points on the Apple M3 Pro listed above.  The same-index
+pySecDec `sector_50` is not the relevant comparison for the standalone PSD50
+MRE: it only has three order kernels and very small generated source files.
+The relevant raw-kernel reference is the slow generated pySecDec sector,
+`sector_53`, which has the same five-order Laurent structure (`eps^-4..eps^0`)
+and much larger generated source.
+
+| pySecDec generated sector | generated order kernels | direct C++ timing [us / sector point] | note |
+|---|---:|---:|---|
+| `sector_53` | `eps^-4` through `eps^0` | 3.644 | relevant MRE reference and slowest pySecDec sector in the all-sector raw-kernel sweep |
+| `sector_50` | `eps^-2`, `eps^-1`, `eps^0` | 0.102 | same numeric index only; too simple for the PSD50 MRE comparison |
+
+The pySecDec all-sector raw-kernel sweep over the same artifact reported 96
+generated sectors and 302 sector/order kernels.  Grouping order kernels by
+sector gave min/median/average/max sector-point timings of
+`0.011 / 0.157 / 0.538 / 3.716 us`, with `sector_53` as the slowest sector.
+At 100,000 points the CLI benchmark reproduces the same hierarchy, reporting
+slowest `sector_53 = 3.65 us`; the larger 1,000,000-point run is the number
+used in the table above.
+
+The previously slow explicit FSD sector in this comparison was `PSD50`.  It was
+remeasured separately with 1000 f64 samples on the local community/dev
+Symbolica wheel:
+
+| `PSD50` backend | evaluator generation [s] | sector-processor runtime [us/sample] | Symbolica eval share |
+|---|---:|---:|---:|
+| eager | 14.105 | 43.33 | 99.37% |
+| JIT, real API requested | 13.121 | 47.73 | 99.45% |
+| JIT with heavier optimizer env knobs | 13.136 | 48.57 | 99.87% |
+| assembly `--compile` | 376.557 | 7.92 | 99.34% |
+
+The direct JIT evaluator call, bypassing the rest of the sector processor, is
+stable at about `14.7..15.3 us/sample` for batch sizes `16..8192`; batch size
+1 costs about `23.6 us/sample`.  The raw real-valued JIT path is currently
+known to return wrong values on the standalone MRE expression set; FSD does not
+silently route it through the complex evaluator anymore.  Use
+`--complex-evaluator` explicitly when checking the current correctness
+workaround.  The larger `~48 us/sample` benchmark value is therefore mostly
+the full FSD sector-processor route around the evaluator, not Python arithmetic
+in the evaluator itself.
+
+The standalone MRE can print the recorded pySecDec reference line and can also
+run the same generated-kernel benchmark when the persistent pySecDec package is
+available:
+
+```sh
+.venv/bin/python MRE/MRE_poor_eager_performance.py \
+  --modes eager jit-real jit-complex \
+  --batch-sizes 1000000 \
+  --repeats 1 \
+  --run-pysecdec-kernel-benchmark \
+  --pysecdec-kernel-sectors 53
+```
 
 An auxiliary sweep at `maxeval = 100, 300, 1000, 3000` remained nearly flat at
 about 3.5 s per pySecDec call.  This shows that `integration wall time /

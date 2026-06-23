@@ -8,7 +8,7 @@ only evaluates prepared sector callbacks and U/F callbacks on numeric batches.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import copy
 import cmath
@@ -19,6 +19,7 @@ import hashlib
 from itertools import product
 import json
 import math
+import multiprocessing as mp
 import resource
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
@@ -397,6 +398,7 @@ class TopologyDefinition:
     jit_compile_evaluators: bool = False
     evaluator_compile_mode: str = "jit"
     real_evaluator: bool = True
+    generation_workers: int = 1
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
     ibp_power_goal: int | None = None
@@ -2009,42 +2011,117 @@ class TopologyDefinition:
         if progress is not None:
             progress.start_stage(
                 "Symbolica explicit sector build",
-                detail=f"{len(pending)} sector evaluator(s)",
+                detail=(
+                    f"{len(pending)} sector evaluator(s), "
+                    f"workers={max(int(getattr(self, 'generation_workers', 1)), 1)}"
+                ),
                 total=len(pending),
             )
         start_all = time.perf_counter()
         try:
-            for index, sector in enumerate(pending, start=1):
-                if progress is not None:
-                    progress.update(
-                        index - 1,
-                        total=len(pending),
-                        detail=f"{sector.name} explicit {index}/{len(pending)}",
+            worker_count = min(
+                max(int(getattr(self, "generation_workers", 1)), 1),
+                len(pending),
+            )
+            if worker_count <= 1:
+                for index, sector in enumerate(pending, start=1):
+                    if progress is not None:
+                        progress.update(
+                            index - 1,
+                            total=len(pending),
+                            detail=f"{sector.name} explicit {index}/{len(pending)}",
+                        )
+                    start = time.perf_counter()
+                    formula = build_explicit_sector_formula(
+                        self,
+                        sector,
+                        progress=progress,
+                        progress_index=index,
+                        progress_total=len(pending),
                     )
-                start = time.perf_counter()
-                formula = build_explicit_sector_formula(
-                    self,
-                    sector,
-                    progress=progress,
-                    progress_index=index,
-                    progress_total=len(pending),
-                )
-                elapsed = time.perf_counter() - start
-                self._explicit_sector_formulas[sector.name] = formula
-                self.explicit_sector_formulas_generated += 1
-                self.explicit_sector_formula_build_seconds += elapsed
-                if progress is not None:
-                    progress.update(
-                        index,
-                        total=len(pending),
-                        detail=f"{sector.name} explicit done in {elapsed:.3g}s",
-                    )
+                    elapsed = time.perf_counter() - start
+                    self._explicit_sector_formulas[sector.name] = formula
+                    self.explicit_sector_formulas_generated += 1
+                    self.explicit_sector_formula_build_seconds += elapsed
+                    if progress is not None:
+                        progress.update(
+                            index,
+                            total=len(pending),
+                            detail=f"{sector.name} explicit done in {elapsed:.3g}s",
+                        )
+            else:
+                def build_one(sector: SectorDefinition) -> tuple[SectorDefinition, ExplicitSectorFormulaDefinition, float]:
+                    start = time.perf_counter()
+                    formula = build_explicit_sector_formula(self, sector, progress=None)
+                    return sector, formula, time.perf_counter() - start
+
+                if "fork" in mp.get_all_start_methods():
+                    global _EXPLICIT_GENERATION_TOPOLOGY, _EXPLICIT_GENERATION_SECTORS
+                    _EXPLICIT_GENERATION_TOPOLOGY = self
+                    _EXPLICIT_GENERATION_SECTORS = pending
+                    futures = []
+                    try:
+                        with ProcessPoolExecutor(
+                            max_workers=worker_count,
+                            mp_context=mp.get_context("fork"),
+                        ) as executor:
+                            for index in range(len(pending)):
+                                futures.append(
+                                    executor.submit(
+                                        _build_explicit_sector_formula_process_worker,
+                                        index,
+                                    )
+                                )
+                            for completed, future in enumerate(as_completed(futures), start=1):
+                                payload = future.result()
+                                sector = pending[int(payload["sector_index"])]
+                                formula = _explicit_formula_from_worker_payload(payload)
+                                elapsed = (
+                                    float(formula.expression_build_seconds)
+                                    + float(formula.evaluator_build_seconds)
+                                )
+                                self._explicit_sector_formulas[sector.name] = formula
+                                self.explicit_sector_formulas_generated += 1
+                                if progress is not None:
+                                    progress.update(
+                                        completed,
+                                        total=len(pending),
+                                        detail=(
+                                            f"{sector.name} explicit done in {elapsed:.3g}s "
+                                            f"({completed}/{len(pending)}, proc={worker_count})"
+                                        ),
+                                    )
+                    finally:
+                        _EXPLICIT_GENERATION_TOPOLOGY = None
+                        _EXPLICIT_GENERATION_SECTORS = None
+                else:
+                    futures = []
+                    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                        for sector in pending:
+                            futures.append(executor.submit(build_one, sector))
+                        for completed, future in enumerate(as_completed(futures), start=1):
+                            sector, formula, elapsed = future.result()
+                            self._explicit_sector_formulas[sector.name] = formula
+                            self.explicit_sector_formulas_generated += 1
+                            if progress is not None:
+                                progress.update(
+                                    completed,
+                                    total=len(pending),
+                                    detail=(
+                                        f"{sector.name} explicit done in {elapsed:.3g}s "
+                                        f"({completed}/{len(pending)}, threads={worker_count})"
+                                    ),
+                                )
+                self.explicit_sector_formula_build_seconds += time.perf_counter() - start_all
         finally:
             if progress is not None:
                 progress.finish_stage(
                     "Symbolica explicit sector build",
                     time.perf_counter() - start_all,
-                    detail=f"{len(pending)} sector evaluator(s)",
+                    detail=(
+                        f"{len(pending)} sector evaluator(s), "
+                        f"workers={min(max(int(getattr(self, 'generation_workers', 1)), 1), len(pending))}"
+                    )
                 )
 
     def explicit_sector_formula_for(
@@ -5749,6 +5826,55 @@ class ExplicitSectorFormulaDefinition:
         if timing is not None:
             timing.add_eval(time.perf_counter() - start)
         return [complex(float(value[0]), float(value[1])) for value in values]
+
+
+_EXPLICIT_GENERATION_TOPOLOGY: "TopologyDefinition | None" = None
+_EXPLICIT_GENERATION_SECTORS: list[SectorDefinition] | None = None
+
+
+def _build_explicit_sector_formula_process_worker(index: int) -> dict[str, Any]:
+    """Build one explicit sector formula in a forked worker.
+
+    The parent process reconstructs the dataclass from serialized evaluator
+    bytes, so no live Symbolica evaluator object needs to cross a pickle
+    boundary.
+    """
+    if _EXPLICIT_GENERATION_TOPOLOGY is None or _EXPLICIT_GENERATION_SECTORS is None:
+        raise RuntimeError("explicit generation worker state was not initialized")
+    sector = _EXPLICIT_GENERATION_SECTORS[int(index)]
+    formula = build_explicit_sector_formula(
+        _EXPLICIT_GENERATION_TOPOLOGY,
+        sector,
+        progress=None,
+    )
+    return {
+        "sector_index": int(index),
+        "sector_name": formula.sector_name,
+        "input_names": list(formula.input_names),
+        "laurent_orders": list(formula.laurent_orders),
+        "evaluator_bytes_raw": serialize_evaluator(formula.evaluator),
+        "expression_build_seconds": float(formula.expression_build_seconds),
+        "evaluator_build_seconds": float(formula.evaluator_build_seconds),
+        "expression_bytes": int(formula.expression_bytes),
+        "evaluator_bytes": int(formula.evaluator_bytes),
+        "source_kind": str(formula.source_kind),
+    }
+
+
+def _explicit_formula_from_worker_payload(payload: dict[str, Any]) -> ExplicitSectorFormulaDefinition:
+    """Rebuild an explicit sector formula returned by a forked worker."""
+    raw = bytes(payload["evaluator_bytes_raw"])
+    return ExplicitSectorFormulaDefinition(
+        sector_name=str(payload["sector_name"]),
+        input_names=[str(item) for item in payload["input_names"]],
+        laurent_orders=[int(item) for item in payload["laurent_orders"]],
+        evaluator=deserialize_evaluator(raw),
+        expression_build_seconds=float(payload["expression_build_seconds"]),
+        evaluator_build_seconds=float(payload["evaluator_build_seconds"]),
+        expression_bytes=int(payload["expression_bytes"]),
+        evaluator_bytes=int(payload["evaluator_bytes"]),
+        source_kind=str(payload["source_kind"]),
+    )
 
 
 def _chain_rule_formula_cache_dir() -> Path:

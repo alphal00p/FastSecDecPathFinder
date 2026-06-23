@@ -635,6 +635,27 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
         "argv",
         [
             "FSD.py",
+            "--target-integration-time",
+            "12.5",
+            "--target-abs-error",
+            "1e-6",
+            "--target-rel-error",
+            "3e-4",
+            "--target-rel-accuracy",
+            "0.03",
+        ],
+    )
+    target_request = build_request(parse_args())
+    assert target_request.target_integration_time == pytest.approx(12.5)
+    assert target_request.target_abs_error == pytest.approx(1.0e-6)
+    assert target_request.target_rel_error == pytest.approx(3.0e-4)
+    assert target_request.target_rel_accuracy == pytest.approx(0.03)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "FSD.py",
             "--subtraction-backend",
             "projector-formula",
             "--force-regular-taylor-formulas",
@@ -768,10 +789,26 @@ def test_direct_projector_cache_threshold_cli_option() -> None:
 
 
 def test_explicit_backend_cli_shortcut() -> None:
-    """The comparison backend has a compact CLI alias."""
+    """The explicit backend is the default and has a compact CLI alias."""
+    default_request = build_request(parse_args(["--no-progress"]))
     request = build_request(parse_args(["--explicit", "--no-progress"]))
 
+    assert default_request.sector_evaluator_backend == "explicit"
     assert request.sector_evaluator_backend == "explicit"
+
+
+def test_projector_generation_cli_shortcut() -> None:
+    """The old fast-generation black-box path has an explicit CLI alias."""
+    request = build_request(parse_args(["--projector-generation", "--no-progress"]))
+
+    assert request.sector_evaluator_backend == "projector"
+
+
+def test_parametric_generation_legacy_alias() -> None:
+    """The retired name remains accepted for old local run scripts."""
+    request = build_request(parse_args(["--parametric-generation", "--no-progress"]))
+
+    assert request.sector_evaluator_backend == "projector"
 
 
 def test_ibp_power_goal_cli_and_aliases() -> None:

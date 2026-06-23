@@ -925,6 +925,24 @@ def max_sample_budget(request: IntegralRequest) -> int | None:
     return request.max_iter * request.samples_per_iter
 
 
+def effective_target_rel_accuracy_percent(request: IntegralRequest) -> float | None:
+    """Return the active summed-relative-error target in percent."""
+    if request.target_rel_accuracy is not None:
+        return float(request.target_rel_accuracy)
+    if request.target_rel_error is not None:
+        return 100.0 * float(request.target_rel_error)
+    return None
+
+
+def has_dynamic_stop_target(request: IntegralRequest) -> bool:
+    """Return whether progress should be target-style rather than budget-only."""
+    return (
+        effective_target_rel_accuracy_percent(request) is not None
+        or request.target_abs_error is not None
+        or request.target_integration_time is not None
+    )
+
+
 def format_max_iter(request: IntegralRequest) -> str:
     """Format the iteration budget for the progress bar."""
     return "∞" if request.max_iter < 0 else str(request.max_iter)
@@ -984,7 +1002,7 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
     if request.json or request.no_progress or progressbar is None:
         return None
     sample_budget = max_sample_budget(request)
-    target_mode = request.target_rel_accuracy is not None
+    target_mode = has_dynamic_stop_target(request)
     unbounded_mode = sample_budget is None and not target_mode
     max_value = (
         progressbar.UnknownLength
@@ -1037,8 +1055,8 @@ def live_progress_metrics(
     request: IntegralRequest,
     stats: list[RunningStats],
     target: TargetDefinition | None,
-) -> tuple[float, float | None]:
-    """Compute live summed relative error and max pull for display."""
+) -> tuple[float, float, float | None]:
+    """Compute live summed absolute/relative errors and max pull for display."""
     sector_coeffs = [stat.mean for stat in stats]
     sector_errors = [stat.error for stat in stats]
     raw_coeffs, raw_errors = apply_global_convention(sector_coeffs, sector_errors, request)
@@ -1046,14 +1064,15 @@ def live_progress_metrics(
         request, raw_coeffs, raw_errors, None
     )
     relerr = summed_relative_error_percent(display_coeffs, display_errors)
+    abserr = sum(abs(complex(error)) for error in display_errors)
     if target is None:
-        return relerr, None
+        return relerr, abserr, None
     pulls = [
         pull_value(coeff - ref, err)
         for coeff, err, ref in zip(display_coeffs, display_errors, target.coefficients)
     ]
     numeric_pulls = [pull for pull in pulls if pull is not None]
-    return relerr, max(numeric_pulls) if numeric_pulls else None
+    return relerr, abserr, max(numeric_pulls) if numeric_pulls else None
 
 
 def _epsilon_order_from_label(label: str) -> int:
@@ -1114,6 +1133,7 @@ def estimate_eta_seconds(
     samples_done: int,
     elapsed_seconds: float,
     relerr_percent: float,
+    abserr: float | None = None,
 ) -> float | None:
     """Estimate ETA from target accuracy and finite sample budget candidates."""
     if samples_done <= 0 or elapsed_seconds <= 0.0:
@@ -1121,34 +1141,46 @@ def estimate_eta_seconds(
     sample_rate = samples_done / elapsed_seconds
     if sample_rate <= 0.0:
         return None
-    target = request.target_rel_accuracy
+    target = effective_target_rel_accuracy_percent(request)
     budget = max_sample_budget(request)
     budget_eta = None
     if budget is not None:
         remaining_budget_samples = max(budget - samples_done, 0)
         budget_eta = remaining_budget_samples / sample_rate
-    if target is None:
-        return budget_eta
-    if target <= 0.0:
-        return budget_eta
     target_eta = None
-    if relerr_percent == 0.0:
-        target_eta = 0.0
-    elif math.isfinite(relerr_percent):
-        estimated_target_samples = samples_done * (relerr_percent / target) ** 2
-        remaining = max(estimated_target_samples - samples_done, 0.0)
-        target_eta = remaining / sample_rate
+    if target is not None and target > 0.0:
+        if relerr_percent == 0.0:
+            target_eta = 0.0
+        elif math.isfinite(relerr_percent):
+            estimated_target_samples = samples_done * (relerr_percent / target) ** 2
+            remaining = max(estimated_target_samples - samples_done, 0.0)
+            target_eta = remaining / sample_rate
+    abs_eta = None
+    if (
+        request.target_abs_error is not None
+        and request.target_abs_error > 0.0
+        and abserr is not None
+    ):
+        if abserr == 0.0:
+            abs_eta = 0.0
+        elif math.isfinite(abserr):
+            estimated_abs_samples = samples_done * (abserr / request.target_abs_error) ** 2
+            abs_eta = max(estimated_abs_samples - samples_done, 0.0) / sample_rate
+    time_eta = None
+    if request.target_integration_time is not None:
+        time_eta = max(float(request.target_integration_time) - elapsed_seconds, 0.0)
 
-    candidates = [eta for eta in (target_eta, budget_eta) if eta is not None]
+    candidates = [eta for eta in (target_eta, abs_eta, budget_eta, time_eta) if eta is not None]
     return min(candidates) if candidates else None
 
 
 def format_relerr_with_target(request: IntegralRequest, relerr_percent: float) -> str:
     """Format live relative error and append a target if configured."""
     relerr_text = format_progress_percent(relerr_percent)
-    if request.target_rel_accuracy is None:
+    rel_target = effective_target_rel_accuracy_percent(request)
+    if rel_target is None:
         return relerr_text
-    target_text = format_progress_percent(request.target_rel_accuracy)
+    target_text = format_progress_percent(rel_target)
     return relerr_text + " " + maybe_blue_slash_target(target_text)
 
 
@@ -1166,36 +1198,44 @@ def update_progress_bar(
     elapsed_seconds: float,
     avg_eval_us_per_sample_per_worker: float,
     timing: HotPathTiming,
+    value_override: str | None = None,
 ) -> None:
     """Refresh progress widgets from the current accumulators."""
     if bar is None:
         return
-    relerr, pull = live_progress_metrics(request, stats, target)
-    eta = estimate_eta_seconds(request, stats[0].count, elapsed_seconds, relerr)
+    relerr, abserr, pull = live_progress_metrics(request, stats, target)
+    eta = estimate_eta_seconds(request, stats[0].count, elapsed_seconds, relerr, abserr)
     live_widget = getattr(bar, "fsd_live_widget", None)
     if live_widget is not None:
         live_widget.update_mapping(
             iteration=str(iteration),
             samples=format_sample_count(stats[0].count),
             relerr=format_relerr_with_target(request, relerr),
-            value=live_progress_value(request, stats),
+            value=value_override if value_override is not None else live_progress_value(request, stats),
             pull="N/A" if pull is None else f"{pull:.2f}σ",
             elapsed=format_duration(elapsed_seconds),
             eta=format_eta(eta),
             avg_us=format_progress_scalar(avg_eval_us_per_sample_per_worker),
             profile=profile_text(timing),
         )
-    if request.target_rel_accuracy is None:
+    if not has_dynamic_stop_target(request):
         if max_sample_budget(request) is None:
             progress_value = stats[0].count
         else:
             progress_value = min(stats[0].count, max_sample_budget(request) or stats[0].count)
     else:
-        target_fraction = target_progress_fraction(relerr, request.target_rel_accuracy)
+        rel_target = effective_target_rel_accuracy_percent(request)
+        target_fraction = target_progress_fraction(relerr, rel_target)
+        abs_fraction = target_progress_fraction(abserr, request.target_abs_error)
         sample_fraction = sample_budget_progress_fraction(request, stats[0].count)
+        time_fraction = (
+            min(max(elapsed_seconds / request.target_integration_time, 0.0), 1.0)
+            if request.target_integration_time is not None
+            else None
+        )
         finite_fractions = [
             fraction
-            for fraction in (target_fraction, sample_fraction)
+            for fraction in (target_fraction, abs_fraction, sample_fraction, time_fraction)
             if fraction is not None and math.isfinite(fraction)
         ]
         fraction = max(finite_fractions) if finite_fractions else 0.0
@@ -1212,6 +1252,7 @@ def update_progress_bar_timed(
     elapsed_seconds: float,
     avg_eval_us_per_sample_per_worker: float,
     timing: HotPathTiming,
+    value_override: str | None = None,
 ) -> None:
     """Refresh the progress bar and charge rendering work to PythonT."""
     if bar is None:
@@ -1226,6 +1267,7 @@ def update_progress_bar_timed(
         elapsed_seconds,
         avg_eval_us_per_sample_per_worker,
         timing,
+        value_override=value_override,
     )
     timing.add_python(time.perf_counter() - progress_start)
 
@@ -1235,12 +1277,173 @@ def target_accuracy_reached(
     stats: list[RunningStats],
     target: TargetDefinition | None,
     iteration: int,
+    elapsed_seconds: float | None = None,
 ) -> bool:
-    """Return whether the requested relative target has been reached."""
-    if request.target_rel_accuracy is None or iteration < request.min_iter:
+    """Return whether any requested target stop condition has been reached."""
+    if iteration < request.min_iter:
         return False
-    relerr, _ = live_progress_metrics(request, stats, target)
-    return math.isfinite(relerr) and relerr <= request.target_rel_accuracy
+    relerr, abserr, _pull = live_progress_metrics(request, stats, target)
+    rel_target = effective_target_rel_accuracy_percent(request)
+    if rel_target is not None and math.isfinite(relerr) and relerr <= rel_target:
+        return True
+    if request.target_abs_error is not None and math.isfinite(abserr) and abserr <= request.target_abs_error:
+        return True
+    if (
+        request.target_integration_time is not None
+        and elapsed_seconds is not None
+        and elapsed_seconds >= request.target_integration_time
+    ):
+        return True
+    return False
+
+
+def _nearest_power_of_two(value: int) -> int:
+    """Return the nearest positive power of two."""
+    n = max(int(value), 1)
+    lower = 1 << max(n.bit_length() - 1, 0)
+    upper = lower << 1
+    return lower if n - lower <= upper - n else upper
+
+
+def _target_time_warmup_records(active_sector_count: int, workers: int) -> int:
+    """Choose a small but representative warm-up record count."""
+    return min(max(int(active_sector_count), max(int(workers), 1) * 64, 512), 4096)
+
+
+def _measure_record_throughput(
+    request: IntegralRequest,
+    topology: TopologyDefinition,
+    active_sectors: list[SectorDefinition],
+) -> dict[str, Any]:
+    """Measure f64 integrand record throughput using the configured workers."""
+    if not active_sectors:
+        raise ValueError("no active sectors selected")
+    continuous_dim = active_sectors[0].integration_dim
+    if any(sector.integration_dim != continuous_dim for sector in active_sectors):
+        raise ValueError("target-time warm-up requires a common integration dimension")
+
+    n_records = _target_time_warmup_records(len(active_sectors), request.workers)
+    rng = np.random.default_rng(int(request.seed) + 8_675_309)
+    indices = np.arange(n_records, dtype=int)
+    sector_indices = np.arange(n_records, dtype=int) % len(active_sectors)
+    rng.shuffle(sector_indices)
+    coords = rng.random((n_records, continuous_dim), dtype=float)
+    weights = np.ones(n_records, dtype=float)
+    batches = split_evaluation_batches(
+        indices,
+        sector_indices,
+        coords,
+        weights,
+        request.batch_size,
+        request.workers,
+    )
+    start = time.perf_counter()
+    timing = HotPathTiming()
+    executor: ProcessPoolExecutor | None = None
+    processor: SectorProcessor | None = None
+    try:
+        if request.workers > 1:
+            if "fork" not in mp.get_all_start_methods():
+                raise RuntimeError("target-time warm-up with workers > 1 requires fork")
+            global _PARENT_TOPOLOGY, _PARENT_SECTORS, _PARENT_REQUEST
+            _PARENT_TOPOLOGY = topology
+            _PARENT_SECTORS = active_sectors
+            _PARENT_REQUEST = request
+            executor = ProcessPoolExecutor(
+                max_workers=request.workers,
+                mp_context=mp.get_context("fork"),
+                initializer=_init_worker_from_parent,
+            )
+            futures = [executor.submit(_evaluate_records_worker, batch) for batch in batches]
+            for future in futures:
+                _indices, _weighted, _training, _precision, batch_timing = future.result()
+                timing.absorb(batch_timing)
+        else:
+            processor = _make_sector_processor(topology, request)
+            for batch in batches:
+                _indices, _weighted, _training, _precision, batch_timing = _evaluate_records(
+                    processor,
+                    active_sectors,
+                    batch,
+                )
+                timing.absorb(batch_timing)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        _PARENT_TOPOLOGY = None
+        _PARENT_SECTORS = None
+        _PARENT_REQUEST = None
+    elapsed = max(time.perf_counter() - start, 1.0e-12)
+    return {
+        "warmup_records": int(n_records),
+        "warmup_seconds": float(elapsed),
+        "records_per_second": float(n_records / elapsed),
+        "workers": int(request.workers),
+        "avg_eval_us_per_sample_per_worker": avg_eval_us_per_sample_per_worker(
+            timing,
+            n_records,
+        ),
+        "profile": {
+            "python_fraction": timing.python_overhead_fraction,
+            "evaluator_fraction": timing.evaluator_fraction,
+            "havana_fraction": timing.havana_fraction,
+        },
+    }
+
+
+def autotune_request_for_target_time(
+    request: IntegralRequest,
+    topology: TopologyDefinition,
+    sectors: list[SectorDefinition],
+) -> tuple[IntegralRequest, dict[str, Any] | None]:
+    """Adjust sample statistics from a short same-worker-count warm-up."""
+    if request.target_integration_time is None or request.sampling_mode not in {"havana", "qmc"}:
+        return request, None
+    active_sector_ids = list(request.sectors) if request.sectors is not None else list(range(len(sectors)))
+    active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
+    warmup = _measure_record_throughput(request, topology, active_sectors)
+    target_seconds = float(request.target_integration_time)
+    # Leave a little budget for sampler bookkeeping, progress rendering, and
+    # final reduction.  The elapsed-time stop below remains the hard guard.
+    target_records = max(int(warmup["records_per_second"] * target_seconds * 0.9), 1)
+    iteration_budget = int(request.max_iter) if int(request.max_iter) > 0 else max(int(request.min_iter), 1)
+    tuned_samples = int(request.samples_per_iter)
+    if request.sampling_mode == "qmc":
+        global_support_dims = qmc_global_support_dims(topology, active_sectors)
+        qmc_group_count = sum(
+            len(qmc_support_groups(topology, sector, global_support_dims))
+            for sector in active_sectors
+        )
+        records_per_iteration_unit = max(int(request.qmc_shifts) * max(int(qmc_group_count), 1), 1)
+        raw_lattice_points = max(target_records // max(iteration_budget * records_per_iteration_unit, 1), 1)
+        tuned_samples = (
+            _nearest_power_of_two(raw_lattice_points)
+            if str(request.qmc_lattice_backend) == "qmcpy"
+            else max(raw_lattice_points, 1)
+        )
+        tuning_extra = {
+            "qmc_group_count": int(qmc_group_count),
+            "qmc_shifts": int(request.qmc_shifts),
+        }
+    else:
+        tuned_samples = max(target_records // max(iteration_budget, 1), 1)
+        tuning_extra = {}
+    tuned_request = replace(
+        request,
+        max_iter=iteration_budget,
+        samples_per_iter=max(int(tuned_samples), 1),
+    )
+    diagnostics = {
+        "target_integration_time_s": target_seconds,
+        "original_max_iter": int(request.max_iter),
+        "original_samples_per_iter": int(request.samples_per_iter),
+        "tuned_max_iter": int(tuned_request.max_iter),
+        "tuned_samples_per_iter": int(tuned_request.samples_per_iter),
+        "estimated_target_records": int(target_records),
+        **warmup,
+        **tuning_extra,
+    }
+    return tuned_request, diagnostics
 
 
 def _stats_from_reduced_batches(
@@ -1257,6 +1460,7 @@ def _stats_from_reduced_batches(
     interrupted: bool,
     diagnostics: dict[str, Any],
     aggregate_stats_override: list[RunningStats] | None = None,
+    aggregate_sample_count_override: int | None = None,
 ) -> IntegrationResult:
     """Materialize a democratic integration result from per-sector statistics."""
     coeff_count = topology.coefficient_count
@@ -1285,7 +1489,15 @@ def _stats_from_reduced_batches(
             aggregate_coeffs.append(coeff)
             aggregate_errors.append(complex(math.sqrt(err_re2), math.sqrt(err_im2)))
 
-    total_samples = sum(sector_hits[sector_id] for sector_id in active_sector_ids)
+    evaluated_samples = sum(sector_hits[sector_id] for sector_id in active_sector_ids)
+    total_samples = (
+        int(aggregate_sample_count_override)
+        if aggregate_sample_count_override is not None
+        else evaluated_samples
+    )
+    if aggregate_sample_count_override is not None:
+        diagnostics["raw_samples_evaluated_including_incomplete_qmc_groups"] = int(evaluated_samples)
+        diagnostics["raw_samples_in_reported_aggregate"] = int(total_samples)
     timing_per_sector: list[dict[str, Any]] = []
     for sector_id in active_sector_ids:
         hits = int(sector_hits[sector_id])
@@ -1444,6 +1656,7 @@ def integrate_qmc(
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
     target: TargetDefinition | None,
+    runtime_tuning: dict[str, Any] | None = None,
 ) -> IntegrationResult:
     """Run randomized shifted-lattice QMC with Korobov periodization.
 
@@ -1489,6 +1702,7 @@ def integrate_qmc(
     start_time = time.perf_counter()
     interrupted = False
     raw_samples_done = 0
+    completed_aggregate_raw_samples = 0
     diagnostics: dict[str, Any] = {
         "sampling_mode": "qmc",
         "qmc_lattice_backend": str(request.qmc_lattice_backend),
@@ -1517,6 +1731,8 @@ def integrate_qmc(
             "combined across sectors in quadrature."
         ),
     }
+    if runtime_tuning is not None:
+        diagnostics["target_integration_time_tuning"] = runtime_tuning
 
     progress_request = replace(
         request,
@@ -1568,12 +1784,22 @@ def integrate_qmc(
         return means
 
     def update_qmc_progress(iteration: int) -> None:
+        progress_target = target
+        value_override: str | None = None
         if correlated_qmc and aggregate_shift_stats[0].count > 0:
             live_stats = _qmc_live_stats_from_aggregate(
                 aggregate_shift_stats,
                 raw_samples_done,
             )
         else:
+            # In correlated QMC mode the statistically meaningful pull/error is
+            # only available after a complete shift-by-shift sector sum has
+            # been registered.  Before that, partial sector sums can be very
+            # far from the full target with artificially tiny shift errors, so
+            # the live pull is intentionally suppressed.
+            if correlated_qmc:
+                progress_target = None
+                value_override = "pending aggregate"
             live_stats = _qmc_live_stats(
                 sector_stats,
                 active_sector_ids,
@@ -1586,11 +1812,12 @@ def integrate_qmc(
             bar,
             progress_request,
             live_stats,  # type: ignore[arg-type]
-            target,
+            progress_target,
             iteration,
             elapsed,
             avg_eval_us,
             total_timing,
+            value_override=value_override,
         )
 
     try:
@@ -1686,11 +1913,13 @@ def integrate_qmc(
                 for shift_values in iteration_shift_totals:
                     for coeff_index, stat in enumerate(aggregate_shift_stats):
                         stat.add(shift_values[coeff_index])
+                completed_aggregate_raw_samples = int(raw_samples_done)
                 total_timing.add_python(time.perf_counter() - aggregate_start)
                 live_stats = _qmc_live_stats_from_aggregate(
                     aggregate_shift_stats,
                     raw_samples_done,
                 )
+                update_qmc_progress(iteration)
             else:
                 live_stats = _qmc_live_stats(
                     sector_stats,
@@ -1703,10 +1932,17 @@ def integrate_qmc(
                 live_stats,  # type: ignore[arg-type]
                 target,
                 iteration,
+                time.perf_counter() - start_time,
             ):
                 break
             if (
-                request.target_rel_accuracy is None
+                request.target_integration_time is not None
+                and iteration >= request.min_iter
+                and time.perf_counter() - start_time >= request.target_integration_time
+            ):
+                break
+            if (
+                not has_dynamic_stop_target(request)
                 and request.max_iter >= 0
                 and iteration >= request.min_iter
                 and max(live_stats[topology.training_index].error.real, live_stats[topology.training_index].error.imag)
@@ -1746,8 +1982,9 @@ def integrate_qmc(
         start_time,
         interrupted,
         diagnostics,
-        aggregate_stats_override=aggregate_shift_stats
-        if correlated_qmc and aggregate_shift_stats[0].count > 0
+        aggregate_stats_override=aggregate_shift_stats if correlated_qmc else None,
+        aggregate_sample_count_override=completed_aggregate_raw_samples
+        if correlated_qmc
         else None,
     )
 
@@ -1892,8 +2129,11 @@ def integrate(
     target: TargetDefinition | None,
 ) -> IntegrationResult:
     """Run the adaptive Monte Carlo integration and return raw coefficients."""
+    runtime_tuning: dict[str, Any] | None = None
+    if request.target_integration_time is not None and request.sampling_mode in {"havana", "qmc"}:
+        request, runtime_tuning = autotune_request_for_target_time(request, topology, sectors)
     if request.sampling_mode == "qmc":
-        return integrate_qmc(request, topology, sectors, target)
+        return integrate_qmc(request, topology, sectors, target, runtime_tuning=runtime_tuning)
     if request.sampling_mode == "democratic":
         return integrate_democratic(request, topology, sectors, target)
     if not sectors:
@@ -1942,6 +2182,8 @@ def integrate(
             "cross-checking against pySecDec-style per-order transforms."
         ),
     }
+    if runtime_tuning is not None:
+        diagnostics["target_integration_time_tuning"] = runtime_tuning
 
     processor: SectorProcessor | None = None
     executor: ProcessPoolExecutor | None = None
@@ -2164,7 +2406,13 @@ def integrate(
                     avg_eval_us,
                     hot_timing,
                 )
-                return target_accuracy_reached(request, stats, target, iteration)
+                return target_accuracy_reached(
+                    request,
+                    stats,
+                    target,
+                    iteration,
+                    time.perf_counter() - start_time,
+                )
 
             stop_requested = False
             if executor is None:
@@ -2262,13 +2510,19 @@ def integrate(
             )
 
             if (
-                request.target_rel_accuracy is None
+                not has_dynamic_stop_target(request)
                 and request.max_iter >= 0
                 and iteration >= request.min_iter
                 and max(training_err.real, training_err.imag) < request.min_error
             ):
                 break
-            if target_accuracy_reached(request, stats, target, iteration):
+            if target_accuracy_reached(
+                request,
+                stats,
+                target,
+                iteration,
+                time.perf_counter() - start_time,
+            ):
                 break
 
         return build_result()

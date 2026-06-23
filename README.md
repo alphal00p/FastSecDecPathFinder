@@ -249,9 +249,11 @@ bundles:
   singular sector.
 - `--explicit` is shorthand for `--sector-evaluator-backend explicit`; it
   builds one fully substituted multi-output Symbolica evaluator per sector,
-  closer to the pySecDec generation/runtime trade-off.  This path is intended
-  for generation-speed versus runtime-speed studies, not as the default FSD
-  black-box strategy.
+  closer to the pySecDec generation/runtime trade-off.  It is the default
+  runtime backend for DOT runs.
+- `--projector-generation` selects the fast-generation black-box projector path
+  where U/F are never opened by the sector processor.  This remains the
+  conceptual FSD path, but it is slower per sample than explicit evaluators.
 
 Current 3-loop triple-box status: a full `eps^-6..eps^0` prepared bundle was
 generated under a 30 GiB process-tree memory cap.  The bundle contains 1972
@@ -649,6 +651,26 @@ error estimate extrapolated with `err ~ 1/sqrt(N)`.  If a finite `--max-iter`
 sample budget would be reached first, the ETA and progress bar use that shorter
 completion time instead.
 
+The same stopping quantity can also be specified as a dimensionless ratio, and
+an absolute summed-error target can be requested in the selected prefactor
+convention:
+
+```sh
+.venv/bin/python FSD.py --s -1.0 --m 0 --target-rel-error 3e-4
+.venv/bin/python FSD.py --s -1.0 --m 0 --target-abs-error 1e-8
+```
+
+To request a wall-time budget, use:
+
+```sh
+.venv/bin/python FSD.py --s -1.0 --m 0 --target-integration-time 600
+```
+
+For Havana and QMC, FSD first performs a short same-worker-count warm-up and
+then adjusts the effective sample statistics to get close to the requested
+wall time.  The elapsed-time stop remains active as a guard and the warm-up
+tuning is recorded in `result.json`.
+
 Use an unbounded run:
 
 ```sh
@@ -739,7 +761,8 @@ During integration, `progressbar2` reports compact coloured labels:
 - `pull`: live pull maxed over Laurent coefficients, or `N/A` when no target is available,
 - `t`: total elapsed wall time,
 - `eta`: ETA to the sample budget, or to the target relative accuracy when
-  `--target-rel-accuracy` is enabled,
+  `--target-rel-accuracy`, `--target-rel-error`, `--target-abs-error`, or
+  `--target-integration-time` is enabled,
 - `eval μs/smpl/wkr`: average evaluator time per sample per worker in `μs`;
   `EvalT` is worker-summed, so this is normalized by the total sample count,
 - `prof py|eval|hav`: live profile `(python | evaluator | havana)`, where Havana includes grid
@@ -747,10 +770,14 @@ During integration, `progressbar2` reports compact coloured labels:
   `--sampling-mode qmc`, `hav` is zero because QMCPy sampling is accounted for
   in the Python timing bucket.
 
-When `--target-rel-accuracy` is enabled, the target check is performed after
-each accumulated batch, not only at full iteration boundaries.  The final result
+When target stopping is enabled, Havana performs the target check after each
+accumulated batch, not only at full iteration boundaries.  The final result
 includes all completed batches up to the stopping point, and `--batch-size`
-therefore controls the mid-iteration stopping granularity.
+therefore controls the mid-iteration stopping granularity.  In correlated QMC
+mode, the meaningful aggregate error/pull is available only after a complete
+random-shift sector sum has been registered; live pulls are suppressed until
+that first completed aggregate exists, and keyboard interruption returns the
+last complete aggregate estimate.
 
 The final table reports the selected prefactor convention only.  Values with
 Monte Carlo uncertainty use parenthesis notation with two significant error
