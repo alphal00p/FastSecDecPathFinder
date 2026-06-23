@@ -1199,6 +1199,7 @@ def update_progress_bar(
     avg_eval_us_per_sample_per_worker: float,
     timing: HotPathTiming,
     value_override: str | None = None,
+    relerr_override: str | None = None,
 ) -> None:
     """Refresh progress widgets from the current accumulators."""
     if bar is None:
@@ -1210,7 +1211,7 @@ def update_progress_bar(
         live_widget.update_mapping(
             iteration=str(iteration),
             samples=format_sample_count(stats[0].count),
-            relerr=format_relerr_with_target(request, relerr),
+            relerr=relerr_override if relerr_override is not None else format_relerr_with_target(request, relerr),
             value=value_override if value_override is not None else live_progress_value(request, stats),
             pull="N/A" if pull is None else f"{pull:.2f}σ",
             elapsed=format_duration(elapsed_seconds),
@@ -1253,6 +1254,7 @@ def update_progress_bar_timed(
     avg_eval_us_per_sample_per_worker: float,
     timing: HotPathTiming,
     value_override: str | None = None,
+    relerr_override: str | None = None,
 ) -> None:
     """Refresh the progress bar and charge rendering work to PythonT."""
     if bar is None:
@@ -1268,6 +1270,7 @@ def update_progress_bar_timed(
         avg_eval_us_per_sample_per_worker,
         timing,
         value_override=value_override,
+        relerr_override=relerr_override,
     )
     timing.add_python(time.perf_counter() - progress_start)
 
@@ -1337,10 +1340,11 @@ def _measure_record_throughput(
         request.batch_size,
         request.workers,
     )
-    start = time.perf_counter()
+    setup_start = time.perf_counter()
     timing = HotPathTiming()
     executor: ProcessPoolExecutor | None = None
     processor: SectorProcessor | None = None
+    start = setup_start
     try:
         if request.workers > 1:
             if "fork" not in mp.get_all_start_methods():
@@ -1354,12 +1358,14 @@ def _measure_record_throughput(
                 mp_context=mp.get_context("fork"),
                 initializer=_init_worker_from_parent,
             )
+            start = time.perf_counter()
             futures = [executor.submit(_evaluate_records_worker, batch) for batch in batches]
             for future in futures:
                 _indices, _weighted, _training, _precision, batch_timing = future.result()
                 timing.absorb(batch_timing)
         else:
             processor = _make_sector_processor(topology, request)
+            start = time.perf_counter()
             for batch in batches:
                 _indices, _weighted, _training, _precision, batch_timing = _evaluate_records(
                     processor,
@@ -1373,10 +1379,12 @@ def _measure_record_throughput(
         _PARENT_TOPOLOGY = None
         _PARENT_SECTORS = None
         _PARENT_REQUEST = None
-    elapsed = max(time.perf_counter() - start, 1.0e-12)
+    end = time.perf_counter()
+    elapsed = max(end - start, 1.0e-12)
     return {
         "warmup_records": int(n_records),
         "warmup_seconds": float(elapsed),
+        "warmup_setup_seconds": float(max(start - setup_start, 0.0)),
         "records_per_second": float(n_records / elapsed),
         "workers": int(request.workers),
         "avg_eval_us_per_sample_per_worker": avg_eval_us_per_sample_per_worker(
@@ -1403,9 +1411,7 @@ def autotune_request_for_target_time(
     active_sectors = [sectors[sector_id] for sector_id in active_sector_ids]
     warmup = _measure_record_throughput(request, topology, active_sectors)
     target_seconds = float(request.target_integration_time)
-    # Leave a little budget for sampler bookkeeping, progress rendering, and
-    # final reduction.  The elapsed-time stop below remains the hard guard.
-    target_records = max(int(warmup["records_per_second"] * target_seconds * 0.9), 1)
+    target_records = max(int(warmup["records_per_second"] * target_seconds), 1)
     iteration_budget = int(request.max_iter) if int(request.max_iter) > 0 else max(int(request.min_iter), 1)
     tuned_samples = int(request.samples_per_iter)
     if request.sampling_mode == "qmc":
@@ -1786,6 +1792,7 @@ def integrate_qmc(
     def update_qmc_progress(iteration: int) -> None:
         progress_target = target
         value_override: str | None = None
+        relerr_override: str | None = None
         if correlated_qmc and aggregate_shift_stats[0].count > 0:
             live_stats = _qmc_live_stats_from_aggregate(
                 aggregate_shift_stats,
@@ -1799,7 +1806,8 @@ def integrate_qmc(
             # the live pull is intentionally suppressed.
             if correlated_qmc:
                 progress_target = None
-                value_override = "pending aggregate"
+                value_override = "pending"
+                relerr_override = "pending"
             live_stats = _qmc_live_stats(
                 sector_stats,
                 active_sector_ids,
@@ -1818,6 +1826,7 @@ def integrate_qmc(
             avg_eval_us,
             total_timing,
             value_override=value_override,
+            relerr_override=relerr_override,
         )
 
     try:

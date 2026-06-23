@@ -775,9 +775,10 @@ accumulated batch, not only at full iteration boundaries.  The final result
 includes all completed batches up to the stopping point, and `--batch-size`
 therefore controls the mid-iteration stopping granularity.  In correlated QMC
 mode, the meaningful aggregate error/pull is available only after a complete
-random-shift sector sum has been registered; live pulls are suppressed until
-that first completed aggregate exists, and keyboard interruption returns the
-last complete aggregate estimate.
+random-shift sector sum has been registered; before that first complete
+aggregate, the progress bar shows `pending` for both `err%` and the live value,
+pulls are suppressed, and keyboard interruption returns the last complete
+aggregate estimate.
 
 The final table reports the selected prefactor convention only.  Values with
 Monte Carlo uncertainty use parenthesis notation with two significant error
