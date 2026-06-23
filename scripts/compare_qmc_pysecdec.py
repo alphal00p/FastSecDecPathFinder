@@ -470,6 +470,12 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
     all_n_values = [n for n, _m in direct_nm] + [stop_n for _start_n, stop_n in refinement_pairs]
     max_observed_n = max(all_n_values) if all_n_values else None
     integral_records = _parse_pysecdec_integral_records(verbose_log)
+    record_new_n_values = [
+        int(record["new_n"])
+        for record in integral_records.values()
+        if int(record.get("new_n", 0)) > 0
+    ]
+    effective_record_samples = int(sum(record_new_n_values) * int(args.qmc_shifts))
     return {
         "orders": orders,
         "coefficients": coeffs,
@@ -481,6 +487,13 @@ def _run_pysecdec(args: argparse.Namespace, n_points: int) -> dict[str, Any]:
         "observed_refinement_count": len(refinement_pairs),
         "observed_refinements": refinement_pairs[:20],
         "per_integral_records": integral_records,
+        "per_integral_record_count": len(record_new_n_values),
+        "effective_record_samples": effective_record_samples,
+        "average_record_n_points": (
+            float(sum(record_new_n_values) / len(record_new_n_values))
+            if record_new_n_values
+            else None
+        ),
         "captured_verbose_log": verbose_log if bool(args.keep_pysecdec_verbose_log) else "",
     }
 
@@ -525,6 +538,9 @@ def _make_row(
         "pysecdec_requested_eval_budget": int(pysecdec["requested_maxeval_budget"]),
         "pysecdec_observed_max_n": pysecdec.get("observed_max_n_points"),
         "pysecdec_observed_refinements": int(pysecdec.get("observed_refinement_count", 0)),
+        "pysecdec_integral_records": int(pysecdec.get("per_integral_record_count", 0)),
+        "pysecdec_effective_record_samples": int(pysecdec.get("effective_record_samples", 0)),
+        "pysecdec_average_record_n": pysecdec.get("average_record_n_points"),
         "pysecdec_elapsed_seconds": float(pysecdec["elapsed_seconds"]),
         "pysecdec_coeff": py_coeffs[order_index],
         "pysecdec_error": py_errors[order_index],
@@ -718,6 +734,7 @@ def main() -> int:
         "pySecDec req eval",
         "pySecDec max n",
         "pySecDec refs",
+        "pySecDec eff smpl",
         "pySecDec t [s]",
         f"FSD-pySecDec {order_label}",
         f"pySecDec {order_label} diff",
@@ -736,6 +753,7 @@ def main() -> int:
                 row["pysecdec_requested_eval_budget"],
                 row["pysecdec_observed_max_n"] if row["pysecdec_observed_max_n"] is not None else "n/a",
                 row["pysecdec_observed_refinements"],
+                row["pysecdec_effective_record_samples"] or "n/a",
                 f"{row['pysecdec_elapsed_seconds']:.3f}",
                 _fmt_scientific(row["fsd_minus_pysecdec"]),
                 _fmt_scientific(row["pysecdec_diff"]),

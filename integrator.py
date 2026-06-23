@@ -1310,7 +1310,19 @@ def _nearest_power_of_two(value: int) -> int:
 
 def _target_time_warmup_records(active_sector_count: int, workers: int) -> int:
     """Choose a small but representative warm-up record count."""
-    return min(max(int(active_sector_count), max(int(workers), 1) * 64, 512), 4096)
+    # A handful of points is not representative for generated DOT integrands:
+    # sectors have very different endpoint structure and precision-rescue
+    # probability.  Cover every active sector with enough records to smooth out
+    # rare high-precision samples, while keeping the warm-up bounded so short
+    # target-time runs do not spend all their time calibrating.
+    return min(
+        max(
+            int(active_sector_count) * 64,
+            max(int(workers), 1) * 2048,
+            8192,
+        ),
+        65536,
+    )
 
 
 def _measure_record_throughput(
