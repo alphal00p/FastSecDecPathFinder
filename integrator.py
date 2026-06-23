@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 
 TARGET_PROGRESS_UNITS = 10_000
+TARGET_TIME_WARMUP_DISCOUNT = 0.85
 
 
 @dataclass
@@ -1408,15 +1409,28 @@ def _measure_record_throughput(
         if worker_seconds > 0.0
         else elapsed
     )
+    steady_elapsed_for_tuning = min(elapsed, steady_elapsed)
+    # The warm-up intentionally exercises the real evaluator stack, so its raw
+    # timing remains useful diagnostics.  For choosing the production sample
+    # count, however, that same measurement is still mildly cold: worker
+    # scheduling, cache population and first-use Python paths can bleed into
+    # the hot timing.  Discount only the tuning denominator, not the reported
+    # raw warm-up time, so target-time runs are not systematically undersized.
+    discounted_elapsed_for_tuning = max(
+        steady_elapsed_for_tuning * TARGET_TIME_WARMUP_DISCOUNT,
+        1.0e-12,
+    )
     records_per_second = float(n_records / elapsed)
-    records_per_second_for_tuning = float(n_records / min(elapsed, steady_elapsed))
+    records_per_second_for_tuning = float(n_records / discounted_elapsed_for_tuning)
     return {
         "warmup_records": int(n_records),
         "warmup_seconds": float(elapsed),
         "warmup_setup_seconds": float(max(start - setup_start, 0.0)),
         "records_per_second": records_per_second,
         "records_per_second_for_tuning": records_per_second_for_tuning,
-        "steady_state_warmup_seconds_for_tuning": float(min(elapsed, steady_elapsed)),
+        "steady_state_warmup_seconds_for_tuning": float(steady_elapsed_for_tuning),
+        "discounted_warmup_seconds_for_tuning": float(discounted_elapsed_for_tuning),
+        "warmup_discount_factor_for_tuning": float(TARGET_TIME_WARMUP_DISCOUNT),
         "workers": int(request.workers),
         "avg_eval_us_per_sample_per_worker": avg_eval_us_per_sample_per_worker(
             timing,
@@ -1828,11 +1842,14 @@ def integrate_qmc(
         progress_target = target
         value_override: str | None = None
         relerr_override: str | None = None
-        if correlated_qmc and aggregate_shift_stats[0].count > 0:
+        completed_shift_count = min((stat.count for stat in aggregate_shift_stats), default=0)
+        if correlated_qmc and completed_shift_count > 0:
             live_stats = _qmc_live_stats_from_aggregate(
                 aggregate_shift_stats,
                 completed_aggregate_raw_samples,
             )
+            if completed_shift_count < 2:
+                relerr_override = "pending"
         else:
             # In correlated QMC mode the statistically meaningful pull/error is
             # only available after a complete shift-by-shift sector sum has
