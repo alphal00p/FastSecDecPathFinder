@@ -5838,6 +5838,25 @@ class ExplicitSectorFormulaDefinition:
             timing.add_eval(time.perf_counter() - start)
         return values
 
+    def evaluate_qmc_component_prec(
+        self,
+        row: np.ndarray,
+        precision_digits: int,
+        timing: HotPathTiming | None = None,
+    ) -> list[complex]:
+        """Evaluate support-resolved QMC components at arbitrary precision."""
+        if self.qmc_component_evaluator is None or not self.qmc_component_layout:
+            return self.evaluate_complex_prec(row, precision_digits, timing)
+        coords = [_decimal_complex(value, precision_digits) for value in np.asarray(row, dtype=float)]
+        start = time.perf_counter()
+        values = self.qmc_component_evaluator.evaluate_complex_with_prec(
+            coords,
+            precision_digits,
+        )
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return [complex(float(value[0]), float(value[1])) for value in values]
+
     def evaluate_complex_prec(
         self,
         row: np.ndarray,
@@ -7512,6 +7531,37 @@ def _explicit_finite_sector_outputs(
     return outputs
 
 
+def _explicit_qmc_order_layout(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+) -> tuple[list[int], list[tuple[int, tuple[int, ...]]]]:
+    """Return stable Laurent-order QMC outputs and their natural support.
+
+    The QMC split must not go below complete Laurent coefficients.  Individual
+    projector-source terms can contain endpoint singular factors whose
+    cancellation is only restored after the full coefficient is assembled.
+    We therefore expose complete Laurent coefficients only.  They are kept on
+    the full sector support: pySecDec can generate distinct lower-dimensional
+    boundary kernels, but freezing variables in FSD's already-assembled full
+    coefficient is not pointwise equivalent and creates large spurious weights.
+    """
+    full_axes = tuple(range(int(sector.integration_dim)))
+    endpoint_depth = sum(
+        1
+        for axis in sector.singular_axes
+        if topology.endpoint_power(sector, int(axis)).base < -1.0e-12
+    )
+    min_order = -endpoint_depth if endpoint_depth else 0
+    active_indices: list[int] = []
+    layout: list[tuple[int, tuple[int, ...]]] = []
+    for coeff_index, eps_order in enumerate(topology.laurent_orders):
+        if int(eps_order) < min_order:
+            continue
+        active_indices.append(int(coeff_index))
+        layout.append((int(coeff_index), full_axes))
+    return active_indices, layout
+
+
 def build_explicit_sector_formula(
     topology: TopologyDefinition,
     sector: SectorDefinition,
@@ -7559,26 +7609,24 @@ def build_explicit_sector_formula(
             _replace_many(expr, replacements)
             for expr in assembler_outputs
         ]
-        qmc_outputs = [
-            _replace_many(expr, replacements)
-            for expr in qmc_component_outputs
-        ] if build_qmc_components else []
+        if build_qmc_components:
+            qmc_indices, qmc_component_layout = _explicit_qmc_order_layout(topology, sector)
+            qmc_outputs = [outputs[index] for index in qmc_indices]
+        else:
+            qmc_outputs = []
         if not build_qmc_components:
             qmc_component_layout = []
         qmc_outputs_are_laurent_outputs = False
         source_kind = "fused-source-assembler-explicit"
     else:
         outputs = _explicit_finite_sector_outputs(topology, sector)
-        qmc_outputs = list(outputs) if build_qmc_components else []
-        qmc_component_layout = (
-            [
-                (index, tuple(range(int(sector.integration_dim))))
-                for index in range(len(outputs))
-            ]
-            if build_qmc_components
-            else []
-        )
-        qmc_outputs_are_laurent_outputs = True
+        if build_qmc_components:
+            qmc_indices, qmc_component_layout = _explicit_qmc_order_layout(topology, sector)
+            qmc_outputs = [outputs[index] for index in qmc_indices]
+        else:
+            qmc_outputs = []
+            qmc_component_layout = []
+        qmc_outputs_are_laurent_outputs = False
         source_kind = "direct-explicit-finite"
     expr_seconds = time.perf_counter() - expr_start
 
@@ -9893,27 +9941,126 @@ class SectorProcessor:
             return coeffs, layout
         rows = np.asarray(y_values, dtype=float)
         precision_digits = timing.precision_digits
-        if precision_digits is None:
-            values = formula.evaluate_qmc_component_batch(rows, timing)
-            timing.add_precision_samples(ordinary=int(rows.shape[0]))
-        else:
-            # The support-resolved QMC path is a double-precision variance
-            # optimization.  If a point is routed through the high-precision
-            # rescue machinery, fall back to the summed evaluator so the
-            # stability path remains correct.  The QMC driver currently only
-            # calls this method on ordinary f64 batches.
-            coeffs = np.zeros((rows.shape[0], self.topology.coefficient_count), dtype=np.complex128)
-            for row_index, row in enumerate(rows):
-                coeffs[row_index, :] = self._select_active_laurent_list(
-                    formula.evaluate_complex_prec(row, int(precision_digits), timing),
-                    formula.laurent_orders,
-                    sector.name,
+        component_count = len(formula.qmc_component_layout)
+
+        def evaluate_component_rows(
+            component_rows: np.ndarray,
+            *,
+            precision: int | None,
+            tier: str,
+        ) -> tuple[np.ndarray, HotPathTiming]:
+            component_rows = np.asarray(component_rows, dtype=float)
+            component_timing = HotPathTiming(precision_digits=precision)
+            row_count = int(component_rows.shape[0])
+            if tier == "ordinary":
+                component_timing.add_precision_samples(ordinary=row_count)
+            elif tier == "stability":
+                component_timing.add_precision_samples(stability=row_count)
+            elif tier == "medium_precision":
+                component_timing.add_precision_samples(medium=row_count)
+            elif tier == "high_precision":
+                component_timing.add_precision_samples(high=row_count)
+            else:
+                raise ValueError(f"unknown precision tier {tier!r}")
+            if row_count == 0:
+                return np.zeros((0, component_count), dtype=np.complex128), component_timing
+            if precision is None:
+                values = np.asarray(
+                    formula.evaluate_qmc_component_batch(component_rows, component_timing),
+                    dtype=np.complex128,
                 )
-            layout = [
-                (index, tuple(range(int(sector.integration_dim))))
-                for index in range(self.topology.coefficient_count)
-            ]
-            return coeffs, layout
+            else:
+                values = np.zeros((row_count, component_count), dtype=np.complex128)
+                for row_index, row in enumerate(component_rows):
+                    values[row_index, :] = np.asarray(
+                        formula.evaluate_qmc_component_prec(
+                            row,
+                            int(precision),
+                            component_timing,
+                        ),
+                        dtype=np.complex128,
+                    )
+            finite_mask = np.all(np.isfinite(values), axis=1)
+            bad_count = int(np.count_nonzero(~finite_mask))
+            if bad_count and tier != "high_precision":
+                if self.high_precision_stability_precision <= 0:
+                    raise RuntimeError(
+                        f"{sector.name}: non-finite QMC component output and "
+                        "high-precision rescue is disabled"
+                    )
+                rescue_timing = HotPathTiming(
+                    precision_digits=self.high_precision_stability_precision
+                )
+                rescue_timing.add_precision_samples(high=bad_count)
+                rescued = np.zeros((bad_count, values.shape[1]), dtype=np.complex128)
+                for rescue_index, row in enumerate(component_rows[~finite_mask]):
+                    rescued[rescue_index, :] = np.asarray(
+                        formula.evaluate_qmc_component_prec(
+                            row,
+                            self.high_precision_stability_precision,
+                            rescue_timing,
+                        ),
+                        dtype=np.complex128,
+                    )
+                self._remove_precision_samples(component_timing, tier, bad_count)
+                component_timing.absorb(rescue_timing)
+                values = np.array(values, dtype=np.complex128, copy=True)
+                values[~finite_mask, :] = rescued
+            if not np.all(np.isfinite(values)):
+                raise RuntimeError(
+                    f"{sector.name}: non-finite QMC component output after "
+                    f"{self.high_precision_stability_precision}-digit rescue"
+                )
+            return values, component_timing
+
+        if precision_digits is not None:
+            values, component_timing = evaluate_component_rows(
+                rows,
+                precision=int(precision_digits),
+                tier="high_precision",
+            )
+            timing.absorb(component_timing)
+        elif (
+            sector.singular_axes
+            and self.stability_threshold > 0.0
+            and rows.shape[0] > 0
+        ):
+            singular_coords = rows[:, sector.singular_axes]
+            min_endpoint_distance = np.min(singular_coords, axis=1)
+            high_mask = min_endpoint_distance <= self.high_precision_stability_threshold
+            medium_mask = (
+                (min_endpoint_distance <= self.medium_precision_stability_threshold)
+                & ~high_mask
+            )
+            stable_mask = (
+                (min_endpoint_distance <= self.stability_threshold)
+                & ~medium_mask
+                & ~high_mask
+            )
+            ordinary_mask = ~(high_mask | medium_mask | stable_mask)
+            values = np.zeros((rows.shape[0], component_count), dtype=np.complex128)
+            for mask, precision, tier in (
+                (ordinary_mask, None, "ordinary"),
+                (stable_mask, self.stability_precision, "stability"),
+                (medium_mask, self.medium_precision_stability_precision, "medium_precision"),
+                (high_mask, self.high_precision_stability_precision, "high_precision"),
+            ):
+                if not np.any(mask):
+                    continue
+                chunk_values, component_timing = evaluate_component_rows(
+                    rows[mask],
+                    precision=precision,
+                    tier=tier,
+                )
+                timing.absorb(component_timing)
+                values[mask, :] = chunk_values
+        else:
+            values, component_timing = evaluate_component_rows(
+                rows,
+                precision=None,
+                tier="ordinary",
+            )
+            timing.absorb(component_timing)
         return np.asarray(values, dtype=np.complex128), list(formula.qmc_component_layout)
 
     def _convolve_regular_prefactor_array(

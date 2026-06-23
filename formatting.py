@@ -1266,6 +1266,7 @@ def make_output(
         "eval_seconds": eval_seconds,
         "python_seconds": python_seconds,
         "havana_seconds": havana_seconds,
+        "integrator_seconds": havana_seconds,
         "dual_evaluator_build_seconds": summary.get("symanzik", {}).get(
             "dual_evaluator_build_seconds", 0.0
         ),
@@ -1422,7 +1423,7 @@ def print_result_table(output: JsonDict) -> None:
     )
     eval_percent = 100.0 * output["eval_seconds"] / total_timing
     python_percent = 100.0 * output["python_seconds"] / total_timing
-    havana_percent = 100.0 * output["havana_seconds"] / total_timing
+    integrator_percent = 100.0 * output["havana_seconds"] / total_timing
     print(
         maybe_color("Timing:", Fore.CYAN)
         + " "
@@ -1430,7 +1431,7 @@ def print_result_table(output: JsonDict) -> None:
         + "  "
         + colored_kv("PythonT", format_seconds(output["python_seconds"]), Fore.YELLOW)
         + "  "
-        + colored_kv("HavanaT", format_seconds(output["havana_seconds"]), Fore.BLUE)
+        + colored_kv("IntegratorT", format_seconds(output["havana_seconds"]), Fore.BLUE)
         + "  "
         + colored_kv("TaylorGen", format_seconds(output["dual_evaluator_build_seconds"]), Fore.CYAN)
         + "  "
@@ -1445,7 +1446,7 @@ def print_result_table(output: JsonDict) -> None:
         + " | "
         + maybe_color(f"{eval_percent:.2f}% evaluator", Fore.GREEN)
         + " | "
-        + maybe_color(f"{havana_percent:.2f}% havana", Fore.BLUE)
+        + maybe_color(f"{integrator_percent:.2f}% integrator", Fore.BLUE)
         + "    "
         + maybe_color("Status:", Fore.CYAN)
         + " "

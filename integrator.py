@@ -8,12 +8,16 @@ manually, and trains Havana with a scalar finite-part importance function.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import multiprocessing as mp
+import re
+import signal
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass, replace
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 from colorama import Fore, Style
@@ -29,7 +33,7 @@ from formatting import (
     summed_relative_error_percent,
 )
 from integrand import SectorProcessor, TopologyDefinition
-from qmc_lattice import shifted_lattice_points
+from qmc_lattice import actual_lattice_point_count, shifted_lattice_points
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty
 
@@ -41,6 +45,7 @@ except ImportError:  # pragma: no cover - requirements.txt includes progressbar2
 
 TARGET_PROGRESS_UNITS = 10_000
 TARGET_TIME_WARMUP_DISCOUNT = 0.25
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 @dataclass
@@ -278,9 +283,24 @@ def _terminate_executor_workers(executor: ProcessPoolExecutor) -> None:
             process.terminate()
 
 
+def _ignore_worker_sigint() -> None:
+    """Make forked workers quiet on Ctrl+C.
+
+    The CLI installs a SIGINT handler in the parent so it can reap generation
+    subprocess trees and write partial integration results.  Forked integration
+    workers inherit that handler unless we reset it here.  If a worker raises
+    KeyboardInterrupt while Symbolica is evaluating a batch, multiprocessing
+    prints noisy child-process tracebacks before the parent can return the
+    partial result.  Workers should instead ignore SIGINT and let the parent
+    terminate the pool.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def _init_worker_from_parent() -> None:
     """Attach fork-inherited prepared topology/sector state to a worker."""
     global _WORKER_SECTORS, _WORKER_PROCESSOR
+    _ignore_worker_sigint()
     if _PARENT_TOPOLOGY is None or _PARENT_SECTORS is None or _PARENT_REQUEST is None:
         raise RuntimeError(
             "prepared FSD topology/sectors are unavailable in worker; "
@@ -733,10 +753,10 @@ def qmc_component_support_groups(
 ) -> list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...] | None]]:
     """Return QMC groups, optionally down to explicit source components.
 
-    Fully explicit sectors can expose one evaluator output per endpoint-source
-    component.  Sampling those components in their natural support dimension is
-    closer to pySecDec's generated representation than periodizing the already
-    summed Laurent coefficient in the full sector dimension.
+    Fully explicit sectors can expose a QMC-specific evaluator whose outputs
+    are complete Laurent coefficients.  This gives the scheduler a stable
+    sector/order split without sampling individual projector-source pieces,
+    which are not separately well-conditioned.
     """
     full_axes = tuple(range(int(sector.integration_dim)))
     base_support_mode = _qmc_base_support_mode(support_mode)
@@ -746,7 +766,18 @@ def qmc_component_support_groups(
 
     explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
     formula = explicit_formula_for(sector) if explicit_formula_for is not None else None
-    if base_support_mode == "component" and formula is not None and formula.qmc_component_layout:
+    if base_support_mode in {"component", "order"} and formula is not None and formula.qmc_component_layout:
+        if base_support_mode == "order":
+            return [
+                (
+                    (int(coefficient_index),),
+                    tuple(int(axis) for axis in axes),
+                    (int(component_index),),
+                )
+                for component_index, (coefficient_index, axes) in enumerate(
+                    formula.qmc_component_layout
+                )
+            ]
         by_coefficient: dict[int, dict[str, Any]] = {}
         for component_index, (coefficient_index, axes) in enumerate(formula.qmc_component_layout):
             if int(coefficient_index) < 0 or int(coefficient_index) >= topology.coefficient_count:
@@ -917,8 +948,10 @@ def qmc_batches_for_sector(
     support_axes: tuple[int, ...] | None = None,
     coefficient_indices: tuple[int, ...] | None = None,
     component_indices: tuple[int, ...] | None = None,
+    timing: HotPathTiming | None = None,
 ) -> list[QmcBatch]:
     """Generate Korobov-transformed shifted-lattice chunks for one sector."""
+    sampler_start = time.perf_counter()
     n_points = int(request.samples_per_iter)
     shift_count = int(request.qmc_shifts)
     axes = tuple(range(int(sector.integration_dim))) if support_axes is None else tuple(int(axis) for axis in support_axes)
@@ -963,7 +996,7 @@ def qmc_batches_for_sector(
     if axes:
         coords[:, list(axes)] = support_coords
     shift_indices = np.repeat(np.arange(shift_count, dtype=np.int64), actual_n_points)
-    return [
+    batches = [
         QmcBatch(
             sector_position=int(sector_position),
             sector_id=int(sector_id),
@@ -981,6 +1014,19 @@ def qmc_batches_for_sector(
         )
         for start in range(0, shift_count * actual_n_points, step)
     ]
+    if timing is not None:
+        timing.add_integrator(time.perf_counter() - sampler_start)
+    return batches
+
+
+def qmc_actual_points_per_shift(request: IntegralRequest, support_dim: int) -> int:
+    """Concrete QMC points per shift for one support group."""
+    if int(support_dim) <= 0:
+        return 1
+    return actual_lattice_point_count(
+        backend=str(request.qmc_lattice_backend),
+        n_points=int(request.samples_per_iter),
+    )
 
 
 def format_progress_scalar(value: float | None) -> str:
@@ -1061,7 +1107,6 @@ def has_dynamic_stop_target(request: IntegralRequest) -> bool:
     return (
         effective_target_rel_accuracy_percent(request) is not None
         or request.target_abs_error is not None
-        or request.target_integration_time is not None
     )
 
 
@@ -1100,12 +1145,89 @@ def progress_color(text: str, color: str) -> str:
     return f"{color}{text}{Style.RESET_ALL}"
 
 
+def _visible_progress_len(text: str) -> int:
+    """Return display length after stripping ANSI color escapes."""
+    return len(ANSI_ESCAPE_RE.sub("", str(text)))
+
+
+def _truncate_progress_ansi(text: str, width: int) -> str:
+    """Truncate a possibly colored string to a fixed visible width."""
+    raw = str(text)
+    if _visible_progress_len(raw) <= width:
+        return raw
+    if width <= 0:
+        return ""
+    keep = max(width - 1, 0)
+    out: list[str] = []
+    visible = 0
+    pos = 0
+    for match in ANSI_ESCAPE_RE.finditer(raw):
+        if match.start() > pos:
+            for char in raw[pos : match.start()]:
+                if visible >= keep:
+                    break
+                out.append(char)
+                visible += 1
+        if visible >= keep:
+            break
+        out.append(match.group(0))
+        pos = match.end()
+    if visible < keep and pos < len(raw):
+        for char in raw[pos:]:
+            if visible >= keep:
+                break
+            out.append(char)
+            visible += 1
+    out.append("…")
+    if "\x1b[" in raw:
+        out.append(Style.RESET_ALL)
+    return "".join(out)
+
+
+def _fit_progress_field(text: str, width: int, *, align: str = ">") -> str:
+    """Pad/truncate progress values to stable visible widths."""
+    fitted = _truncate_progress_ansi(str(text), int(width))
+    padding = max(int(width) - _visible_progress_len(fitted), 0)
+    if align == "<":
+        return fitted + " " * padding
+    return " " * padding + fitted
+
+
+def _progress_widths(request: IntegralRequest) -> dict[str, int]:
+    """Field widths used by the live progress bar to avoid jitter."""
+    max_iter_width = max(2, len(format_max_iter(request)))
+    return {
+        "iteration": max_iter_width,
+        "max_iter": max_iter_width,
+        "samples": 7,
+        "target_samples": 7,
+        "qmc_step": 15,
+        "qmc_all": 9,
+        "qmc_lattice": 9,
+        "qmc_sectors": 7,
+        "qmc_next": 8,
+        "relerr": 13,
+        "value": 15,
+        "pull": 9,
+        "elapsed": 8,
+        "eta": 8,
+        "avg_us": 7,
+        "profile": 18,
+        "leaders": 24,
+    }
+
+
+def format_qmc_lattice(points_per_shift: int, shifts: int) -> str:
+    """Render the current QMC lattice shape compactly."""
+    return f"{format_sample_count(int(points_per_shift))}x{int(shifts)}"
+
+
 def profile_text(timing: HotPathTiming) -> str:
-    """Render the live profile tuple ``(python | evaluator | havana)``."""
+    """Render the live profile tuple ``(python | evaluator | integrator)``."""
     return (
-        f"({100.0 * timing.python_overhead_fraction:.2f}% | "
-        f"{100.0 * timing.evaluator_fraction:.2f}% | "
-        f"{100.0 * timing.havana_fraction:.2f}%)"
+        f"({100.0 * timing.python_overhead_fraction:04.1f}|"
+        f"{100.0 * timing.evaluator_fraction:04.1f}|"
+        f"{100.0 * timing.integrator_fraction:04.1f})%"
     )
 
 
@@ -1125,7 +1247,11 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
         return None
     sample_budget = max_sample_budget(request)
     target_mode = has_dynamic_stop_target(request)
-    unbounded_mode = sample_budget is None and not target_mode
+    qmc_adaptive_mode = (
+        request.sampling_mode == "qmc"
+        and getattr(request, "qmc_refine_sectors", "adaptive") == "adaptive"
+    )
+    unbounded_mode = (sample_budget is None and not target_mode) or qmc_adaptive_mode
     max_value = (
         progressbar.UnknownLength
         if unbounded_mode
@@ -1133,6 +1259,53 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
         if target_mode
         else sample_budget
     )
+    widths = _progress_widths(request)
+    if request.sampling_mode == "qmc":
+        live_widget = progressbar.FormatCustomText(
+            (
+                f"{progress_color('it', Fore.CYAN)}:%(iteration)s/%(max_iter)s "
+                f"{progress_color('step', Fore.CYAN)}:%(qmc_step)s "
+                f"{progress_color('all', Fore.CYAN)}:%(qmc_all)s "
+                f"{progress_color('lat', Fore.MAGENTA)}:%(qmc_lattice)s "
+                f"{progress_color('sec', Fore.MAGENTA)}:%(qmc_sectors)s "
+                f"{progress_color('next', Fore.BLUE)}:%(qmc_next)s "
+                f"{progress_color('err%%', Fore.GREEN)}:%(relerr)s "
+                f"{progress_color('val', Fore.MAGENTA)}[{request.progress_value_order}]:%(value)s "
+                f"{progress_color('pull', Fore.YELLOW)}:%(pull)s "
+                f"{progress_color('t', Fore.BLUE)}:%(elapsed)s "
+                f"{progress_color('evalμs', Fore.MAGENTA)}:%(avg_us)s "
+                f"{progress_color('lead', Fore.YELLOW)}:%(leaders)s"
+            ),
+            {
+                "iteration": _fit_progress_field("0", widths["iteration"]),
+                "max_iter": _fit_progress_field(format_max_iter(request), widths["max_iter"]),
+                "qmc_step": _fit_progress_field("n/a", widths["qmc_step"]),
+                "qmc_all": _fit_progress_field("0", widths["qmc_all"]),
+                "qmc_lattice": _fit_progress_field("n/a", widths["qmc_lattice"]),
+                "qmc_sectors": _fit_progress_field("n/a", widths["qmc_sectors"]),
+                "qmc_next": _fit_progress_field("n/a", widths["qmc_next"]),
+                "relerr": _fit_progress_field("n/a", widths["relerr"]),
+                "value": _fit_progress_field("n/a", widths["value"]),
+                "pull": _fit_progress_field("n/a", widths["pull"]),
+                "elapsed": _fit_progress_field("00:00:00", widths["elapsed"]),
+                "avg_us": _fit_progress_field("n/a", widths["avg_us"]),
+                "leaders": _fit_progress_field("n/a", widths["leaders"], align="<"),
+            },
+        )
+        widgets = [
+            progress_color(f"qmc {request.integral} ", Fore.CYAN),
+            progressbar.AnimatedMarker() if unbounded_mode else progressbar.Percentage(),
+            " ",
+            "" if unbounded_mode else progressbar.Bar(),
+            "" if unbounded_mode else " ",
+            live_widget,
+            " ",
+        ]
+        bar = progressbar.ProgressBar(max_value=max_value, widgets=widgets)
+        bar.fsd_live_widget = live_widget
+        bar.fsd_progress_widths = widths
+        return bar
+
     live_widget = progressbar.FormatCustomText(
         (
             f"{progress_color('it', Fore.CYAN)}:%(iteration)s/%(max_iter)s "
@@ -1142,21 +1315,23 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
             f"{progress_color('pull', Fore.YELLOW)}: %(pull)s "
             f"{progress_color('t', Fore.BLUE)}:%(elapsed)s "
             f"{progress_color('eta', Fore.BLUE)}:%(eta)s "
-            f"{progress_color('eval μs/smpl/wkr', Fore.MAGENTA)}:%(avg_us)s "
-            f"{progress_color('prof py|eval|hav', Fore.CYAN)}:%(profile)s"
+            f"{progress_color('evalμs', Fore.MAGENTA)}:%(avg_us)s "
+            f"{progress_color('prof', Fore.CYAN)}:%(profile)s "
+            f"{progress_color('lead', Fore.YELLOW)}:%(leaders)s"
         ),
         {
-            "iteration": "0",
-            "max_iter": format_max_iter(request),
-            "samples": "0",
-            "target_samples": format_sample_target(request),
-            "relerr": "n/a",
-            "value": "n/a",
-            "pull": "n/a",
-            "elapsed": "00:00:00",
-            "eta": "n/a",
-            "avg_us": "n/a",
-            "profile": "n/a",
+            "iteration": _fit_progress_field("0", widths["iteration"]),
+            "max_iter": _fit_progress_field(format_max_iter(request), widths["max_iter"]),
+            "samples": _fit_progress_field("0", widths["samples"]),
+            "target_samples": _fit_progress_field(format_sample_target(request), widths["target_samples"]),
+            "relerr": _fit_progress_field("n/a", widths["relerr"]),
+            "value": _fit_progress_field("n/a", widths["value"]),
+            "pull": _fit_progress_field("n/a", widths["pull"]),
+            "elapsed": _fit_progress_field("00:00:00", widths["elapsed"]),
+            "eta": _fit_progress_field("n/a", widths["eta"]),
+            "avg_us": _fit_progress_field("n/a", widths["avg_us"]),
+            "profile": _fit_progress_field("n/a", widths["profile"]),
+            "leaders": _fit_progress_field("n/a", widths["leaders"], align="<"),
         },
     )
     widgets = [
@@ -1170,6 +1345,7 @@ def make_progress_bar(request: IntegralRequest) -> Any | None:
     ]
     bar = progressbar.ProgressBar(max_value=max_value, widgets=widgets)
     bar.fsd_live_widget = live_widget
+    bar.fsd_progress_widths = widths
     return bar
 
 
@@ -1322,6 +1498,8 @@ def update_progress_bar(
     timing: HotPathTiming,
     value_override: str | None = None,
     relerr_override: str | None = None,
+    leaders_override: str | None = None,
+    qmc_context: dict[str, Any] | None = None,
 ) -> None:
     """Refresh progress widgets from the current accumulators."""
     if bar is None:
@@ -1330,17 +1508,73 @@ def update_progress_bar(
     eta = estimate_eta_seconds(request, stats[0].count, elapsed_seconds, relerr, abserr)
     live_widget = getattr(bar, "fsd_live_widget", None)
     if live_widget is not None:
-        live_widget.update_mapping(
-            iteration=str(iteration),
-            samples=format_sample_count(stats[0].count),
-            relerr=relerr_override if relerr_override is not None else format_relerr_with_target(request, relerr),
-            value=value_override if value_override is not None else live_progress_value(request, stats),
-            pull="N/A" if pull is None else f"{pull:.2f}σ",
-            elapsed=format_duration(elapsed_seconds),
-            eta=format_eta(eta),
-            avg_us=format_progress_scalar(avg_eval_us_per_sample_per_worker),
-            profile=profile_text(timing),
+        widths = getattr(bar, "fsd_progress_widths", _progress_widths(request))
+        relerr_text = (
+            relerr_override
+            if relerr_override is not None
+            else format_relerr_with_target(request, relerr)
         )
+        value_text = (
+            value_override if value_override is not None else live_progress_value(request, stats)
+        )
+        pull_text = "N/A" if pull is None else f"{pull:.2f}σ"
+        mapping = dict(
+            iteration=_fit_progress_field(str(iteration), widths["iteration"]),
+            samples=_fit_progress_field(format_sample_count(stats[0].count), widths["samples"]),
+            relerr=_fit_progress_field(relerr_text, widths["relerr"]),
+            value=_fit_progress_field(value_text, widths["value"]),
+            pull=_fit_progress_field(pull_text, widths["pull"]),
+            elapsed=_fit_progress_field(format_duration(elapsed_seconds), widths["elapsed"]),
+            eta=_fit_progress_field(format_eta(eta), widths["eta"]),
+            avg_us=_fit_progress_field(
+                format_progress_scalar(avg_eval_us_per_sample_per_worker),
+                widths["avg_us"],
+            ),
+            profile=_fit_progress_field(profile_text(timing), widths["profile"]),
+            leaders=_fit_progress_field(
+                leaders_override if leaders_override is not None else "n/a",
+                widths["leaders"],
+                align="<",
+            ),
+        )
+        if request.sampling_mode == "qmc":
+            context = qmc_context or {}
+            step_done = int(context.get("step_samples_done", 0))
+            step_target = int(context.get("step_sample_target", 0))
+            all_text = format_sample_count(stats[0].count)
+            if request.qmc_refine_sectors == "democratic":
+                target_text = format_sample_target(request)
+                all_text = f"{all_text}/{target_text}"
+            step_text = (
+                f"{format_sample_count(step_done)}/{format_sample_count(step_target)}"
+                if step_target > 0
+                else "n/a"
+            )
+            lattice_text = (
+                format_qmc_lattice(
+                    int(context.get("lattice_points_per_shift", request.samples_per_iter)),
+                    int(context.get("shifts", request.qmc_shifts)),
+                )
+                if context
+                else "n/a"
+            )
+            sectors_text = (
+                f"{int(context.get('scheduled_sector_count', 0))}/"
+                f"{int(context.get('active_sector_count', 0))}"
+                if context
+                else "n/a"
+            )
+            mapping.update(
+                qmc_step=_fit_progress_field(step_text, widths["qmc_step"]),
+                qmc_all=_fit_progress_field(all_text, widths["qmc_all"]),
+                qmc_lattice=_fit_progress_field(lattice_text, widths["qmc_lattice"]),
+                qmc_sectors=_fit_progress_field(sectors_text, widths["qmc_sectors"]),
+                qmc_next=_fit_progress_field(
+                    format_eta(context.get("step_eta_seconds")) if context else "n/a",
+                    widths["qmc_next"],
+                ),
+            )
+        live_widget.update_mapping(**mapping)
     if not has_dynamic_stop_target(request):
         if max_sample_budget(request) is None:
             progress_value = stats[0].count
@@ -1377,6 +1611,8 @@ def update_progress_bar_timed(
     timing: HotPathTiming,
     value_override: str | None = None,
     relerr_override: str | None = None,
+    leaders_override: str | None = None,
+    qmc_context: dict[str, Any] | None = None,
 ) -> None:
     """Refresh the progress bar and charge rendering work to PythonT."""
     if bar is None:
@@ -1393,6 +1629,8 @@ def update_progress_bar_timed(
         timing,
         value_override=value_override,
         relerr_override=relerr_override,
+        leaders_override=leaders_override,
+        qmc_context=qmc_context,
     )
     timing.add_python(time.perf_counter() - progress_start)
 
@@ -1605,8 +1843,17 @@ def autotune_request_for_target_time(
             )
             for sector in active_sectors
         )
+        if request.qmc_refine_sectors == "adaptive" and iteration_budget > 1:
+            adaptive_fraction = 0.25
+            effective_group_iterations = 1.0 + adaptive_fraction * float(iteration_budget - 1)
+        else:
+            adaptive_fraction = 1.0
+            effective_group_iterations = float(iteration_budget)
         records_per_iteration_unit = max(int(request.qmc_shifts) * max(int(qmc_group_count), 1), 1)
-        raw_lattice_points = max(target_records // max(iteration_budget * records_per_iteration_unit, 1), 1)
+        raw_lattice_points = max(
+            int(target_records // max(int(records_per_iteration_unit * effective_group_iterations), 1)),
+            1,
+        )
         tuned_samples = (
             _nearest_power_of_two(raw_lattice_points)
             if str(request.qmc_lattice_backend) == "qmcpy"
@@ -1615,6 +1862,9 @@ def autotune_request_for_target_time(
         tuning_extra = {
             "qmc_group_count": int(qmc_group_count),
             "qmc_shifts": int(request.qmc_shifts),
+            "qmc_refine_sectors": str(request.qmc_refine_sectors),
+            "qmc_adaptive_target_time_group_fraction": float(adaptive_fraction),
+            "qmc_effective_group_iterations": float(effective_group_iterations),
         }
     else:
         tuned_samples = max(target_records // max(iteration_budget, 1), 1)
@@ -1754,6 +2004,9 @@ def _stats_from_reduced_batches(
                             topology, sectors[sector_index]
                         )
                     ],
+                    "qmc_shift_estimate_counts_by_order": [
+                        int(stat.count) for stat in coeff_stats
+                    ],
                     "avg_eval_us_per_sample": avg_eval_us_per_sample_per_worker(
                         sector_timing[sector_index],
                         sector_hits[sector_index],
@@ -1843,12 +2096,267 @@ def _qmc_live_stats_from_aggregate(
     ]
 
 
+def _complex_from_json_value(value: Any) -> complex:
+    """Decode complex numbers from the persistent result JSON encoding."""
+    if isinstance(value, dict) and "re" in value and "im" in value:
+        return complex(float(value["re"]), float(value["im"]))
+    if isinstance(value, (int, float)):
+        return complex(float(value), 0.0)
+    if isinstance(value, str):
+        return complex(value)
+    raise ValueError(f"cannot decode complex value {value!r}")
+
+
+def _restore_running_stat(count: int, mean: complex, error: complex) -> RunningStats:
+    """Reconstruct a ``RunningStats`` object from mean/error/count metadata."""
+    stat = RunningStats()
+    n = int(count)
+    if n <= 0:
+        return stat
+    z = complex(mean)
+    e = complex(error)
+    stat.count = n
+    stat.sum_re = z.real * n
+    stat.sum_im = z.imag * n
+    stat.mean_re_acc = z.real
+    stat.mean_im_acc = z.imag
+    if n >= 2:
+        stat.m2_re = max(e.real * e.real * n * (n - 1), 0.0)
+        stat.m2_im = max(e.imag * e.imag * n * (n - 1), 0.0)
+    stat.sumsq_re = stat.m2_re + n * z.real * z.real
+    stat.sumsq_im = stat.m2_im + n * z.imag * z.imag
+    return stat
+
+
+def _try_load_qmc_resume_state(
+    request: IntegralRequest,
+    sectors: list[SectorDefinition],
+    coefficient_count: int,
+) -> dict[str, Any] | None:
+    """Load resumable QMC sector accumulators from ``result.json`` if present.
+
+    The resume path is deliberately strict: it only accepts result files written
+    by a version that records QMC shift-estimate counts per sector/order.  Older
+    files are ignored because raw sample counts alone are not enough to combine
+    randomized-QMC error estimates coherently.
+    """
+    if (
+        request.restart
+        or request.sampling_mode != "qmc"
+        or request.qmc_refine_sectors != "adaptive"
+    ):
+        return None
+    path = Path(request.result_path).expanduser()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if str(data.get("integral", "")) != str(request.integral):
+        return None
+    if str(data.get("prefactor_convention", "")) != str(request.prefactor_convention):
+        return None
+    stored_request = data.get("request", {})
+    if isinstance(stored_request, dict):
+        if int(stored_request.get("max_eps_order", request.max_eps_order)) != int(request.max_eps_order):
+            return None
+        if str(stored_request.get("qmc_refine_sectors", "adaptive")) != "adaptive":
+            return None
+    diagnostics = data.get("integration_diagnostics", {})
+    if not isinstance(diagnostics, dict) or diagnostics.get("sampling_mode") != "qmc":
+        return None
+    rows = data.get("sector_results", [])
+    if not isinstance(rows, list):
+        return None
+
+    sector_stats = [
+        [RunningStats() for _ in range(coefficient_count)]
+        for _sector in sectors
+    ]
+    sector_hits = [0 for _sector in sectors]
+    sector_precision_counts = [
+        {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
+        for _sector in sectors
+    ]
+    sector_max_abs = [
+        np.zeros(coefficient_count, dtype=float)
+        for _sector in sectors
+    ]
+    restored = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sector_id = int(row.get("sector_id", -1))
+        if sector_id < 0 or sector_id >= len(sectors):
+            continue
+        raw_sector = row.get("raw_sector", {})
+        if not isinstance(raw_sector, dict):
+            continue
+        coeffs = raw_sector.get("coefficients", [])
+        errors = raw_sector.get("errors", [])
+        diag = row.get("diagnostics", {})
+        if not isinstance(diag, dict):
+            continue
+        stat_counts = diag.get("qmc_shift_estimate_counts_by_order")
+        if not isinstance(stat_counts, list) or len(stat_counts) < coefficient_count:
+            return None
+        if len(coeffs) < coefficient_count or len(errors) < coefficient_count:
+            continue
+        for coeff_index in range(coefficient_count):
+            sector_stats[sector_id][coeff_index] = _restore_running_stat(
+                int(stat_counts[coeff_index]),
+                _complex_from_json_value(coeffs[coeff_index]),
+                _complex_from_json_value(errors[coeff_index]),
+            )
+        sector_hits[sector_id] = int(row.get("samples", 0))
+        precision = row.get("precision_stats", {})
+        if isinstance(precision, dict):
+            for key in sector_precision_counts[sector_id]:
+                block = precision.get(key, {})
+                if isinstance(block, dict):
+                    sector_precision_counts[sector_id][key] = int(block.get("samples", 0))
+        max_abs = diag.get("max_abs_by_order", [])
+        if isinstance(max_abs, list) and max_abs:
+            for index, value in enumerate(max_abs[:coefficient_count]):
+                sector_max_abs[sector_id][index] = float(value)
+        restored += 1
+    if restored == 0:
+        return None
+    return {
+        "path": str(path),
+        "sector_stats": sector_stats,
+        "sector_hits": sector_hits,
+        "sector_precision_counts": sector_precision_counts,
+        "sector_max_abs": sector_max_abs,
+        "raw_samples_done": int(sum(sector_hits)),
+        "restored_sector_count": int(restored),
+    }
+
+
+def _qmc_sector_error_contributions(
+    sector_stats: list[list[RunningStats]],
+    active_sector_ids: list[int],
+    coefficient_count: int,
+) -> list[tuple[int, float]]:
+    """Return summed coefficient-error contribution per active sector."""
+    contributions: list[tuple[int, float]] = []
+    for sector_id in active_sector_ids:
+        value = 0.0
+        missing = False
+        for coeff_index in range(coefficient_count):
+            stat = sector_stats[sector_id][coeff_index]
+            if stat.count < 2:
+                missing = True
+                break
+            err = stat.error
+            component = abs(complex(err))
+            if not math.isfinite(component):
+                missing = True
+                break
+            value += component
+        contributions.append((sector_id, float("inf") if missing else value))
+    return contributions
+
+
+def _qmc_select_iteration_sector_ids(
+    request: IntegralRequest,
+    iteration: int,
+    active_sector_ids: list[int],
+    sector_stats: list[list[RunningStats]],
+    coefficient_count: int,
+) -> list[int]:
+    """Choose the sector ids scheduled in this QMC iteration."""
+    if request.qmc_refine_sectors == "democratic" or iteration <= 1:
+        return list(active_sector_ids)
+    contributions = _qmc_sector_error_contributions(
+        sector_stats,
+        active_sector_ids,
+        coefficient_count,
+    )
+    if any(not math.isfinite(value) for _sector_id, value in contributions):
+        return list(active_sector_ids)
+    total = sum(value for _sector_id, value in contributions)
+    if total <= 0.0:
+        return list(active_sector_ids)
+    ranked = sorted(contributions, key=lambda item: item[1], reverse=True)
+    min_count = max(1, math.ceil(0.05 * len(active_sector_ids)))
+    selected: list[int] = []
+    cumulative = 0.0
+    for sector_id, value in ranked:
+        selected.append(sector_id)
+        cumulative += value
+        if len(selected) >= min_count and cumulative >= 0.80 * total:
+            break
+    return sorted(selected, key=active_sector_ids.index)
+
+
+def _qmc_iteration_request(request: IntegralRequest, iteration: int) -> IntegralRequest:
+    """Return the QMC lattice size used for one iteration.
+
+    Adaptive sector refinement starts with a modest lattice to get usable error
+    estimates quickly, then ramps to the requested production lattice.  Explicit
+    small user choices are respected because the cap is the configured value.
+    """
+    requested_points = int(request.samples_per_iter)
+    if int(getattr(request, "qmc_max_samples_per_iter", 0)) > 0:
+        requested_points = min(requested_points, int(request.qmc_max_samples_per_iter))
+    requested_shifts = int(request.qmc_shifts)
+    if request.qmc_refine_sectors != "adaptive":
+        if requested_points != int(request.samples_per_iter):
+            return replace(request, samples_per_iter=int(requested_points))
+        return request
+    initial_points = min(requested_points, max(int(request.qmc_initial_samples_per_iter), 1))
+    initial_shifts = min(requested_shifts, max(int(request.qmc_initial_shifts), 2))
+    points = min(requested_points, max(initial_points * (2 ** max(iteration - 1, 0)), 1))
+    shifts = min(int(request.qmc_shifts), max(initial_shifts * (2 ** max(iteration - 1, 0)), 2))
+    if str(request.qmc_lattice_backend) == "qmcpy":
+        points = max(1, 1 << max(points.bit_length() - 1, 0))
+    return replace(request, samples_per_iter=int(points), qmc_shifts=int(shifts))
+
+
+def _qmc_leader_text(
+    sectors: list[SectorDefinition],
+    sector_stats: list[list[RunningStats]],
+    active_sector_ids: list[int],
+    coefficient_count: int,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Return fixed-width leading-sector progress text and JSON diagnostics."""
+    contributions = _qmc_sector_error_contributions(
+        sector_stats,
+        active_sector_ids,
+        coefficient_count,
+    )
+    finite = [(sector_id, value) for sector_id, value in contributions if math.isfinite(value)]
+    if not finite:
+        return "pending", []
+    total = sum(value for _sector_id, value in finite)
+    if total <= 0.0:
+        return "flat", []
+    ranked = sorted(finite, key=lambda item: item[1], reverse=True)[:2]
+    records: list[dict[str, Any]] = []
+    pieces: list[str] = []
+    for sector_id, value in ranked:
+        pct = 100.0 * value / total
+        name = sectors[sector_id].name
+        records.append(
+            {
+                "sector_id": int(sector_id),
+                "name": name,
+                "error_contribution_fraction": float(value / total),
+            }
+        )
+        pieces.append(f"{name}:{Fore.BLUE}{pct:04.1f}%{Style.RESET_ALL}")
+    return " ".join(pieces), records
+
+
 def integrate_qmc(
     request: IntegralRequest,
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
     target: TargetDefinition | None,
     runtime_tuning: dict[str, Any] | None = None,
+    iteration_callback: Callable[[IntegrationResult], None] | None = None,
 ) -> IntegrationResult:
     """Run randomized shifted-lattice QMC with Korobov periodization.
 
@@ -1867,21 +2375,41 @@ def integrate_qmc(
     if any(sector.integration_dim != continuous_dim for sector in active_sectors):
         raise ValueError("all sectors must have the same integration dimension for QMC mode")
 
-    sector_stats = [
-        [RunningStats() for _ in range(topology.coefficient_count)]
-        for _sector in sectors
-    ]
-    sector_hits = [0 for _sector in sectors]
-    sector_precision_counts = [
-        {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
-        for _sector in sectors
-    ]
+    resume_state = _try_load_qmc_resume_state(
+        request,
+        sectors,
+        topology.coefficient_count,
+    )
+    if resume_state is None:
+        sector_stats = [
+            [RunningStats() for _ in range(topology.coefficient_count)]
+            for _sector in sectors
+        ]
+        sector_hits = [0 for _sector in sectors]
+        sector_precision_counts = [
+            {"ordinary": 0, "stability": 0, "medium_precision": 0, "high_precision": 0}
+            for _sector in sectors
+        ]
+        sector_max_abs = [
+            np.zeros(topology.coefficient_count, dtype=float)
+            for _sector in sectors
+        ]
+        raw_samples_done = 0
+    else:
+        sector_stats = resume_state["sector_stats"]
+        sector_hits = resume_state["sector_hits"]
+        sector_precision_counts = resume_state["sector_precision_counts"]
+        sector_max_abs = resume_state["sector_max_abs"]
+        raw_samples_done = int(resume_state["raw_samples_done"])
     sector_timing = [HotPathTiming() for _sector in sectors]
-    sector_max_abs = [
-        np.zeros(topology.coefficient_count, dtype=float)
-        for _sector in sectors
-    ]
-    correlated_qmc = bool(request.qmc_correlate_sectors)
+    correlated_qmc = (
+        bool(request.qmc_correlate_sectors)
+        and request.qmc_refine_sectors == "democratic"
+    )
+    active_position_by_sector_id = {
+        int(sector_id): int(position)
+        for position, sector_id in enumerate(active_sector_ids)
+    }
     support_mode = str(getattr(request, "qmc_support_mode", "boundary"))
     global_support_dims = (
         qmc_global_support_dims(
@@ -1909,10 +2437,10 @@ def integrate_qmc(
     total_timing = HotPathTiming()
     start_time = time.perf_counter()
     interrupted = False
-    raw_samples_done = 0
     completed_aggregate_raw_samples = 0
     diagnostics: dict[str, Any] = {
         "sampling_mode": "qmc",
+        "qmc_refine_sectors": str(request.qmc_refine_sectors),
         "qmc_lattice_backend": str(request.qmc_lattice_backend),
         "qmc_software": (
             "pySecDecContrib bundled CBC lattice table"
@@ -1924,6 +2452,7 @@ def integrate_qmc(
         "qmc_lattice_points_per_shift": int(request.samples_per_iter),
         "qmc_shifts": int(request.qmc_shifts),
         "qmc_korobov_alpha": int(request.qmc_korobov_alpha),
+        "qmc_correlate_sectors_requested": bool(request.qmc_correlate_sectors),
         "qmc_correlate_sectors": correlated_qmc,
         "qmc_support_grouping": support_mode,
         "qmc_global_support_dimensions": (
@@ -1943,8 +2472,22 @@ def integrate_qmc(
             "combined across sectors in quadrature."
         ),
     }
+    if resume_state is not None:
+        diagnostics["qmc_resume"] = {
+            "path": resume_state["path"],
+            "restored_sector_count": int(resume_state["restored_sector_count"]),
+            "restored_raw_samples": int(resume_state["raw_samples_done"]),
+        }
     if runtime_tuning is not None:
         diagnostics["target_integration_time_tuning"] = runtime_tuning
+
+    iteration_samples_done = 0
+    iteration_sample_target = 0
+    iteration_started_at = start_time
+    iteration_lattice_points = int(request.samples_per_iter)
+    iteration_shifts = int(request.qmc_shifts)
+    iteration_scheduled_sector_count = 0
+    last_reliable_live_stats: list[RunningStats] | None = None
 
     progress_request = replace(
         request,
@@ -1957,12 +2500,32 @@ def integrate_qmc(
     executor: ProcessPoolExecutor | None = None
     processor: SectorProcessor | None = None
 
+    def build_current_result() -> IntegrationResult:
+        return _stats_from_reduced_batches(
+            sectors,
+            active_sector_ids,
+            topology,
+            sector_stats,
+            sector_hits,
+            sector_precision_counts,
+            sector_timing,
+            sector_max_abs,
+            total_timing,
+            start_time,
+            interrupted,
+            diagnostics,
+            aggregate_stats_override=aggregate_shift_stats if correlated_qmc else None,
+            aggregate_sample_count_override=completed_aggregate_raw_samples
+            if correlated_qmc
+            else None,
+        )
+
     def absorb_reduced(
         reduced: QmcReducedBatch,
         sector_sums: np.ndarray,
         sector_counts: np.ndarray,
     ) -> None:
-        nonlocal raw_samples_done
+        nonlocal raw_samples_done, iteration_samples_done
         aggregate_start = time.perf_counter()
         sector_id = int(reduced.sector_id)
         sector_sums += reduced.sums_by_shift
@@ -1975,6 +2538,7 @@ def integrate_qmc(
         total_timing.absorb(reduced.timing)
         sector_max_abs[sector_id] = np.maximum(sector_max_abs[sector_id], reduced.max_abs)
         raw_samples_done += int(reduced.count)
+        iteration_samples_done += int(reduced.count)
         total_timing.add_python(time.perf_counter() - aggregate_start)
 
     def finish_sector_shift_estimates(
@@ -1995,26 +2559,53 @@ def integrate_qmc(
         total_timing.add_python(time.perf_counter() - aggregate_start)
         return means
 
-    def update_qmc_progress(iteration: int) -> None:
+    def update_qmc_progress(iteration: int, *, reliable_aggregate: bool = False) -> None:
+        nonlocal last_reliable_live_stats
         progress_target = target
         value_override: str | None = None
         relerr_override: str | None = None
+        leaders_text, leaders = _qmc_leader_text(
+            sectors,
+            sector_stats,
+            active_sector_ids,
+            topology.coefficient_count,
+        )
         completed_shift_count = min((stat.count for stat in aggregate_shift_stats), default=0)
+        if (
+            not reliable_aggregate
+            and last_reliable_live_stats is None
+            and not (correlated_qmc and completed_shift_count > 0)
+        ):
+            leaders_text = "pending"
+            leaders = []
+        diagnostics["qmc_current_error_leaders"] = leaders
         if correlated_qmc and completed_shift_count > 0:
             live_stats = _qmc_live_stats_from_aggregate(
                 aggregate_shift_stats,
                 completed_aggregate_raw_samples,
             )
+            if reliable_aggregate:
+                last_reliable_live_stats = live_stats
             if completed_shift_count < 2:
                 progress_target = None
                 relerr_override = "pending"
+        elif reliable_aggregate:
+            live_stats = _qmc_live_stats(
+                sector_stats,
+                active_sector_ids,
+                topology.coefficient_count,
+                raw_samples_done,
+            )
+            last_reliable_live_stats = live_stats
+        elif last_reliable_live_stats is not None:
+            live_stats = last_reliable_live_stats
         else:
-            # In correlated QMC mode the statistically meaningful pull/error is
-            # only available after a complete shift-by-shift sector sum has
-            # been registered.  Before that, partial sector sums can be very
-            # far from the full target with artificially tiny shift errors, so
-            # the live pull is intentionally suppressed.
-            if correlated_qmc:
+            # In QMC mode the statistically meaningful aggregate is available
+            # only at scheduler-step boundaries.  Mid-step sector/support-group
+            # updates can contain a partially refined total with artificially
+            # tiny errors, so suppress central values, errors, and pulls until
+            # the step has been fully registered.
+            if correlated_qmc or not reliable_aggregate:
                 progress_target = None
                 value_override = "pending"
                 relerr_override = "pending"
@@ -2025,6 +2616,12 @@ def integrate_qmc(
                 raw_samples_done,
             )
         elapsed = time.perf_counter() - start_time
+        step_elapsed = max(time.perf_counter() - iteration_started_at, 0.0)
+        if iteration_samples_done > 0 and iteration_sample_target > 0 and step_elapsed > 0.0:
+            step_rate = iteration_samples_done / step_elapsed
+            step_eta = max(iteration_sample_target - iteration_samples_done, 0) / max(step_rate, 1.0e-300)
+        else:
+            step_eta = None
         avg_eval_us = avg_eval_us_per_sample_per_worker(total_timing, raw_samples_done)
         update_progress_bar_timed(
             bar,
@@ -2037,6 +2634,16 @@ def integrate_qmc(
             total_timing,
             value_override=value_override,
             relerr_override=relerr_override,
+            leaders_override=leaders_text,
+            qmc_context={
+                "step_samples_done": int(iteration_samples_done),
+                "step_sample_target": int(iteration_sample_target),
+                "lattice_points_per_shift": int(iteration_lattice_points),
+                "shifts": int(iteration_shifts),
+                "scheduled_sector_count": int(iteration_scheduled_sector_count),
+                "active_sector_count": int(len(active_sector_ids)),
+                "step_eta_seconds": step_eta,
+            },
         )
 
     try:
@@ -2058,12 +2665,62 @@ def integrate_qmc(
         iteration = 0
         while request.max_iter < 0 or iteration < request.max_iter:
             iteration += 1
+            iteration_request = _qmc_iteration_request(request, iteration)
+            iteration_sector_ids = _qmc_select_iteration_sector_ids(
+                request,
+                iteration,
+                active_sector_ids,
+                sector_stats,
+                topology.coefficient_count,
+            )
+            iteration_group_count = sum(
+                len(
+                    qmc_component_support_groups(
+                        topology,
+                        active_sectors[active_position_by_sector_id[int(sector_id)]],
+                        global_support_dims,
+                        support_mode=support_mode,
+                    )
+                )
+                for sector_id in iteration_sector_ids
+            )
+            iteration_samples_done = 0
+            iteration_actual_lattice_points = 1
+            iteration_sample_target = 0
+            for sector_id in iteration_sector_ids:
+                sector = active_sectors[active_position_by_sector_id[int(sector_id)]]
+                for coefficient_indices, support_axes, component_indices in qmc_component_support_groups(
+                    topology,
+                    sector,
+                    global_support_dims,
+                    support_mode=support_mode,
+                ):
+                    group_points = qmc_actual_points_per_shift(iteration_request, len(support_axes))
+                    group_target = int(group_points) * int(iteration_request.qmc_shifts)
+                    iteration_sample_target += int(group_target)
+                    iteration_actual_lattice_points = max(iteration_actual_lattice_points, int(group_points))
+            iteration_started_at = time.perf_counter()
+            iteration_lattice_points = int(iteration_actual_lattice_points)
+            iteration_shifts = int(iteration_request.qmc_shifts)
+            iteration_scheduled_sector_count = len(iteration_sector_ids)
+            diagnostics["qmc_last_iteration"] = {
+                "iteration": int(iteration),
+                "scheduled_sector_count": int(len(iteration_sector_ids)),
+                "scheduled_sector_ids": [int(sector_id) for sector_id in iteration_sector_ids],
+                "requested_lattice_points_per_shift": int(iteration_request.samples_per_iter),
+                "actual_lattice_points_per_shift": int(iteration_actual_lattice_points),
+                "shifts": int(iteration_request.qmc_shifts),
+                "qmc_group_count": int(iteration_group_count),
+                "raw_sample_target": int(iteration_sample_target),
+            }
             shared_raw_points_by_group: dict[tuple[tuple[int, ...], int], np.ndarray] = {}
             iteration_shift_totals = np.zeros(
-                (int(request.qmc_shifts), topology.coefficient_count),
+                (int(iteration_request.qmc_shifts), topology.coefficient_count),
                 dtype=np.complex128,
             )
-            for sector_position, (sector_id, sector) in enumerate(zip(active_sector_ids, active_sectors)):
+            for sector_id in iteration_sector_ids:
+                sector_position = active_position_by_sector_id[int(sector_id)]
+                sector = active_sectors[sector_position]
                 for coefficient_indices, support_axes, component_indices in qmc_component_support_groups(
                     topology,
                     sector,
@@ -2071,37 +2728,41 @@ def integrate_qmc(
                     support_mode=support_mode,
                 ):
                     sector_sums = np.zeros(
-                        (int(request.qmc_shifts), topology.coefficient_count),
+                        (int(iteration_request.qmc_shifts), topology.coefficient_count),
                         dtype=np.complex128,
                     )
-                    sector_counts = np.zeros(int(request.qmc_shifts), dtype=np.int64)
+                    sector_counts = np.zeros(int(iteration_request.qmc_shifts), dtype=np.int64)
                     shared_raw_points: np.ndarray | None = None
                     if correlated_qmc:
                         group_key = (tuple(int(axis) for axis in support_axes), len(support_axes))
                         shared_raw_points = shared_raw_points_by_group.get(group_key)
                         if shared_raw_points is None:
                             shared_seed = (
-                                int(request.seed)
+                                int(iteration_request.seed)
                                 + 97_003 * int(iteration)
                                 + 53_021 * len(shared_raw_points_by_group)
                             )
                             if len(support_axes) <= 0:
+                                shared_lattice_start = time.perf_counter()
                                 shared_raw_points = np.empty(
-                                    (int(request.qmc_shifts), 1, 0),
+                                    (int(iteration_request.qmc_shifts), 1, 0),
                                     dtype=float,
                                 )
+                                total_timing.add_integrator(time.perf_counter() - shared_lattice_start)
                             else:
+                                shared_lattice_start = time.perf_counter()
                                 shared_raw_points = shifted_lattice_points(
-                                    backend=str(request.qmc_lattice_backend),
+                                    backend=str(iteration_request.qmc_lattice_backend),
                                     dimension=int(len(support_axes)),
-                                    n_points=int(request.samples_per_iter),
-                                    shift_count=int(request.qmc_shifts),
+                                    n_points=int(iteration_request.samples_per_iter),
+                                    shift_count=int(iteration_request.qmc_shifts),
                                     seed=shared_seed,
-                                    order=str(request.qmc_order),
+                                    order=str(iteration_request.qmc_order),
                                 )
+                                total_timing.add_integrator(time.perf_counter() - shared_lattice_start)
                             shared_raw_points_by_group[group_key] = shared_raw_points
                     batches = qmc_batches_for_sector(
-                        request,
+                        iteration_request,
                         sector_position,
                         sector_id,
                         sector,
@@ -2110,6 +2771,7 @@ def integrate_qmc(
                         support_axes=support_axes,
                         coefficient_indices=coefficient_indices,
                         component_indices=component_indices,
+                        timing=total_timing,
                     )
                     if executor is None:
                         assert processor is not None
@@ -2134,7 +2796,7 @@ def integrate_qmc(
                     )
                     if correlated_qmc:
                         iteration_shift_totals += sector_shift_means
-                    update_qmc_progress(iteration)
+                    update_qmc_progress(iteration, reliable_aggregate=False)
             if correlated_qmc:
                 aggregate_start = time.perf_counter()
                 for shift_values in iteration_shift_totals:
@@ -2146,7 +2808,7 @@ def integrate_qmc(
                     aggregate_shift_stats,
                     raw_samples_done,
                 )
-                update_qmc_progress(iteration)
+                update_qmc_progress(iteration, reliable_aggregate=True)
             else:
                 live_stats = _qmc_live_stats(
                     sector_stats,
@@ -2154,8 +2816,12 @@ def integrate_qmc(
                     topology.coefficient_count,
                     raw_samples_done,
                 )
+                update_qmc_progress(iteration, reliable_aggregate=True)
+            diagnostics["qmc_completed_iterations"] = int(iteration)
+            if iteration_callback is not None:
+                iteration_callback(build_current_result())
             if target_accuracy_reached(
-                progress_request,
+                request,
                 live_stats,  # type: ignore[arg-type]
                 target,
                 iteration,
@@ -2196,24 +2862,7 @@ def integrate_qmc(
             _PARENT_SECTORS = None
             _PARENT_REQUEST = None
 
-    return _stats_from_reduced_batches(
-        sectors,
-        active_sector_ids,
-        topology,
-        sector_stats,
-        sector_hits,
-        sector_precision_counts,
-        sector_timing,
-        sector_max_abs,
-        total_timing,
-        start_time,
-        interrupted,
-        diagnostics,
-        aggregate_stats_override=aggregate_shift_stats if correlated_qmc else None,
-        aggregate_sample_count_override=completed_aggregate_raw_samples
-        if correlated_qmc
-        else None,
-    )
+    return build_current_result()
 
 
 def integrate_democratic(
@@ -2354,13 +3003,21 @@ def integrate(
     topology: TopologyDefinition,
     sectors: list[SectorDefinition],
     target: TargetDefinition | None,
+    iteration_callback: Callable[[IntegrationResult], None] | None = None,
 ) -> IntegrationResult:
     """Run the adaptive Monte Carlo integration and return raw coefficients."""
     runtime_tuning: dict[str, Any] | None = None
     if request.target_integration_time is not None and request.sampling_mode in {"havana", "qmc"}:
         request, runtime_tuning = autotune_request_for_target_time(request, topology, sectors)
     if request.sampling_mode == "qmc":
-        return integrate_qmc(request, topology, sectors, target, runtime_tuning=runtime_tuning)
+        return integrate_qmc(
+            request,
+            topology,
+            sectors,
+            target,
+            runtime_tuning=runtime_tuning,
+            iteration_callback=iteration_callback,
+        )
     if request.sampling_mode == "democratic":
         return integrate_democratic(request, topology, sectors, target)
     if not sectors:
@@ -2727,6 +3384,9 @@ def integrate(
                     f"{format_complex(stats[topology.training_index].mean)} +- {format_complex_error(training_err)} "
                     f"(havana train {live_avg:.6g} +- {live_err:.3g}, chi={live_chi:.3g})"
                 )
+            if iteration_callback is not None:
+                diagnostics["completed_iterations"] = int(iteration)
+                iteration_callback(build_result())
 
             elapsed_seconds = time.perf_counter() - start_time
             avg_eval_us = avg_eval_us_per_sample_per_worker(hot_timing, stats[0].count)

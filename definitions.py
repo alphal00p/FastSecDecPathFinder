@@ -146,11 +146,16 @@ class IntegralRequest:
     test_boundary_max_simultaneous_endpoint_approaches: int | None = None
     benchmark_samples_per_sector: int = 5
     qmc_shifts: int = 64
+    qmc_initial_samples_per_iter: int = 4096
+    qmc_initial_shifts: int = 64
+    qmc_max_samples_per_iter: int = 4096
     qmc_korobov_alpha: int = 3
     qmc_lattice_backend: str = "cbcpt-dn1-100"
     qmc_order: str = "linear"
     qmc_correlate_sectors: bool = True
     qmc_support_mode: str = "boundary"
+    qmc_refine_sectors: str = "democratic"
+    restart: bool = False
     target_integration_time: float | None = None
     target_abs_error: float | None = None
     target_rel_error: float | None = None
@@ -214,7 +219,7 @@ class IntegrationResult:
 
 @dataclass
 class HotPathTiming:
-    """Additive work-time profile split into evaluator, Python, and Havana time."""
+    """Additive work-time profile split into evaluator, Python, and integrator time."""
 
     eval_seconds: float = 0.0
     python_seconds: float = 0.0
@@ -234,8 +239,16 @@ class HotPathTiming:
         self.python_seconds += max(float(seconds), 0.0)
 
     def add_havana(self, seconds: float) -> None:
-        """Accumulate Havana sampling, training, merge, and update time."""
+        """Accumulate sampler/integrator overhead.
+
+        The field is kept as ``havana_seconds`` for result-file compatibility,
+        but it now also covers QMC lattice generation and periodization work.
+        """
         self.havana_seconds += max(float(seconds), 0.0)
+
+    def add_integrator(self, seconds: float) -> None:
+        """Accumulate sampler/integrator overhead."""
+        self.add_havana(seconds)
 
     def absorb(self, other: "HotPathTiming") -> None:
         """Merge timing reported by a worker or nested processor call."""
@@ -294,11 +307,16 @@ class HotPathTiming:
 
     @property
     def havana_fraction(self) -> float:
-        """Fraction of profiled work spent in Havana sampler/grid operations."""
+        """Fraction of profiled work spent in sampler/integrator operations."""
         total = self.total_seconds
         if total <= 0.0:
             return 0.0
         return self.havana_seconds / total
+
+    @property
+    def integrator_fraction(self) -> float:
+        """Clear alias for the sampler/integrator timing fraction."""
+        return self.havana_fraction
 
 
 JsonDict = dict[str, Any]

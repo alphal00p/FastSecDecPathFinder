@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import copy
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover - only relevant in very small envs.
 from benchmark import check_oneloop_bridge, compute_benchmark
 from cache_warm import run_universal_cache_mode
 from definitions import IntegralRequest, TargetDefinition
+from definitions import IntegrationResult
 from formatting import (
     apply_global_convention,
     build_sector_result_rows,
@@ -302,12 +304,20 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--democratic-samples-per-sector must be positive")
     if request.qmc_shifts <= 1:
         raise ValueError("--qmc-shifts must be greater than 1 to estimate a randomized QMC error")
+    if request.qmc_initial_samples_per_iter <= 0:
+        raise ValueError("--qmc-initial-samples-per-iter must be positive")
+    if request.qmc_initial_shifts <= 1:
+        raise ValueError("--qmc-initial-shifts must be greater than 1")
+    if request.qmc_max_samples_per_iter < 0:
+        raise ValueError("--qmc-max-samples-per-iter must be >= 0")
     if request.qmc_korobov_alpha < 1:
         raise ValueError("--qmc-korobov-alpha must be a positive integer")
     if request.qmc_lattice_backend not in {"qmcpy", "cbcpt-dn1-100"}:
         raise ValueError("--qmc-lattice-backend supports 'qmcpy' and 'cbcpt-dn1-100'")
     if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
         raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
+    if request.qmc_refine_sectors not in {"adaptive", "democratic"}:
+        raise ValueError("--qmc-refine-sectors must be 'adaptive' or 'democratic'")
     if request.qmc_support_mode not in {
         "boundary",
         "local-boundary",
@@ -673,6 +683,37 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--qmc-initial-samples-per-iter",
+        type=int,
+        default=int(defaults.get("qmc_initial_samples_per_iter", 4096)),
+        help=(
+            "Adaptive-QMC pilot lattice points per shift before ramping toward "
+            "--samples-per-iter. The cbcpt-dn1-100 backend uses the next "
+            "available prime lattice size. Default: 4096, matching the "
+            "default capped production lattice so pilot estimates are not "
+            "overweighted."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-initial-shifts",
+        type=int,
+        default=int(defaults.get("qmc_initial_shifts", 64)),
+        help=(
+            "Adaptive-QMC pilot random shifts before ramping toward "
+            "--qmc-shifts. Default: 64, matching --qmc-shifts."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-max-samples-per-iter",
+        type=int,
+        default=int(defaults.get("qmc_max_samples_per_iter", 4096)),
+        help=(
+            "Adaptive-QMC maximum requested lattice points per shift. This caps "
+            "the per-iteration ramp independently of --samples-per-iter; set 0 "
+            "to disable the cap. Default: 4096."
+        ),
+    )
+    parser.add_argument(
         "--qmc-korobov-alpha",
         type=int,
         default=int(defaults.get("qmc_korobov_alpha", 3)),
@@ -714,10 +755,24 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
             "'full' periodizes "
             "every active Laurent coefficient in the full sector dimension, "
             "'order' samples each sector/Laurent-order pair separately with "
-            "the same boundary support rule, 'local-order' disables any global "
-            "support lifting for that per-order split; 'component' enables "
-            "the experimental explicit component split when available. "
+            "prepared explicit Laurent-order outputs; 'local-order' disables "
+            "any global support lifting for that per-order split; 'component' "
+            "uses prepared explicit Laurent-order outputs grouped by support "
+            "when available. "
             "Default: boundary."
+        ),
+    )
+    parser.add_argument(
+        "--qmc-refine-sectors",
+        choices=["adaptive", "democratic"],
+        default=str(defaults.get("qmc_refine_sectors", "democratic")),
+        help=(
+            "QMC sector scheduler. 'democratic' samples every active sector "
+            "every iteration and keeps the correlated sector-sum estimator. "
+            "'adaptive' first samples all sectors, then focuses subsequent "
+            "QMC blocks on sectors dominating the current summed MC error, "
+            "but cannot keep the same correlated aggregate once sectors are "
+            "skipped. Default: democratic."
         ),
     )
     qmc_correlate_default = bool(defaults.get("qmc_correlate_sectors", True))
@@ -1251,6 +1306,16 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         action="store_true",
         help="Regenerate file-backed pySecDec targets instead of reusing an existing file.",
     )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        default=bool(defaults.get("restart", False)),
+        help=(
+            "Ignore any existing result.json resume state and start the QMC "
+            "accumulators from scratch. The output file is overwritten when "
+            "the run finishes or is interrupted."
+        ),
+    )
     parser.add_argument("--show-results", default=None, help="Show a stored result.json and exit.")
     parser.add_argument(
         "--result-path",
@@ -1443,11 +1508,16 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         sampling_mode=args.sampling_mode,
         democratic_samples_per_sector=args.democratic_samples_per_sector,
         qmc_shifts=int(args.qmc_shifts),
+        qmc_initial_samples_per_iter=int(args.qmc_initial_samples_per_iter),
+        qmc_initial_shifts=int(args.qmc_initial_shifts),
+        qmc_max_samples_per_iter=int(args.qmc_max_samples_per_iter),
         qmc_korobov_alpha=int(args.qmc_korobov_alpha),
         qmc_lattice_backend=str(args.qmc_lattice_backend),
         qmc_order=str(args.qmc_order),
         qmc_correlate_sectors=bool(args.qmc_correlate_sectors),
         qmc_support_mode=str(args.qmc_support_mode),
+        qmc_refine_sectors=str(args.qmc_refine_sectors),
+        restart=bool(args.restart),
         target_rel_accuracy=(
             None if args.target_rel_accuracy is None else float(args.target_rel_accuracy)
         ),
@@ -1639,6 +1709,92 @@ def _trim_summary_laurent(summary: dict, topology, count: int) -> None:
     labels = topology.expected_laurent_orders[:count]
     summary.setdefault("validation", {})["expected_laurent_orders"] = labels
     summary.setdefault("symanzik", {})["expected_laurent_orders"] = labels
+
+
+def _make_integration_output(
+    request: IntegralRequest,
+    topology,
+    sectors,
+    target: TargetDefinition | None,
+    summary: dict,
+    integration: IntegrationResult,
+    *,
+    prepared_manifest: dict | None = None,
+    intermediate: bool = False,
+) -> dict:
+    """Build the persistent result payload for final or intermediate output."""
+    output_summary = copy.deepcopy(summary)
+    raw_coeffs, raw_errors = apply_global_convention(
+        integration.raw_sector_coeffs,
+        integration.raw_sector_errors,
+        request,
+    )
+    displayed_count = _prepared_output_count(request, topology)
+    output_target = target
+    if displayed_count != topology.coefficient_count:
+        raw_coeffs = _trim_sequence(raw_coeffs, displayed_count)
+        raw_errors = _trim_sequence(raw_errors, displayed_count)
+        output_target = _trim_target(target, displayed_count)
+        _trim_summary_laurent(output_summary, topology, displayed_count)
+    output_summary.setdefault("symanzik", {})[
+        "dual_evaluator_build_seconds"
+    ] = topology.dual_evaluator_build_seconds
+    output_summary.setdefault("symanzik", {})[
+        "chain_rule_formula_build_seconds"
+    ] = topology.chain_rule_formula_build_seconds
+    output_summary.setdefault("symanzik", {})[
+        "chain_rule_formula_count"
+    ] = len(getattr(topology, "_chain_rule_formulas", {}))
+    output_summary.setdefault("symanzik", {})[
+        "chain_rule_formulas_skipped"
+    ] = getattr(topology, "chain_rule_formulas_skipped", 0)
+    sector_rows = build_sector_result_rows(request, sectors, integration.per_sector)
+    if displayed_count != topology.coefficient_count:
+        sector_rows = _trim_sector_rows(sector_rows, displayed_count)
+    output = make_output(
+        request=request,
+        raw_coeffs=raw_coeffs,
+        raw_errors=raw_errors,
+        target=output_target,
+        samples=integration.samples,
+        elapsed_seconds=integration.elapsed_seconds,
+        avg_eval_us_per_sample_per_worker=integration.avg_eval_us_per_sample_per_worker,
+        eval_seconds=integration.eval_seconds,
+        python_seconds=integration.python_seconds,
+        havana_seconds=integration.havana_seconds,
+        python_overhead_fraction=integration.python_overhead_fraction,
+        precision_counts=integration.precision_counts,
+        summary=output_summary,
+        sector_results=sector_rows,
+        interrupted=integration.interrupted,
+    )
+    if integration.diagnostics:
+        output["integration_diagnostics"] = integration.diagnostics
+    output["request"] = request_metadata(request)
+    output["environment"] = environment_metadata()
+    output["created_utc"] = datetime.now(timezone.utc).isoformat()
+    output["command"] = sys.argv
+    output["result_path"] = str(result_output_path(request))
+    if intermediate:
+        output["intermediate"] = True
+        output["intermediate_note"] = "written after a completed integration iteration"
+    if request.command == "integrate":
+        output["input_metadata"] = {
+            "prepared_bundle": str(Path(request.output or "").expanduser().resolve()),
+            "manifest": prepared_manifest or {},
+        }
+    elif request.integral == "dot":
+        bundle = get_dot_bundle(request)
+        output["input_metadata"] = {
+            "dot_file": request.dot_file,
+            "kinematics_file": request.kinematics_file,
+            "graph_name": bundle.parsed_graph.graph_name,
+            "kinematics": {
+                "values": bundle.kinematics.values,
+                "replacements": bundle.kinematics.replacement_expressions,
+            },
+        }
+    return output
 
 
 def validate_sector_selection(request: IntegralRequest, sectors) -> None:
@@ -1942,7 +2098,11 @@ def _prepare_sector_runtime_artifacts(
     topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
     topology.allow_fallback_for_missing_caches = request.allow_fallback_for_missing_caches
-    topology.enable_qmc_component_outputs = request.qmc_support_mode == "component"
+    topology.enable_qmc_component_outputs = request.qmc_support_mode in {
+        "component",
+        "order",
+        "local-order",
+    }
     bridge_already_prepared_dot_duals = (
         request.command == "generate" and request.integral == "dot"
         and request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
@@ -2368,11 +2528,30 @@ def _main_impl() -> int:
             data=summary,
         )
 
+    def write_intermediate_result(integration_result: IntegrationResult) -> None:
+        output = _make_integration_output(
+            request,
+            topology,
+            sectors,
+            target,
+            summary,
+            integration_result,
+            prepared_manifest=prepared_manifest,
+            intermediate=True,
+        )
+        write_result_json(output, result_output_path(request))
+
     try:
         if request.integral == "dot" and request.command != "integrate":
             integration = None
             if request.dot_engine in {"fsd", "both"}:
-                integration = integrate(request, topology, sectors, target)
+                integration = integrate(
+                    request,
+                    topology,
+                    sectors,
+                    target,
+                    iteration_callback=write_intermediate_result,
+                )
             pysecdec_result = None
             if request.dot_engine == "pysecdec":
                 pysecdec_progress = _generation_progress(request, logger, "pySecDec")
@@ -2407,75 +2586,27 @@ def _main_impl() -> int:
                 print(output_json(output) if request.json else output)
                 return 0
         else:
-            integration = integrate(request, topology, sectors, target)
+            integration = integrate(
+                request,
+                topology,
+                sectors,
+                target,
+                iteration_callback=write_intermediate_result,
+            )
     except Exception as exc:
         print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
         return 1
 
-    raw_coeffs, raw_errors = apply_global_convention(
-        integration.raw_sector_coeffs,
-        integration.raw_sector_errors,
+    output = _make_integration_output(
         request,
+        topology,
+        sectors,
+        target,
+        summary,
+        integration,
+        prepared_manifest=prepared_manifest,
+        intermediate=False,
     )
-    displayed_count = _prepared_output_count(request, topology)
-    if displayed_count != topology.coefficient_count:
-        raw_coeffs = _trim_sequence(raw_coeffs, displayed_count)
-        raw_errors = _trim_sequence(raw_errors, displayed_count)
-        target = _trim_target(target, displayed_count)
-        _trim_summary_laurent(summary, topology, displayed_count)
-    summary.setdefault("symanzik", {})["dual_evaluator_build_seconds"] = topology.dual_evaluator_build_seconds
-    summary.setdefault("symanzik", {})[
-        "chain_rule_formula_build_seconds"
-    ] = topology.chain_rule_formula_build_seconds
-    summary.setdefault("symanzik", {})[
-        "chain_rule_formula_count"
-    ] = len(getattr(topology, "_chain_rule_formulas", {}))
-    summary.setdefault("symanzik", {})[
-        "chain_rule_formulas_skipped"
-    ] = getattr(topology, "chain_rule_formulas_skipped", 0)
-    sector_rows = build_sector_result_rows(request, sectors, integration.per_sector)
-    if displayed_count != topology.coefficient_count:
-        sector_rows = _trim_sector_rows(sector_rows, displayed_count)
-    output = make_output(
-        request=request,
-        raw_coeffs=raw_coeffs,
-        raw_errors=raw_errors,
-        target=target,
-        samples=integration.samples,
-        elapsed_seconds=integration.elapsed_seconds,
-        avg_eval_us_per_sample_per_worker=integration.avg_eval_us_per_sample_per_worker,
-        eval_seconds=integration.eval_seconds,
-        python_seconds=integration.python_seconds,
-        havana_seconds=integration.havana_seconds,
-        python_overhead_fraction=integration.python_overhead_fraction,
-        precision_counts=integration.precision_counts,
-        summary=summary,
-        sector_results=sector_rows,
-        interrupted=integration.interrupted,
-    )
-    if integration.diagnostics:
-        output["integration_diagnostics"] = integration.diagnostics
-    output["request"] = request_metadata(request)
-    output["environment"] = environment_metadata()
-    output["created_utc"] = datetime.now(timezone.utc).isoformat()
-    output["command"] = sys.argv
-    output["result_path"] = str(result_output_path(request))
-    if request.command == "integrate":
-        output["input_metadata"] = {
-            "prepared_bundle": str(Path(request.output or "").expanduser().resolve()),
-            "manifest": prepared_manifest or {},
-        }
-    elif request.integral == "dot":
-        bundle = get_dot_bundle(request)
-        output["input_metadata"] = {
-            "dot_file": request.dot_file,
-            "kinematics_file": request.kinematics_file,
-            "graph_name": bundle.parsed_graph.graph_name,
-            "kinematics": {
-                "values": bundle.kinematics.values,
-                "replacements": bundle.kinematics.replacement_expressions,
-            },
-        }
 
     write_result_json(output, result_output_path(request))
 

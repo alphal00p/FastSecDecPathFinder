@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -167,6 +168,9 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "json": True,
         "mu": None,
         "onshell_threshold": None,
+        "qmc_initial_samples_per_iter": 1024,
+        "qmc_initial_shifts": 16,
+        "qmc_max_samples_per_iter": 4096,
         "qmc_lattice_backend": "qmcpy",
         "qmc_order": "linear",
         "qmc_correlate_sectors": True,
@@ -190,6 +194,58 @@ def test_sector_stat_table_values_are_ellipsized_to_fixed_width() -> None:
     assert len(clipped) == 50
     assert clipped.endswith("[...]")
     assert "x" * 60 not in clipped
+
+
+def test_progress_field_padding_is_fixed_width_and_ansi_safe() -> None:
+    """Progress values should have stable visible widths, even with colors."""
+    plain = integrator_module._fit_progress_field("46.2", 8)
+    colored = integrator_module._fit_progress_field("\x1b[34m/ 0.03\x1b[0m", 10)
+    long = integrator_module._fit_progress_field("123456789abcdef", 8)
+
+    assert integrator_module._visible_progress_len(plain) == 8
+    assert integrator_module._visible_progress_len(colored) == 10
+    assert integrator_module._visible_progress_len(long) == 8
+    assert long.endswith("…")
+
+
+def test_qmc_progress_fields_are_compact_and_fixed_width() -> None:
+    """QMC progress should expose step/local scheduler state compactly."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+    )
+    widths = integrator_module._progress_widths(request)
+    step = integrator_module._fit_progress_field(
+        f"{integrator_module.format_sample_count(17_800_000)}/"
+        f"{integrator_module.format_sample_count(84_800_000)}",
+        widths["qmc_step"],
+    )
+    lattice = integrator_module._fit_progress_field(
+        integrator_module.format_qmc_lattice(25_000, 32),
+        widths["qmc_lattice"],
+    )
+
+    assert integrator_module._visible_progress_len(step) == widths["qmc_step"]
+    assert integrator_module._visible_progress_len(lattice) == widths["qmc_lattice"]
+    assert "2.04B" not in step
+
+
+def test_worker_initializer_ignores_sigint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forked workers must not dump KeyboardInterrupt tracebacks on Ctrl+C."""
+    calls: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        integrator_module.signal,
+        "signal",
+        lambda signum, handler: calls.append((signum, handler)),
+    )
+
+    integrator_module._ignore_worker_sigint()
+
+    assert calls == [(signal.SIGINT, signal.SIG_IGN)]
 
 
 def test_nonfinite_rows_are_retried_at_high_precision_before_training() -> None:
@@ -873,7 +929,30 @@ def test_qmc_cli_default_uses_cbcpt_lattice() -> None:
     )
 
     assert request.qmc_lattice_backend == "cbcpt-dn1-100"
+    assert request.qmc_refine_sectors == "democratic"
+    assert request.qmc_max_samples_per_iter == 4096
+    assert request.restart is False
     validate_request(request)
+
+    democratic = build_request(
+        parse_args(
+            [
+                "--sampling-mode",
+                "qmc",
+                "--qmc-refine-sectors",
+                "democratic",
+                "--restart",
+                "--s",
+                "1.0",
+                "--m",
+                "1.0",
+                "--no-progress",
+            ]
+        )
+    )
+    assert democratic.qmc_refine_sectors == "democratic"
+    assert democratic.restart is True
+    validate_request(democratic)
 
 
 def test_projector_generation_cli_shortcut() -> None:
@@ -3276,6 +3355,139 @@ def test_qmc_support_groups_skip_zero_poles_and_promote_global_support() -> None
     ]
 
 
+def test_qmc_adaptive_scheduler_focuses_on_dominant_sector() -> None:
+    """After the pilot iteration, adaptive QMC should refine error-dominant sectors."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+    )
+    sector_stats = [
+        [integrator_module.RunningStats() for _ in range(2)]
+        for _sector in range(4)
+    ]
+    for sector_id in range(4):
+        for coeff_index in range(2):
+            if sector_id == 2:
+                sector_stats[sector_id][coeff_index].add(0.0)
+                sector_stats[sector_id][coeff_index].add(10.0)
+            else:
+                sector_stats[sector_id][coeff_index].add(1.0)
+                sector_stats[sector_id][coeff_index].add(1.001)
+
+    selected = integrator_module._qmc_select_iteration_sector_ids(
+        request,
+        2,
+        [0, 1, 2, 3],
+        sector_stats,
+        2,
+    )
+
+    assert selected == [2]
+
+
+def test_qmc_leader_percentages_are_colored_blue() -> None:
+    """Only the percentages in the QMC leader text should carry blue ANSI."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    stats = [
+        [integrator_module.RunningStats() for _ in range(topology.coefficient_count)]
+        for _sector in sectors
+    ]
+    for sector_id, scale in enumerate((10.0, 5.0)):
+        for coeff_index in range(topology.coefficient_count):
+            stats[sector_id][coeff_index].add(0.0)
+            stats[sector_id][coeff_index].add(scale)
+
+    text, _records = integrator_module._qmc_leader_text(
+        sectors,
+        stats,
+        list(range(len(sectors))),
+        topology.coefficient_count,
+    )
+
+    assert "\x1b[34m" in text
+    assert "%" in text
+
+
+def test_qmc_adaptive_ramp_uses_explicit_small_pilot() -> None:
+    """Large production QMC settings should still begin with the pilot lattice."""
+    request = make_request(
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+        samples_per_iter=100_000,
+        qmc_shifts=64,
+        qmc_initial_samples_per_iter=1024,
+        qmc_initial_shifts=16,
+    )
+
+    first = integrator_module._qmc_iteration_request(request, 1)
+    second = integrator_module._qmc_iteration_request(request, 2)
+
+    assert first.samples_per_iter == 1024
+    assert first.qmc_shifts == 16
+    assert second.samples_per_iter == 2048
+    assert second.qmc_shifts == 32
+
+
+def test_qmc_adaptive_ramp_respects_default_lattice_cap() -> None:
+    """Adaptive QMC should stop ramping at the configured max lattice size."""
+    request = make_request(
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+        samples_per_iter=100_000,
+        qmc_initial_samples_per_iter=1024,
+        qmc_max_samples_per_iter=4096,
+    )
+
+    assert integrator_module._qmc_iteration_request(request, 4).samples_per_iter == 4096
+
+    uncapped = replace(request, qmc_max_samples_per_iter=0)
+    assert integrator_module._qmc_iteration_request(uncapped, 4).samples_per_iter == 8192
+
+
+def test_qmc_lattice_cap_applies_to_democratic_mode() -> None:
+    """The safety cap should also limit fixed democratic QMC schedules."""
+    request = make_request(
+        sampling_mode="qmc",
+        qmc_refine_sectors="democratic",
+        samples_per_iter=100_000,
+        qmc_max_samples_per_iter=4096,
+    )
+
+    capped = integrator_module._qmc_iteration_request(request, 1)
+    assert capped.samples_per_iter == 4096
+
+    uncapped = integrator_module._qmc_iteration_request(
+        replace(request, qmc_max_samples_per_iter=0),
+        1,
+    )
+    assert uncapped.samples_per_iter == 100_000
+
+
+def test_qmc_cbc_progress_uses_actual_lattice_size() -> None:
+    """CBC/PT progress targets should use the selected prime rule size."""
+    request = make_request(
+        sampling_mode="qmc",
+        qmc_lattice_backend="cbcpt-dn1-100",
+        samples_per_iter=2048,
+    )
+
+    assert integrator_module.qmc_actual_points_per_shift(request, 3) == 4261
+    assert integrator_module.qmc_actual_points_per_shift(request, 0) == 1
+
+
 def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     """QMC mode estimates errors from random shifts and records raw samples."""
     request = make_request(
@@ -3311,11 +3523,94 @@ def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
     assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
     assert result.diagnostics["qmc_lattice_backend"] == "qmcpy"
     assert result.diagnostics["qmc_korobov_alpha"] == 3
+    assert result.havana_seconds > 0.0
     for value in result.raw_sector_coeffs:
         assert_finite_complex(value)
     for sector_result in result.per_sector:
         assert sector_result.samples == 4 * 32
         assert sector_result.diagnostics["sampling_mode"] == "qmc"
+
+
+def test_qmc_iteration_callback_receives_completed_aggregate() -> None:
+    """QMC writes can be triggered once a reliable iteration has completed."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+        qmc_shifts=4,
+        qmc_initial_shifts=4,
+        qmc_lattice_backend="qmcpy",
+        samples_per_iter=16,
+        qmc_initial_samples_per_iter=16,
+        qmc_max_samples_per_iter=16,
+        max_iter=2,
+        min_iter=1,
+        batch_size=16,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+    snapshots: list[int] = []
+
+    result = integrate(
+        request,
+        topology,
+        sectors,
+        None,
+        iteration_callback=lambda partial: snapshots.append(partial.samples),
+    )
+
+    assert snapshots
+    assert snapshots[-1] == result.samples
+    assert all(sample_count > 0 for sample_count in snapshots)
+
+
+def test_qmc_adaptive_shift_ramp_uses_iteration_shift_shape() -> None:
+    """Adaptive QMC may use fewer shifts in early iterations than requested."""
+    request = make_request(
+        integral="triangle",
+        mode="massive",
+        s=1.0,
+        m=1.0,
+        subtraction_backend="projector-formula",
+        sampling_mode="qmc",
+        qmc_refine_sectors="adaptive",
+        qmc_shifts=64,
+        qmc_korobov_alpha=3,
+        qmc_lattice_backend="qmcpy",
+        samples_per_iter=16,
+        max_iter=1,
+        min_iter=1,
+        batch_size=16,
+        workers=1,
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    prepare_generated_evaluators(
+        topology,
+        sectors,
+        request.dual_evaluator_mode,
+        subtraction_backend=request.subtraction_backend,
+    )
+
+    result = integrate(request, topology, sectors, None)
+
+    assert result.diagnostics["qmc_last_iteration"]["shifts"] == 16
+    assert result.samples == 16 * 16 * len(sectors)
+    for sector_result in result.per_sector:
+        assert sector_result.diagnostics["qmc_shift_estimate_counts_by_order"][-1] == 16
 
 
 def test_target_time_tuning_uses_steady_state_warmup_rate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3327,6 +3622,7 @@ def test_target_time_tuning_uses_steady_state_warmup_rate(monkeypatch: pytest.Mo
         sampling_mode="qmc",
         qmc_lattice_backend="cbcpt-dn1-100",
         qmc_shifts=2,
+        qmc_refine_sectors="adaptive",
         target_integration_time=10.0,
         samples_per_iter=1,
         max_iter=5,
@@ -3364,14 +3660,16 @@ def test_target_time_tuning_uses_steady_state_warmup_rate(monkeypatch: pytest.Mo
     assert diagnostics is not None
     qmc_group_count = diagnostics["qmc_group_count"]
     expected_target_records = 250
+    effective_group_iterations = diagnostics["qmc_effective_group_iterations"]
     expected_samples = max(
         expected_target_records
-        // max(int(request.max_iter) * int(request.qmc_shifts) * int(qmc_group_count), 1),
+        // max(int(request.qmc_shifts) * int(qmc_group_count) * int(effective_group_iterations), 1),
         1,
     )
     assert diagnostics["records_per_second"] == pytest.approx(10.0)
     assert diagnostics["tuning_records_per_second"] == pytest.approx(25.0)
     assert diagnostics["estimated_target_records"] == expected_target_records
+    assert diagnostics["qmc_refine_sectors"] == "adaptive"
     assert tuned_request.samples_per_iter == expected_samples
 
 
@@ -3520,6 +3818,8 @@ def test_result_table_marks_missing_dot_reference_as_na(capsys: pytest.CaptureFi
 
     assert "N/A" in rendered
     assert "10.00σ" not in rendered
+    assert "IntegratorT" in rendered
+    assert "HavanaT" not in rendered
 
 
 @pytest.mark.parametrize(

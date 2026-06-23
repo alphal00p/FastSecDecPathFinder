@@ -671,8 +671,9 @@ To request a wall-time budget, use:
 
 For Havana and QMC, FSD first performs a short same-worker-count warm-up and
 then adjusts the effective sample statistics to get close to the requested
-wall time.  The elapsed-time stop remains active as a guard and the warm-up
-tuning is recorded in `result.json`.
+wall time.  In QMC mode this target is converted into a fixed lattice-work
+schedule rather than a live progress-bar target; the elapsed-time stop remains
+active only as a guard and the warm-up tuning is recorded in `result.json`.
 
 Use an unbounded run:
 
@@ -697,6 +698,44 @@ upward; unspecified trailing coefficients are set to zero.  `--target
 result.json` reads a previous result file in the same displayed prefactor
 convention.  In DOT mode, `--target pysecdec` first runs pySecDec using the
 configured pySecDec controls and uses that result as the live comparison.
+
+QMC sector refinement
+---------------------
+
+`--sampling-mode qmc` uses democratic sector refinement by default:
+
+```sh
+.venv/bin/python FSD.py --run examples/runs/dot_double_box.yaml \
+  --sampling-mode qmc --target-integration-time 30
+```
+
+Democratic QMC samples every active sector in every iteration and keeps the
+correlated shift-by-shift sector-sum estimator.  By default each iteration uses
+the capped production lattice,
+`--qmc-initial-samples-per-iter 4096` and `--qmc-initial-shifts 64`, because
+QMC shift estimates from different lattice sizes should not be mixed as
+equal-weight samples.  Smaller pilot lattices are still available by explicitly
+setting `--qmc-initial-samples-per-iter` and `--qmc-initial-shifts`; use them
+for diagnostics rather than final quoted errors.
+The progress bar reports the leading and sub-leading error sectors as
+`lead:S:xx.x% T:yy.y%`.
+
+Adaptive sector refinement remains available when explicitly requested:
+
+```sh
+.venv/bin/python FSD.py --run examples/runs/dot_double_box.yaml \
+  --sampling-mode qmc --qmc-refine-sectors adaptive
+```
+
+Adaptive QMC samples every sector once, then focuses later iterations on the
+sectors dominating the summed coefficient error.  It is useful for diagnostics
+and targeted refinement, but once sectors are skipped it can no longer use the
+same correlated sector-sum estimator as democratic QMC.
+
+QMC can resume from the existing `result.json` at `--result-path`.
+This is useful after a keyboard interrupt because the partial result is written
+before returning.  Use `--restart` to ignore an existing file and overwrite it
+with a fresh run.
 
 Choose the Symbolica evaluator backend:
 
@@ -766,12 +805,28 @@ During integration, `progressbar2` reports compact coloured labels:
 - `eta`: ETA to the sample budget, or to the target relative accuracy when
   `--target-rel-accuracy`, `--target-rel-error`, `--target-abs-error`, or
   `--target-integration-time` is enabled,
-- `eval μs/smpl/wkr`: average evaluator time per sample per worker in `μs`;
+- `evalμs`: average evaluator time per sample per worker in `μs`;
   `EvalT` is worker-summed, so this is normalized by the total sample count,
-- `prof py|eval|hav`: live profile `(python | evaluator | havana)`, where Havana includes grid
-  sampling, cloned-grid training accumulation, merge, and update time.  In
-  `--sampling-mode qmc`, `hav` is zero because QMCPy sampling is accounted for
-  in the Python timing bucket.
+- `prof`: live profile `(python | evaluator | integrator)`, where integrator time
+  includes Havana grid sampling/training/merge/update in Havana mode and QMC
+  lattice generation/periodization in QMC mode,
+- `lead`: in QMC mode, the current leading and sub-leading sector contributions
+  to the summed MC error, with the percentages highlighted in blue.
+
+QMC uses a dedicated compact progress line.  `step` is the raw lattice work
+completed in the current scheduler step, `all` is the accumulated raw lattice
+work, `lat` is `points-per-shift x shifts`, `sec` is
+`scheduled-sectors/active-sectors`, and `next` is the ETA to the next reliable
+aggregate update.  Adaptive QMC does not show a misleading full democratic
+sample budget because later scheduler steps intentionally skip small sectors.
+By default QMC uses `--qmc-max-samples-per-iter 4096`, so run presets with very
+large `--samples-per-iter` values remain bounded unless the user opts out.  The
+max lattice cap applies to both adaptive and democratic QMC schedules; set
+`--qmc-max-samples-per-iter 0` to allow the full `--samples-per-iter` value.
+
+FSD rewrites the selected `result.json` after each completed integration
+iteration.  These intermediate files use the same schema as the final result
+and carry `"intermediate": true`; the final write removes that marker.
 
 When target stopping is enabled, Havana performs the target check after each
 accumulated batch, not only at full iteration boundaries.  The final result
@@ -792,9 +847,9 @@ Without `--target`, built-in triangle/box runs use OneLOopBridge, while
 DOT/FSD-only runs report `N/A` unless `--dot-engine both` or `--target
 pysecdec` is used.
 The timing footer reports total Symbolica evaluator time `EvalT`, measured
-Python hot-path time `PythonT`, Havana time `HavanaT`, Taylor evaluator setup
-time `TaylorGen`, chain-rule composition formula setup time `ChainGen`, and
-the corresponding profile percentages.
+Python hot-path time `PythonT`, sampler/integrator time `IntegratorT`, Taylor
+evaluator setup time `TaylorGen`, chain-rule composition formula setup time
+`ChainGen`, and the corresponding profile percentages.
 
 ## Current Scope
 

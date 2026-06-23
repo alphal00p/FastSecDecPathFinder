@@ -280,16 +280,20 @@ def print_saved_results(path: str | Path, sort_mode: str = "index") -> None:
     timing = PrettyTable()
     timing.field_names = [maybe_color("timing", Fore.CYAN), maybe_color("value", Fore.CYAN)]
     timing_rows = 0
-    for key in (
-        "eval_seconds",
-        "python_seconds",
-        "havana_seconds",
-        "dual_evaluator_build_seconds",
-        "chain_rule_formula_build_seconds",
-        "avg_eval_us_per_sample_per_worker",
-    ):
+    timing_keys = [
+        ("eval_seconds", "eval_seconds"),
+        ("python_seconds", "python_seconds"),
+        (
+            "integrator_seconds",
+            "integrator_seconds" if "integrator_seconds" in data else "havana_seconds",
+        ),
+        ("dual_evaluator_build_seconds", "dual_evaluator_build_seconds"),
+        ("chain_rule_formula_build_seconds", "chain_rule_formula_build_seconds"),
+        ("avg_eval_us_per_sample_per_worker", "avg_eval_us_per_sample_per_worker"),
+    ]
+    for label, key in timing_keys:
         if key in data:
-            timing.add_row([maybe_color(key, Fore.MAGENTA), data.get(key)])
+            timing.add_row([maybe_color(label, Fore.MAGENTA), data.get(key)])
             timing_rows += 1
     if timing_rows:
         print(timing)

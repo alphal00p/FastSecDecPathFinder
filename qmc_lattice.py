@@ -99,6 +99,29 @@ def cbcpt_dn1_shifted_lattice_points(
     return np.mod(lattice[np.newaxis, :, :] + shifts[:, np.newaxis, :], 1.0)
 
 
+def actual_lattice_point_count(*, backend: str, n_points: int) -> int:
+    """Return the concrete point count used by a QMC backend.
+
+    Some backends interpret ``n_points`` as a lower bound.  In particular the
+    bundled CBC/PT vectors use the first available prime-sized rule with
+    ``n >= n_points``.  Progress reporting and target-time scheduling must use
+    this concrete size rather than the nominal request.
+    """
+    requested = int(n_points)
+    if backend == "qmcpy":
+        if not is_power_of_two(requested):
+            raise ValueError("QMCPy QMC requires --samples-per-iter to be a power of two")
+        return requested
+    if backend == "cbcpt-dn1-100":
+        vector_size = next((n for n in sorted(_CBCPT_DN1_100_VECTORS) if n >= requested), None)
+        if vector_size is None:
+            raise ValueError(
+                f"cbcpt-dn1-100 backend has no bundled vector for requested n >= {requested}"
+            )
+        return int(vector_size)
+    raise ValueError(f"unsupported QMC lattice backend {backend!r}")
+
+
 def shifted_lattice_points(
     *,
     backend: str,
