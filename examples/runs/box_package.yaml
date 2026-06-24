@@ -1,0 +1,30 @@
+topology-source: package
+sector-method: iterative
+
+package-integrand:
+  family: box_package
+  integration-variables: [x0, x1, x2, x3]
+  regulators: [eps]
+  requested-orders: [0]
+  loop-count: 1
+  dimension: "4 - 2*eps"
+  global-prefactor: "gamma(2 + eps)"
+  polynomials-to-decompose:
+    - name: U
+      expression: "x0 + x1 + x2 + x3"
+      exponent: "2*eps"
+    - name: F
+      expression: "x0*x2 + x1*x3"
+      exponent: "-2 - eps"
+
+dot-engine: fsd
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+symbolic-derivatives: true
+max-eps-order: 0
+samples-per-iter: 50000
+batch-size: 5000
+max-iter: 3
+min-iter: 1
+workers: 1
+result-path: ../outputs/box_package_result.json

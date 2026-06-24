@@ -1626,6 +1626,28 @@ class TopologyDefinition:
         """
         if self.dual_evaluator_mode != "symbolic-derivatives":
             return
+        if not self._supports_universal_chain_rule_formulas():
+            self.chain_rule_formulas_skipped = 1
+            if progress is not None:
+                progress.start_stage(
+                    "Symbolica chain-rule build",
+                    detail="skipped: falling back to Python chain-rule composition",
+                    total=1,
+                )
+                progress.update(
+                    1,
+                    total=1,
+                    detail="universal chain-rule formulas are validated only through three loops",
+                )
+                progress.finish_stage(
+                    "Symbolica chain-rule build",
+                    0.0,
+                    detail=(
+                        "skipped universal chain-rule formulas; "
+                        "falling back to Python chain-rule composition"
+                    ),
+                )
+            return
 
         requests: dict[
             tuple[Any, ...],
@@ -2911,6 +2933,15 @@ class TopologyDefinition:
         # sparse sector-specific coefficient list.
         return (len(active_x_indices), rank, canonical_envelope_shape)
 
+    def _supports_universal_chain_rule_formulas(self) -> bool:
+        """Return whether universal Symbolica chain-rule formulas are supported."""
+        loop_count = (
+            int(self.parametric_representation.loop_count)
+            if self.parametric_representation is not None
+            else 1
+        )
+        return loop_count <= 3
+
     def chain_rule_formula_for(
         self,
         sector: SectorDefinition,
@@ -3445,15 +3476,18 @@ class TopologyDefinition:
             return derivative_values[zero_x][:, np.newaxis]
 
         if use_chain_formula:
-            formula_output_shape = _chain_rule_canonical_envelope_shape(active_output_shape)
-            canonical_positions = _chain_rule_canonical_positions(active_output_shape)
-            signature = self._chain_rule_formula_signature(
-                sector,
-                polynomial,
-                active_output_shape,
-            )
-            if signature in self._chain_rule_formulas or not self.strict_prepared_bundle:
-                formula = self.chain_rule_formula_for(sector, polynomial, formula_output_shape)
+            if self._supports_universal_chain_rule_formulas():
+                formula_output_shape = _chain_rule_canonical_envelope_shape(active_output_shape)
+                canonical_positions = _chain_rule_canonical_positions(active_output_shape)
+                signature = self._chain_rule_formula_signature(
+                    sector,
+                    polynomial,
+                    active_output_shape,
+                )
+                if signature in self._chain_rule_formulas or not self.strict_prepared_bundle:
+                    formula = self.chain_rule_formula_for(sector, polynomial, formula_output_shape)
+                else:
+                    formula = None
             else:
                 formula = None
         else:
@@ -4003,6 +4037,10 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
         from uf_topology import build_topology_from_uf_request
 
         return build_topology_from_uf_request(request)
+    if request.integral == "package":
+        from package_integrand import build_topology_from_package_request
+
+        return build_topology_from_package_request(request)
     if request.integral == "triangle":
         if request.s is None:
             raise ValueError("triangle topology requires s")

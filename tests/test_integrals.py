@@ -846,6 +846,12 @@ def test_dual_evaluator_cli_modes_are_mutually_exclusive_and_default(monkeypatch
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--sectors", "3", "7"])
     assert build_request(parse_args()).sectors == (3, 7)
 
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--sectors", "{0..3}"])
+    assert build_request(parse_args()).sectors == (0, 1, 2, 3)
+
+    monkeypatch.setattr(sys, "argv", ["FSD.py", "--sectors", "0..2", "5,7"])
+    assert build_request(parse_args()).sectors == (0, 1, 2, 5, 7)
+
     monkeypatch.setattr(sys, "argv", ["FSD.py", "--regular-taylor-signature-limit", "512"])
     assert build_request(parse_args()).regular_taylor_signature_limit == 512
 
@@ -1008,6 +1014,25 @@ def test_run_yaml_resolves_paths_and_cli_overrides(monkeypatch: pytest.MonkeyPat
     assert request.ibp_reduce_to_log_endpoint is True
 
 
+def test_run_yaml_sector_range_expands(tmp_path: Path) -> None:
+    """Run YAML sector selectors accept the same range syntax as the CLI."""
+    run_file = tmp_path / "range.yaml"
+    run_file.write_text(
+        yaml.safe_dump(
+            {
+                "integral": "triangle",
+                "sectors": "{2..4}",
+                "result-path": "out.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
+
+    assert request.sectors == (2, 3, 4)
+
+
 def test_run_yaml_ibp_can_be_disabled_from_cli() -> None:
     """The triple-box preset enables IBP, but CLI flags can turn it off."""
     run_file = PROJECT_ROOT / "examples/runs/dot_triple_box.yaml"
@@ -1150,6 +1175,7 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
     run_files = sorted((PROJECT_ROOT / "examples/runs").glob("*.yaml"))
 
     assert {path.name for path in run_files} == {
+        "box_package.yaml",
         "builtin_box.yaml",
         "builtin_triangle.yaml",
         "dot_box.yaml",
@@ -1159,6 +1185,9 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
         "dot_triple_box_offshell.yaml",
         "dot_triple_box_offshell_rank2_numerator.yaml",
         "double_box_from_U_and_F.yaml",
+        "four_loop_package.yaml",
+        "four_loop_package_explicit.yaml",
+        "four_loop_package_symbolic.yaml",
     }
     for run_file in run_files:
         request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
@@ -1172,6 +1201,10 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
             assert request.topology_source == "uf"
             assert isinstance(request.uf_topology, dict)
             assert request.uf_topology.get("variables")
+        if request.integral == "package":
+            assert request.topology_source == "package"
+            assert isinstance(request.package_integrand, dict)
+            assert request.package_integrand.get("polynomials-to-decompose")
         if request.target_args:
             for target in request.target_args:
                 target_path = Path(target)
@@ -3012,6 +3045,40 @@ def test_chain_rule_formula_guard_skips_large_pregeneration_request() -> None:
     assert topology._chain_rule_formulas == {}
 
 
+def test_four_loop_symbolic_projector_skips_universal_chain_rule_formulas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four-loop symbolic derivatives use the Python chain-rule composer."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        dual_evaluator_mode="symbolic-derivatives",
+        subtraction_backend="projector-formula",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    configure_laurent_range(request, topology, sectors)
+    assert topology.parametric_representation is not None
+    topology.parametric_representation = replace(
+        topology.parametric_representation,
+        loop_count=4,
+    )
+    topology.prepare_dual_evaluators(sectors, request.dual_evaluator_mode)
+    topology.prepare_endpoint_projector_formulas(sectors)
+    topology.prepare_regular_taylor_formulas(sectors)
+
+    def forbidden_signature(*_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+        raise AssertionError("four-loop chain-rule formula signature was requested")
+
+    monkeypatch.setattr(topology, "_chain_rule_formula_signature", forbidden_signature)
+    topology.prepare_chain_rule_formulas(sectors)
+
+    assert topology.chain_rule_formulas_skipped == 1
+    assert topology._chain_rule_formulas == {}
+
+
 def test_single_overall_dual_evaluator_matches_per_sector_shape() -> None:
     """Envelope dual evaluators are remapped back to sector-native columns."""
     base_request = make_request(integral="triangle", mode="massless", s=-1.0, m=0.0)
@@ -3214,6 +3281,80 @@ def test_direct_uf_double_box_matches_dot_construction() -> None:
     assert uf_sectors[0].measure_monomial_powers == dot_sectors[0].measure_monomial_powers
 
 
+def _sector_endpoint_metadata(sectors: list[SectorDefinition]) -> list[tuple[Any, ...]]:
+    """Return the endpoint metadata relevant for package/DOT closure checks."""
+    return sorted(
+        (
+            tuple(sector.singular_axes),
+            tuple(sector.u_monomial_powers),
+            tuple(sector.f_monomial_powers),
+            tuple(sector.jacobian_monomial_powers),
+            tuple(float(power) for power in sector.measure_monomial_powers),
+            tuple(sector.endpoint_taylor_orders),
+        )
+        for sector in sectors
+    )
+
+
+def test_package_box_polynomials_close_against_dot_box() -> None:
+    """A pySecDec-style package box reproduces the DOT box sector metadata."""
+    clear_dot_bundle_cache()
+    from package_integrand import clear_package_bundle_cache
+
+    clear_package_bundle_cache()
+    common = [
+        "--samples-per-iter",
+        "16",
+        "--batch-size",
+        "16",
+        "--max-iter",
+        "1",
+        "--no-progress",
+        "--quiet-summary",
+    ]
+    package_request = build_request(
+        parse_args(
+            [
+                "--run",
+                str(PROJECT_ROOT / "examples/runs/box_package.yaml"),
+                *common,
+            ]
+        )
+    )
+    dot_request = build_request(
+        parse_args(
+            [
+                "--run",
+                str(PROJECT_ROOT / "examples/runs/dot_box.yaml"),
+                *common,
+            ]
+        )
+    )
+    try:
+        validate_request(package_request)
+        validate_request(dot_request)
+        package_topology = build_topology(package_request)
+        dot_topology = build_topology(dot_request)
+        package_sectors = generate_sectors(package_request)
+        dot_sectors = generate_sectors(dot_request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    sample = [0.1, 0.2, 0.3, 0.4]
+    assert package_topology.u_value(sample) == pytest.approx(dot_topology.u_value(sample))
+    assert package_topology.f_value(sample) == pytest.approx(dot_topology.f_value(sample))
+    assert package_topology.parametric_representation.loop_count == 1
+    assert package_topology.parametric_representation.u_exponent == (
+        dot_topology.parametric_representation.u_exponent
+    )
+    assert package_topology.parametric_representation.f_exponent == (
+        dot_topology.parametric_representation.f_exponent
+    )
+    assert len(package_sectors) == len(dot_sectors) == 3
+    assert sorted(len(sector.singular_axes) for sector in package_sectors) == [1, 2, 2]
+    assert _sector_endpoint_metadata(package_sectors) == _sector_endpoint_metadata(dot_sectors)
+
+
 def test_direct_uf_prepared_bundle_round_trips(tmp_path: Path) -> None:
     """Direct U/F topology metadata and evaluators survive prepared-bundle IO."""
     from uf_topology import clear_uf_bundle_cache
@@ -3269,6 +3410,301 @@ def test_direct_uf_prepared_bundle_round_trips(tmp_path: Path) -> None:
     )
     assert len(loaded_sectors) == len(sectors)
     assert loaded_sectors[0].measure_monomial_powers == sectors[0].measure_monomial_powers
+
+
+def _package_integrand_block(
+    *,
+    p0: str = "x1**2 + x2",
+    p1: str = "x1*x2 + 1",
+    regulators: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "family": "toy_package",
+        "integration-variables": ["x1", "x2"],
+        "regulators": regulators or ["eps"],
+        "requested-orders": [0],
+        "loop-count": 1,
+        "dimension": "4 - 2*eps",
+        "global-prefactor": "1",
+        "polynomials-to-decompose": [
+            {"name": "P0", "expression": p0, "exponent": "1"},
+            {"name": "P1", "expression": p1, "exponent": "eps - 1"},
+        ],
+    }
+
+
+def test_package_integrand_file_backed_input_resolves_relative_paths(tmp_path: Path) -> None:
+    """package-integrand can load large polynomial expressions from files."""
+    from package_integrand import package_integrand_data_from_request
+
+    poly_dir = tmp_path / "polys"
+    poly_dir.mkdir()
+    (poly_dir / "P0.txt").write_text("x1**2 + x2\n", encoding="utf-8")
+    (poly_dir / "P1.txt").write_text("x1*x2 + 1\n", encoding="utf-8")
+    run_file = tmp_path / "runs" / "toy.yaml"
+    run_file.parent.mkdir()
+    run_file.write_text(
+        yaml.safe_dump(
+            {
+                "topology-source": "package",
+                "package-integrand": {
+                    "family": "toy_package",
+                    "integration-variables": ["x1", "x2"],
+                    "regulators": ["eps"],
+                    "requested-orders": [0],
+                    "loop-count": 1,
+                    "dimension": "4 - 2*eps",
+                    "global-prefactor": "1",
+                    "polynomials-to-decompose": [
+                        {
+                            "name": "P0",
+                            "expression-file": "../polys/P0.txt",
+                            "exponent": "1",
+                        },
+                        {
+                            "name": "P1",
+                            "expression-file": "../polys/P1.txt",
+                            "exponent": "eps - 1",
+                        },
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    request = build_request(parse_args(["--run", str(run_file)]))
+    source = package_integrand_data_from_request(request)
+
+    assert request.integral == "package"
+    assert source.family == "toy_package"
+    assert source.x_names == ["x1", "x2"]
+    assert source.u_expr_text == "x1^2 + x2"
+    assert source.f_expr_text == "x1*x2 + 1"
+    assert source.u_exponent == EpsilonExpansion(1.0, 0.0)
+    assert source.f_exponent == EpsilonExpansion(-1.0, 1.0)
+    assert source.propagator_powers == (1.0, 1.0)
+    assert source.measure_powers == (0.0, 0.0)
+
+
+def test_package_integrand_validation_errors(tmp_path: Path) -> None:
+    """Unsupported package-integrand shapes fail before sector generation."""
+    from package_integrand import package_integrand_data_from_request
+
+    missing_file = _package_integrand_block()
+    missing_file["polynomials-to-decompose"][0] = {
+        "expression-file": "missing.txt",
+        "exponent": "1",
+    }
+    with pytest.raises(ValueError, match="expression-file does not exist"):
+        package_integrand_data_from_request(
+            make_request(
+                integral="package",
+                topology_source="package",
+                run_file=str(tmp_path / "run.yaml"),
+                package_integrand=missing_file,
+            )
+        )
+
+    wrong_count = _package_integrand_block()
+    wrong_count["polynomials-to-decompose"] = wrong_count["polynomials-to-decompose"][:1]
+    with pytest.raises(ValueError, match="exactly two"):
+        package_integrand_data_from_request(
+            make_request(
+                integral="package",
+                topology_source="package",
+                package_integrand=wrong_count,
+            )
+        )
+
+    with pytest.raises(ValueError, match=r"only regulators: \[eps\]"):
+        package_integrand_data_from_request(
+            make_request(
+                integral="package",
+                topology_source="package",
+                package_integrand=_package_integrand_block(regulators=["eps", "eta"]),
+            )
+        )
+
+
+def test_package_integrand_toy_builds_topology_and_sectors() -> None:
+    """A small package-integrand fixture reaches the normal FSD build path."""
+    from package_integrand import clear_package_bundle_cache
+
+    clear_package_bundle_cache()
+    request = make_request(
+        integral="package",
+        topology_source="package",
+        package_integrand=_package_integrand_block(p0="x1 + x2", p1="x1*x2 + 1"),
+        prefactor_convention="pysecdec",
+        subtraction_backend="projector-formula",
+        ibp_reduce_to_log_endpoint=True,
+    )
+    try:
+        validate_request(request)
+        topology = build_topology(request)
+        sectors = generate_sectors(request)
+    except RuntimeError as exc:
+        pytest.skip(f"pySecDec unavailable: {exc}")
+
+    assert topology.family == "toy_package"
+    assert topology.parametric_representation.loop_count == 1
+    assert topology.parametric_representation.propagator_powers == (1.0, 1.0)
+    assert sectors
+
+
+def test_package_pysecdec_target_routes_to_make_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    """package-integrand mode can use pySecDec as an explicit target."""
+    import FSD as fsd_module
+
+    calls: dict[str, Any] = {}
+
+    def fake_run_pysecdec_make_package(source: Any, request: IntegralRequest, progress: Any = None) -> Any:
+        calls["source"] = source
+        calls["request"] = request
+        calls["progress"] = progress
+        timings = GenerationTimings()
+        return SimpleNamespace(
+            coeffs=[3.0 + 0.0j],
+            errors=[0.1 + 0.0j],
+            orders=[0],
+            timings=timings,
+        )
+
+    monkeypatch.setattr(
+        fsd_module,
+        "run_pysecdec_make_package",
+        fake_run_pysecdec_make_package,
+    )
+    request = make_request(
+        integral="package",
+        topology_source="package",
+        package_integrand=_package_integrand_block(p0="x1 + x2", p1="x1*x2 + 1"),
+        prefactor_convention="pysecdec",
+        target_args=("pysecdec",),
+    )
+    validate_request(request)
+    topology = SimpleNamespace(laurent_min_order=0, laurent_max_order=0)
+
+    target = fsd_module.resolve_target(request, topology, {})
+
+    assert target is not None
+    assert target.source == "pysecdec"
+    assert target.convention == "pysecdec"
+    assert target.coefficients == [3.0 + 0.0j]
+    assert target.errors == [0.1 + 0.0j]
+    assert calls["source"].family == "toy_package"
+    assert calls["request"] is request
+
+
+def test_package_pysecdec_make_package_uses_native_method_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """FSD's no-primary infinity name is passed through to pySecDec make_package."""
+    from package_integrand import package_integrand_data_from_request
+    import pysecdec_bridge
+
+    captured: dict[str, Any] = {}
+
+    def fake_make_package(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        pysecdec_bridge,
+        "require_pysecdec",
+        lambda: {"make_package": fake_make_package},
+    )
+    monkeypatch.setattr(
+        pysecdec_bridge.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    request = make_request(
+        integral="package",
+        topology_source="package",
+        sector_method="geometric_infinity_no_primary",
+        normaliz_executable="/usr/bin/normaliz",
+        package_integrand=_package_integrand_block(p0="x1 + x2", p1="x1*x2 + 1"),
+        pysecdec_workdir=str(tmp_path / "pysecdec"),
+    )
+    source = package_integrand_data_from_request(request)
+
+    pysecdec_bridge.ensure_pysecdec_make_package(source, request)
+
+    assert captured["name"] == "fsd_psd_toy_package"
+    assert captured["decomposition_method"] == "geometric_infinity_no_primary"
+    assert captured["polynomials_to_decompose"] == [
+        "(x1 + x2)**(1)",
+        "(x1*x2 + 1)**(-1 + 1*eps)",
+    ]
+    assert captured["polynomial_names"] == ["P0", "P1"]
+
+
+def test_pysecdec_cast_product_extracts_unfactored_common_powers() -> None:
+    """Endpoint monomials may be common powers inside a pySecDec polynomial."""
+    import pysecdec_bridge
+
+    class FakePolynomial:
+        def __init__(self, expolist: list[list[int]]) -> None:
+            self.expolist = expolist
+            self.coeffs = [1 for _ in expolist]
+
+    powers, residual = pysecdec_bridge._split_cast_product(
+        FakePolynomial([[2, 1, 0], [3, 1, 4], [2, 5, 2]]),
+        3,
+    )
+
+    assert powers == [2, 1, 0]
+    assert isinstance(residual, FakePolynomial)
+
+
+def test_geometric_infinity_no_primary_dispatches_without_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The package-style infinity method skips primary decomposition."""
+    import pysecdec_bridge
+
+    class FakeSector:
+        def __init__(self, cast: list[Any], other: list[Any]) -> None:
+            self.cast = cast
+            self.other = other
+
+    calls: list[str] = []
+
+    def geometric_decomposition(sector: Any, **_kwargs: Any) -> list[str]:
+        assert isinstance(sector, FakeSector)
+        calls.append("geometric")
+        return ["decomposed"]
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("primary decomposition must not be called")
+
+    monkeypatch.setattr(pysecdec_bridge, "_sector_other_polynomials", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        pysecdec_bridge,
+        "_squash_pysecdec_sector_symmetries",
+        lambda sectors, *_args, **_kwargs: sectors,
+    )
+    request = make_request(
+        integral="package",
+        topology_source="package",
+        sector_method="geometric_infinity_no_primary",
+    )
+    sectors = pysecdec_bridge._decompose(
+        SimpleNamespace(U="U", F="F", integration_variables=["x1", "x2"], numerator=None),
+        request,
+        GenerationTimings(),
+        {
+            "Sector": FakeSector,
+            "primary_decomposition": forbidden,
+            "iterative_decomposition": forbidden,
+            "geometric_decomposition_ku": forbidden,
+            "geometric_decomposition": geometric_decomposition,
+            "Cheng_Wu": forbidden,
+        },
+    )
+
+    assert sectors == ["decomposed"]
+    assert calls == ["geometric"]
 
 
 def test_dot_nonunit_power_reaches_sector_measure_metadata(tmp_path: Path) -> None:

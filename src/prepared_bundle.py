@@ -1128,6 +1128,7 @@ def save_prepared_bundle(
             "dot_file": request.dot_file,
             "kinematics_file": request.kinematics_file,
             "uf_topology": request.uf_topology,
+            "package_integrand": request.package_integrand,
         },
         "metadata": {
             "python": sys.version,

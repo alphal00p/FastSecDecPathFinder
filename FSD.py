@@ -59,7 +59,12 @@ from integrand import build_topology
 from integrator import integrate
 from kinematics import load_kinematics
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
-from pysecdec_bridge import ensure_pysecdec_package, run_pysecdec_package
+from package_integrand import get_package_bundle, package_integrand_data_from_request
+from pysecdec_bridge import (
+    ensure_pysecdec_package,
+    run_pysecdec_make_package,
+    run_pysecdec_package,
+)
 from pysecdec_kernel_benchmark import (
     benchmark_pysecdec_generated_kernels,
     output_pysecdec_kernel_benchmark_json,
@@ -290,8 +295,13 @@ def validate_request(request: IntegralRequest) -> None:
         elif request.integral == "uf":
             if not isinstance(request.uf_topology, dict):
                 raise ValueError("generate U/F mode requires a uf-topology mapping")
+        elif request.integral == "package":
+            if not isinstance(request.package_integrand, dict):
+                raise ValueError("generate package mode requires a package-integrand mapping")
         else:
-            raise ValueError("generate currently supports only DOT and direct U/F topologies")
+            raise ValueError(
+                "generate currently supports only DOT, direct U/F, and package topologies"
+            )
         if request.dual_evaluator_mode == "lazy":
             raise ValueError(
                 "generate cannot use --lazy-dual-evaluators-generation because "
@@ -423,17 +433,33 @@ def validate_request(request: IntegralRequest) -> None:
     if request.direct_projector_cache_term_threshold < 0:
         raise ValueError("--direct-projector-cache-term-threshold must be >= 0")
 
-    if request.integral == "uf":
+    if request.integral in {"uf", "package"}:
         if request.command == "integrate":
             return
-        if request.topology_source != "uf":
-            raise ValueError("direct U/F topology mode requires --topology-source uf")
-        if not isinstance(request.uf_topology, dict):
-            raise ValueError("direct U/F topology mode requires a uf-topology YAML mapping")
+        if request.integral == "uf":
+            if request.topology_source != "uf":
+                raise ValueError("direct U/F topology mode requires --topology-source uf")
+            if not isinstance(request.uf_topology, dict):
+                raise ValueError("direct U/F topology mode requires a uf-topology YAML mapping")
+            label = "direct U/F topology mode"
+        else:
+            if request.topology_source != "package":
+                raise ValueError("package topology mode requires --topology-source package")
+            if not isinstance(request.package_integrand, dict):
+                raise ValueError("package topology mode requires a package-integrand YAML mapping")
+            label = "package topology mode"
         if request.dot_engine != "fsd":
-            raise ValueError("direct U/F topology mode supports only --dot-engine fsd")
-        if request.target_args == ("pysecdec",):
-            raise ValueError("direct U/F topology mode cannot use --target pysecdec")
+            raise ValueError(f"{label} supports only --dot-engine fsd")
+        if request.integral == "uf" and request.target_args == ("pysecdec",):
+            raise ValueError(f"{label} cannot use --target pysecdec")
+        if request.sector_method.startswith("geometric"):
+            normaliz = request.normaliz_executable or shutil.which("normaliz") or shutil.which("Normaliz")
+            if normaliz is None:
+                raise ValueError(
+                    f"--sector-method {request.sector_method} requires Normaliz on PATH "
+                    "or --normaliz-executable; use --sector-method iterative when "
+                    "Normaliz is unavailable"
+                )
         return
 
     if request.integral == "dot":
@@ -451,12 +477,13 @@ def validate_request(request: IntegralRequest) -> None:
         kin_path = Path(request.kinematics_file).expanduser()
         if not kin_path.is_file():
             raise ValueError(f"DOT kinematics YAML does not exist: {kin_path}")
-        if request.sector_method == "geometric":
+        if request.sector_method.startswith("geometric"):
             normaliz = request.normaliz_executable or shutil.which("normaliz") or shutil.which("Normaliz")
             if normaliz is None:
                 raise ValueError(
-                    "--sector-method geometric requires Normaliz on PATH or --normaliz-executable; "
-                    "use --sector-method geometric_ku or iterative when Normaliz is unavailable"
+                    f"--sector-method {request.sector_method} requires Normaliz on PATH "
+                    "or --normaliz-executable; use --sector-method iterative when "
+                    "Normaliz is unavailable"
                 )
         return
 
@@ -520,6 +547,36 @@ def _is_numeric_token(token: object) -> bool:
         return False
 
 
+def _parse_sector_specs(value: object) -> list[int]:
+    """Expand CLI/YAML sector selectors into canonical integer ids."""
+    raw_items = value if isinstance(value, (list, tuple)) else [value]
+    sectors: list[int] = []
+    for raw_item in raw_items:
+        for raw_part in str(raw_item).split(","):
+            token = raw_part.strip()
+            if not token:
+                continue
+            if token.startswith("{") and token.endswith("}"):
+                token = token[1:-1].strip()
+            if ".." in token:
+                pieces = token.split("..")
+                if len(pieces) != 2 or not pieces[0] or not pieces[1]:
+                    raise ValueError(f"invalid --sectors range {raw_part!r}")
+                try:
+                    start = int(pieces[0])
+                    stop = int(pieces[1])
+                except ValueError as exc:
+                    raise ValueError(f"invalid --sectors range {raw_part!r}") from exc
+                step = 1 if stop >= start else -1
+                sectors.extend(range(start, stop + step, step))
+                continue
+            try:
+                sectors.append(int(token))
+            except ValueError as exc:
+                raise ValueError(f"invalid --sectors value {raw_part!r}") from exc
+    return sectors
+
+
 def _resolve_yaml_path(value: object, base_dir: Path) -> str:
     """Resolve one YAML path relative to the run-file directory."""
     path = Path(str(value)).expanduser()
@@ -560,6 +617,8 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
         value = raw_value
         if key == "uf_topology" and value is not None and not isinstance(value, dict):
             raise ValueError(f"{run_path}: uf-topology must be a YAML mapping")
+        if key == "package_integrand" and value is not None and not isinstance(value, dict):
+            raise ValueError(f"{run_path}: package-integrand must be a YAML mapping")
         if key in {
             "pregenerate_dual_evaluators",
             "lazy_dual_evaluators_generation",
@@ -586,7 +645,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
                     resolved_tokens.append(_resolve_yaml_path(token, base_dir))
             value = resolved_tokens
         elif key == "sectors" and value is not None:
-            value = [int(item) for item in (value if isinstance(value, list) else [value])]
+            value = _parse_sector_specs(value)
         defaults[key] = value
     return defaults
 
@@ -626,11 +685,12 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     )
     parser.add_argument(
         "--topology-source",
-        choices=["builtin", "dot", "uf"],
+        choices=["builtin", "dot", "uf", "package"],
         default=defaults.get("topology_source", "builtin"),
         help=(
             "Topology input source. 'uf' reads an inline uf-topology block from "
-            "the run YAML and generates sectors from the supplied U/F polynomials."
+            "the run YAML; 'package' reads a pySecDec-style package-integrand "
+            "block with two decomposed polynomials."
         ),
     )
     parser.add_argument(
@@ -642,7 +702,7 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--graph-name", default=None, help="DOT graph name when a file contains multiple graphs.")
     parser.add_argument(
         "--sector-method",
-        choices=["geometric", "geometric_ku", "iterative"],
+        choices=["geometric", "geometric_ku", "geometric_infinity_no_primary", "iterative"],
         default="iterative",
         help="pySecDec decomposition method used for DOT sector generation. Default: iterative.",
     )
@@ -665,12 +725,12 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument(
         "--sectors",
         nargs="+",
-        type=int,
         default=None,
         help=(
             "Restrict sector-oriented commands to the listed canonical sector ids "
-            "from the sector summary table. In integration output, inactive sectors "
-            "are still recorded in result.json with zero samples."
+            "from the sector summary table. Accepts integers, comma-separated "
+            "lists, and inclusive ranges like 0..170 or {0..170}. In integration "
+            "output, inactive sectors are still recorded in result.json with zero samples."
         ),
     )
     parser.add_argument("--s", type=float, default=None, help="Triangle invariant s=p0^2.")
@@ -1471,7 +1531,8 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     if prefactor_convention is None:
         prefactor_convention = (
             "pysecdec"
-            if topology_source in {"dot", "uf"} or command in {"generate", "integrate", "cache"}
+            if topology_source in {"dot", "uf", "package"}
+            or command in {"generate", "integrate", "cache"}
             else "raw"
         )
     output = str(Path(args.output).expanduser()) if args.output is not None else None
@@ -1529,12 +1590,13 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
     return IntegralRequest(
         run_file=str(Path(args.run_file).expanduser().resolve()) if args.run_file is not None else None,
         integral=(
-            "uf"
-            if topology_source == "uf"
+            topology_source
+            if topology_source in {"uf", "package"}
             else ("dot" if dot_file is not None or command in {"generate", "integrate"} else args.integral)
         ),
         topology_source=topology_source,
         uf_topology=getattr(args, "uf_topology", None),
+        package_integrand=getattr(args, "package_integrand", None),
         dot_file=dot_file,
         kinematics_file=kinematics_file,
         graph_name=args.graph_name,
@@ -1542,7 +1604,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         normaliz_executable=args.normaliz_executable,
         dot_engine=args.dot_engine,
         numerator_reducer=args.numerator_reducer,
-        sectors=tuple(args.sectors) if args.sectors is not None else None,
+        sectors=tuple(_parse_sector_specs(args.sectors)) if args.sectors is not None else None,
         pysecdec_workdir=args.pysecdec_workdir,
         pysecdec_epsrel=args.pysecdec_epsrel,
         pysecdec_maxeval=args.pysecdec_maxeval,
@@ -1669,7 +1731,7 @@ def deepest_laurent_order(topology) -> int:
 
 def _has_external_global_prefactor(request: IntegralRequest) -> bool:
     """Return whether sector coefficients are followed by a stored prefactor."""
-    return request.integral in {"dot", "uf"}
+    return request.integral in {"dot", "uf", "package"}
 
 
 def _get_external_bundle(request: IntegralRequest, progress: GenerationProgress | None = None):
@@ -1678,6 +1740,8 @@ def _get_external_bundle(request: IntegralRequest, progress: GenerationProgress 
         return get_dot_bundle(request, progress=progress)
     if request.integral == "uf":
         return get_uf_bundle(request, progress=progress)
+    if request.integral == "package":
+        return get_package_bundle(request, progress=progress)
     raise ValueError(f"{request.integral!r} is not an external parametric topology")
 
 
@@ -1876,6 +1940,11 @@ def _make_integration_output(
         output["input_metadata"] = {
             "topology_source": "uf",
             "uf_topology": request.uf_topology or {},
+        }
+    elif request.integral == "package":
+        output["input_metadata"] = {
+            "topology_source": "package",
+            "package_integrand": request.package_integrand or {},
         }
     return output
 
@@ -2244,9 +2313,9 @@ def _pysecdec_target(
     summary: dict,
     logger: logging.Logger | None = None,
 ) -> TargetDefinition:
-    """Run pySecDec and return its coefficients as a DOT target."""
-    if request.integral != "dot":
-        raise ValueError("--target pysecdec is only available in DOT mode")
+    """Run pySecDec and return its coefficients as a comparison target."""
+    if request.integral not in {"dot", "package"}:
+        raise ValueError("--target pysecdec is only available in DOT or package mode")
     if request.prefactor_convention != "pysecdec":
         raise ValueError("--target pysecdec requires --prefactor-convention pysecdec")
     progress = (
@@ -2255,7 +2324,11 @@ def _pysecdec_target(
         else None
     )
     try:
-        result = run_pysecdec_package(get_dot_bundle(request), request, progress=progress)
+        if request.integral == "dot":
+            result = run_pysecdec_package(get_dot_bundle(request), request, progress=progress)
+        else:
+            source = package_integrand_data_from_request(request)
+            result = run_pysecdec_make_package(source, request, progress=progress)
     finally:
         if progress is not None:
             progress.close()
@@ -2289,9 +2362,11 @@ def _write_pysecdec_target_file(
     summary: dict,
     logger: logging.Logger | None = None,
 ) -> None:
-    """Generate a DOT pySecDec target and persist it as a reusable result file."""
-    if request.integral != "dot":
-        raise ValueError("missing file-backed pySecDec targets can only be generated in DOT mode")
+    """Generate a pySecDec target and persist it as a reusable result file."""
+    if request.integral not in {"dot", "package"}:
+        raise ValueError(
+            "missing file-backed pySecDec targets can only be generated in DOT or package mode"
+        )
     if request.prefactor_convention != "pysecdec":
         raise ValueError("file-backed pySecDec targets require --prefactor-convention pysecdec")
     _ensure_target_parent(path)
@@ -2335,13 +2410,15 @@ def resolve_target(
         if len(args) == 1:
             token = args[0]
             if token == "pysecdec":
-                if request.integral != "dot":
-                    raise ValueError("--target pysecdec is only available in DOT mode")
+                if request.integral not in {"dot", "package"}:
+                    raise ValueError("--target pysecdec is only available in DOT or package mode")
                 target = _pysecdec_target(request, summary, logger=logger)
                 return _align_target_to_topology(target, topology, request)
             if token == "oneloop":
-                if request.integral == "uf":
-                    raise ValueError("--target oneloop is not available in direct U/F mode")
+                if request.integral in {"uf", "package"}:
+                    raise ValueError(
+                        "--target oneloop is not available in direct U/F or package mode"
+                    )
                 target = (
                     _dot_oneloop_target(request, topology)
                     if request.integral == "dot"
@@ -2362,7 +2439,7 @@ def resolve_target(
                 return _align_target_to_topology(target, topology, request)
         return _numeric_target(request, topology, args)
 
-    if request.integral == "uf":
+    if request.integral in {"uf", "package"}:
         return None
     if request.integral != "dot":
         return _oneloop_target(request, topology)
@@ -2619,8 +2696,11 @@ def _main_impl() -> int:
             request = replace(
                 request,
                 integral=(
-                    "uf"
-                    if (prepared_manifest.get("source_files", {}).get("topology_source") == "uf")
+                    str(prepared_manifest.get("source_files", {}).get("topology_source"))
+                    if (
+                        prepared_manifest.get("source_files", {}).get("topology_source")
+                        in {"uf", "package"}
+                    )
                     else request.integral
                 ),
                 topology_source=str(
@@ -2632,6 +2712,10 @@ def _main_impl() -> int:
                 uf_topology=prepared_manifest.get("source_files", {}).get(
                     "uf_topology",
                     request.uf_topology,
+                ),
+                package_integrand=prepared_manifest.get("source_files", {}).get(
+                    "package_integrand",
+                    request.package_integrand,
                 ),
                 dot_global_prefactor_coeffs=tuple(topology.global_prefactor_coeffs or []),
                 dot_global_prefactor_min_order=int(getattr(topology, "global_prefactor_min_order", 0)),
@@ -2783,7 +2867,7 @@ def _main_impl() -> int:
         request.command == "run"
         and _has_external_global_prefactor(request)
         and request.output is not None
-        and (request.integral == "uf" or request.dot_engine in {"fsd", "both"})
+        and (request.integral in {"uf", "package"} or request.dot_engine in {"fsd", "both"})
         and prepared_manifest is None
     ):
         try:

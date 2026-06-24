@@ -97,6 +97,7 @@ class PySecDecPackagePaths:
 def require_pysecdec() -> dict[str, Any]:
     """Import pySecDec pieces and raise a setup-oriented error if unavailable."""
     try:
+        import pySecDec
         from pySecDec.algebra import Polynomial
         from pySecDec.decomposition import Sector
         from pySecDec.decomposition.geometric import (
@@ -120,7 +121,7 @@ def require_pysecdec() -> dict[str, Any]:
         from pySecDec.misc import argsort_ND_array
     except Exception as exc:  # pragma: no cover - depends on optional external package.
         raise RuntimeError(
-            "DOT mode requires pySecDec. Install it in this venv with "
+            "pySecDec support requires pySecDec. Install it in this venv with "
             "'.venv/bin/python -m pip install pySecDec' and ensure FORM/Normaliz "
             "requirements are available for the selected sector method."
         ) from exc
@@ -139,6 +140,7 @@ def require_pysecdec() -> dict[str, Any]:
         "LoopIntegralFromGraph": LoopIntegralFromGraph,
         "LoopIntegralFromPropagators": LoopIntegralFromPropagators,
         "loop_package": loop_package,
+        "make_package": pySecDec.make_package,
         "Pak_sort": Pak_sort,
         "iterative_sort": iterative_sort,
         "light_Pak_sort": light_Pak_sort,
@@ -150,6 +152,32 @@ def pysecdec_package_paths(bundle: DotBuildBundle, request: IntegralRequest) -> 
     """Return canonical package paths for a DOT pySecDec generated package."""
     workdir = Path(request.pysecdec_workdir).expanduser().resolve()
     name = f"fsd_psd_{bundle.parsed_graph.graph_name}"
+    package_dir = workdir / name
+    integral_dir = package_dir / f"{name}_integral"
+    return PySecDecPackagePaths(
+        package_dir=package_dir,
+        integral_dir=integral_dir,
+        shared_library=package_dir / f"{name}_pylink.so",
+    )
+
+
+def _safe_pysecdec_name(name: str) -> str:
+    """Return a filesystem/C++ namespace friendly pySecDec package name."""
+    sanitized = re.sub(r"[^0-9A-Za-z_]+", "_", str(name)).strip("_")
+    if not sanitized:
+        sanitized = "package"
+    if sanitized[0].isdigit():
+        sanitized = f"p_{sanitized}"
+    return sanitized
+
+
+def pysecdec_make_package_paths(
+    source: UFTopologyData,
+    request: IntegralRequest,
+) -> PySecDecPackagePaths:
+    """Return canonical paths for a pySecDec make_package target."""
+    workdir = Path(request.pysecdec_workdir).expanduser().resolve()
+    name = f"fsd_psd_{_safe_pysecdec_name(source.family)}"
     package_dir = workdir / name
     integral_dir = package_dir / f"{name}_integral"
     return PySecDecPackagePaths(
@@ -251,6 +279,149 @@ def ensure_pysecdec_package(
                         real_parameters=bundle.kinematics.parameter_names,
                         contour_deformation=False,
                         decomposition_method=request.sector_method,
+                        normaliz_executable=request.normaliz_executable,
+                        enforce_complex=True,
+                    )
+            compile_detail = (
+                "make pylink"
+                if request.show_pysecdec_output
+                else f"make pylink; captured output: {log_path}"
+            )
+            with timings.measure("pySecDec package compile", compile_detail, progress=progress):
+                subprocess.run(
+                    ["make", "-C", str(paths.package_dir), "pylink", "-j"],
+                    check=True,
+                    stdout=None if request.show_pysecdec_output else log_handle,
+                    stderr=None if request.show_pysecdec_output else subprocess.STDOUT,
+                )
+    finally:
+        os.chdir(cwd)
+    return paths, timings
+
+
+def _package_mapping_get(mapping: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Return a package-integrand value accepting kebab or snake case keys."""
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+        alternate = key.replace("-", "_")
+        if alternate in mapping:
+            return mapping[alternate]
+    return default
+
+
+def _pysecdec_expression_text(text: str) -> str:
+    """Convert stored Symbolica-style expression text back to pySecDec syntax."""
+    return str(text).replace("^", "**").replace("i_", "I")
+
+
+def _pysecdec_exponentiated_polynomial(expr_text: str, exponent: EpsilonExpansion) -> str:
+    """Render one decomposed polynomial with its package exponent."""
+    return f"({_pysecdec_expression_text(expr_text)})**({_pysecdec_expression_text(exponent.as_text())})"
+
+
+def _pysecdec_make_package_decomposition_method(method: str) -> str:
+    """Return the pySecDec make_package decomposition method."""
+    return method
+
+
+def ensure_pysecdec_make_package(
+    source: UFTopologyData,
+    request: IntegralRequest,
+    *,
+    progress: GenerationProgress | None = None,
+) -> tuple[PySecDecPackagePaths, GenerationTimings]:
+    """Ensure a pySecDec make_package target exists for package-style input."""
+    modules = require_pysecdec()
+    timings = GenerationTimings()
+    paths = pysecdec_make_package_paths(source, request)
+    if paths.package_dir.exists() and not request.keep_pysecdec_workdir:
+        shutil.rmtree(paths.package_dir)
+    paths.package_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = paths.integral_dir / "disteval" / f"{paths.integral_dir.name}.json"
+    static_library = paths.integral_dir / f"lib{paths.integral_dir.name}.a"
+    if (
+        request.keep_pysecdec_workdir
+        and paths.package_dir.exists()
+        and paths.shared_library.is_file()
+        and metadata.is_file()
+        and static_library.is_file()
+    ):
+        timings.add(
+            "pySecDec package generation",
+            0.0,
+            detail="reused existing generated package",
+        )
+        timings.add(
+            "pySecDec package compile",
+            0.0,
+            detail="reused existing compiled package",
+        )
+        return paths, timings
+
+    package_data = request.package_integrand or {}
+    raw_polynomials = _package_mapping_get(
+        package_data,
+        "polynomials-to-decompose",
+        default=[],
+    )
+    polynomial_names = [
+        str(entry.get("name", f"P{index}")) if isinstance(entry, dict) else f"P{index}"
+        for index, entry in enumerate(raw_polynomials)
+    ]
+    if len(polynomial_names) != 2:
+        polynomial_names = ["P0", "P1"]
+    regulators = [
+        str(item)
+        for item in _package_mapping_get(package_data, "regulators", default=["eps"])
+    ]
+    requested_orders = [
+        int(item)
+        for item in _package_mapping_get(
+            package_data,
+            "requested-orders",
+            default=[request.max_eps_order],
+        )
+    ]
+    polynomials_to_decompose = [
+        _pysecdec_exponentiated_polynomial(source.u_expr_text, source.u_exponent),
+        _pysecdec_exponentiated_polynomial(source.f_expr_text, source.f_exponent),
+    ]
+
+    cwd = Path.cwd()
+    log_path = _pysecdec_generation_log_path(paths)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_detail = "" if request.show_pysecdec_output else f"captured output: {log_path}"
+    try:
+        os.chdir(paths.package_dir.parent)
+        with (
+            contextlib.nullcontext()
+            if request.show_pysecdec_output
+            else log_path.open("w", encoding="utf-8")
+        ) as log_handle:
+            with timings.measure(
+                "pySecDec package generation",
+                log_detail,
+                progress=progress,
+            ):
+                with (
+                    contextlib.nullcontext()
+                    if request.show_pysecdec_output
+                    else _redirect_process_output_to(log_handle)
+                ):
+                    modules["make_package"](
+                        name=paths.package_dir.name,
+                        integration_variables=list(source.x_names),
+                        regulators=regulators,
+                        requested_orders=requested_orders,
+                        polynomials_to_decompose=polynomials_to_decompose,
+                        polynomial_names=polynomial_names,
+                        prefactor=_pysecdec_expression_text(source.global_prefactor),
+                        real_parameters=list(source.parameter_names),
+                        decomposition_method=_pysecdec_make_package_decomposition_method(
+                            request.sector_method
+                        ),
                         normaliz_executable=request.normaliz_executable,
                         enforce_complex=True,
                     )
@@ -798,6 +969,25 @@ def _decompose(
                 )
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
+        if request.sector_method == "geometric_infinity_no_primary":
+            # Mirror pySecDec's package writer: no primary decomposition, and
+            # use the infinity-region geometric strategy on the initial sector.
+            try:
+                sectors = list(
+                    modules["geometric_decomposition"](
+                        initial, normaliz=normaliz, workdir=workdir
+                    )
+                )
+                return _squash_pysecdec_sector_symmetries(
+                    sectors,
+                    request,
+                    timings,
+                    modules,
+                    progress,
+                    ignored_other_count=map_polynomial_count,
+                )
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         cheng_wu = modules["Cheng_Wu"](initial, index=-1)
         # pySecDec's geometric routines default to the literal directory name
         # ``normaliz_tmp``.  DOT workers may decompose the same graph in
@@ -957,13 +1147,39 @@ def _split_one_term_monomial(poly: Any, dimension: int) -> tuple[list[int], str]
     return [int(power) for power in exps[0].tolist()], _symbolica_text(coeff)
 
 
+def _common_monomial_powers(poly: Any, dimension: int) -> list[int]:
+    """Return powers common to every term of a pySecDec polynomial/product."""
+    if poly is None:
+        return [0 for _ in range(dimension)]
+    if hasattr(poly, "factors") and poly.factors:
+        total = [0 for _ in range(dimension)]
+        for factor in poly.factors:
+            powers = _common_monomial_powers(factor, dimension)
+            total = [left + right for left, right in zip(total, powers)]
+        return total
+    expolist = getattr(poly, "expolist", None)
+    if expolist is None:
+        return [0 for _ in range(dimension)]
+    exps = np.asarray(expolist, dtype=object)
+    if exps.size == 0:
+        return [0 for _ in range(dimension)]
+    if exps.ndim == 1:
+        exps = exps.reshape(1, -1)
+    if exps.shape[1] < dimension:
+        return [0 for _ in range(dimension)]
+    return [
+        min(int(row[axis]) for row in exps[:, :dimension].tolist())
+        for axis in range(dimension)
+    ]
+
+
 def _split_cast_product(obj: Any, dimension: int) -> tuple[list[int], Any]:
     """Extract monomial powers and the residual polynomial from a cast product."""
+    powers = _common_monomial_powers(obj, dimension)
     if hasattr(obj, "factors") and obj.factors:
-        powers, _coeff = _split_one_term_monomial(obj.factors[0], dimension)
         residual = obj.factors[-1]
         return powers, residual
-    return [0 for _ in range(dimension)], obj
+    return powers, obj
 
 
 def _coefficient_is_one(text: str) -> bool:
@@ -1472,6 +1688,39 @@ def run_pysecdec_package(
         with timings.measure("pySecDec integration", progress=progress):
             series = integral(
                 real_parameters=bundle.kinematics.parameter_values,
+                epsrel=request.pysecdec_epsrel,
+                maxeval=request.pysecdec_maxeval,
+                format="json",
+                verbose=False,
+            )
+    finally:
+        os.chdir(cwd)
+
+    orders, coeffs, errors = _parse_pysecdec_json_series(series)
+    return PySecDecRunResult(
+        coeffs=coeffs,
+        errors=errors,
+        orders=orders,
+        raw_series=series,
+        timings=timings,
+    )
+
+
+def run_pysecdec_make_package(
+    source: UFTopologyData,
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> PySecDecRunResult:
+    """Generate, compile, and run pySecDec make_package for package input."""
+    modules = require_pysecdec()
+    paths, timings = ensure_pysecdec_make_package(source, request, progress=progress)
+    cwd = Path.cwd()
+    try:
+        with timings.measure("pySecDec package load", progress=progress):
+            integral = modules["IntegralLibrary"](str(paths.shared_library))
+        with timings.measure("pySecDec integration", progress=progress):
+            series = integral(
+                real_parameters=list(source.parameter_values),
                 epsrel=request.pysecdec_epsrel,
                 maxeval=request.pysecdec_maxeval,
                 format="json",

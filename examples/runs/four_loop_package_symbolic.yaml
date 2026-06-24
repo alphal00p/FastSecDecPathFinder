@@ -1,0 +1,36 @@
+topology-source: package
+sector-method: geometric_infinity_no_primary
+
+package-integrand:
+  family: four_loop
+  integration-variables: [x1, x2, x3, x4, x5, x6, x7]
+  regulators: [eps]
+  requested-orders: [0]
+  loop-count: 4
+  dimension: "4 - 2*eps"
+  global-prefactor: "1"
+  polynomials-to-decompose:
+    - name: P0
+      expression-file: ../polynomials/four_loop/P0.txt
+      exponent: "1"
+    - name: P1
+      expression-file: ../polynomials/four_loop/P1.txt
+      exponent: "eps - 4"
+
+dot-engine: fsd
+prefactor-convention: pysecdec
+subtraction-backend: projector-formula
+sector-evaluator-backend: projector
+ibp-reduce-to-log-endpoint: true
+allow-fallback-for-missing-caches: true
+symbolic-derivatives: true
+evaluator-compile-mode: eager
+real-evaluator: false
+max-eps-order: 0
+sampling-mode: havana
+workers: 1
+samples-per-iter: 100
+batch-size: 100
+max-iter: 10
+min-iter: 3
+result-path: ../outputs/four_loop_package_symbolic_result.json

@@ -163,6 +163,7 @@ class IntegralRequest:
     target_rel_error: float | None = None
     topology_source: str = "builtin"
     uf_topology: dict[str, Any] | None = None
+    package_integrand: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

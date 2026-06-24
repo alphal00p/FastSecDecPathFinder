@@ -1169,6 +1169,8 @@ class SectorDefinition:
             if dual_shape == self.dual_shape
             else self.prepare_map_dual_evaluators(dual_shape)
         )
+        if dual_shape == self.dual_shape and not evaluators:
+            evaluators = self.prepare_map_dual_evaluators(dual_shape)
         return [
             self._timed_evaluate_complex_with_prec(evaluator, row, precision_digits, timing)
             for evaluator in evaluators
@@ -1528,6 +1530,10 @@ def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
         from uf_topology import generate_sectors_from_uf_request
 
         return generate_sectors_from_uf_request(request)
+    if request.integral == "package":
+        from package_integrand import generate_sectors_from_package_request
+
+        return generate_sectors_from_package_request(request)
     if request.integral == "triangle":
         sectors = [
             _triangle_sector(

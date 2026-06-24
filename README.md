@@ -50,6 +50,12 @@ uv run fsd \
   --keep-pysecdec-workdir
 ```
 
+The same one-loop box supplied as pySecDec-style decomposed polynomials:
+
+```sh
+uv run fsd --run examples/runs/box_package.yaml
+```
+
 Massless two-loop double box from DOT, integrated with FSD/Havana:
 
 ```sh
@@ -81,6 +87,39 @@ uv run fsd \
   --output MyFSDOutputDoubleBoxFromUandF \
   --restart
 ```
+
+The four-loop pySecDec-style two-polynomial package input from
+`generate_four_loop.py` has three run cards.  The projector/dual card keeps U/F
+as black-box dual evaluators:
+
+```sh
+uv run fsd --run examples/runs/four_loop_package.yaml --sectors {0..170}
+```
+
+The projector/symbolic-derivatives card uses symbolic U/F derivatives and
+chain-rule formulas instead of dual U/F evaluators:
+
+```sh
+uv run fsd --run examples/runs/four_loop_package_symbolic.yaml --sectors {0..170}
+```
+
+The explicit card builds explicit Symbolica sector evaluators:
+
+```sh
+uv run fsd --run examples/runs/four_loop_package_explicit.yaml --sectors {0..170}
+```
+
+To compare the same package-style input against a native pySecDec
+`make_package` target, add `--target pysecdec`.  Keep the pySecDec workdir if
+you expect to rerun the comparison:
+
+```sh
+uv run fsd --run examples/runs/four_loop_package_explicit.yaml --sectors {0..170} --target pysecdec --pysecdec-workdir .pysecdec_build/four_loop_package --keep-pysecdec-workdir
+```
+
+These presets use `geometric_infinity_no_primary`, so they require Normaliz.  The
+flake shell provides it.  FSD passes that method through to pySecDec unchanged
+when generating the comparison package.
 
 ## Setup
 
@@ -162,6 +201,16 @@ DOT examples and kinematics are in `examples/graphs/`.  Direct `U/F` input is
 shown in `examples/runs/double_box_from_U_and_F.yaml`; that mode also requires
 parametric metadata such as loop count, propagator powers, `U/F` exponents, and
 the global prefactor.
+
+pySecDec-style two-polynomial package input is shown in
+`examples/runs/four_loop_package.yaml`, the symbolic-derivatives variant
+`examples/runs/four_loop_package_symbolic.yaml`, and the explicit-generation
+variant `examples/runs/four_loop_package_explicit.yaml`.  Use
+`topology-source: package` with a `package-integrand` block containing exactly
+two `polynomials-to-decompose` entries.  Each polynomial can be inline with
+`expression: | ...` or stored in a text file with
+`expression-file: path/to/polynomial.txt`; file paths are resolved relative to
+the run YAML.
 
 Tracked target files under `examples/outputs/` are fixtures.  New run products
 should be written under an ignored output location, for example with
