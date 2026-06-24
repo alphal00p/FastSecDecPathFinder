@@ -115,6 +115,37 @@ source builds, and Normaliz for pySecDec's `geometric` sector method.  Outside
 the flake shell, `geometric` additionally requires Normaliz on `PATH` or
 `--normaliz-executable`.
 
+To use a custom Symbolica community build, keep the project dependency named
+`symbolica` and override its uv source.  For a git checkout:
+
+```toml
+[tool.uv.sources]
+symbolica = { git = "ssh://git@github.com/your-org/symbolica-community.git", rev = "COMMIT_SHA" }
+```
+
+For a local checkout:
+
+```toml
+[tool.uv.sources]
+symbolica = { path = "../symbolica-community", editable = true }
+```
+
+For a prebuilt wheel:
+
+```toml
+[tool.uv.sources]
+symbolica = { path = "../wheels/symbolica-2.1.0-cp37-abi3-macosx_11_0_arm64.whl" }
+```
+
+Then refresh and verify the environment:
+
+```sh
+uv lock --upgrade-package symbolica
+uv sync
+uv run python -c "import symbolica; print(symbolica.__version__, symbolica.__file__)"
+uv run fsd --help
+```
+
 Large formula caches are intentionally not tracked.  If you have a packaged
 cache, install it with:
 
