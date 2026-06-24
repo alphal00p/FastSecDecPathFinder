@@ -50,6 +50,7 @@ from evaluator_utils import (
     serialize_evaluator,
 )
 from sectors_generator import SectorDefinition
+from symbolic_constants import PI_FLOAT, symbolica_pi_decimal
 from subtraction_formula import (
     build_endpoint_projector_formula_symbolica,
     build_regular_taylor_formula_symbolica,
@@ -4077,7 +4078,7 @@ def feynman_log(value: complex) -> complex:
     """Logarithm with the scalar-integral ``-i0`` branch for negative reals."""
     z = complex(value)
     if abs(z.imag) < 1.0e-30 and z.real < 0.0:
-        return complex(math.log(abs(z.real)), -math.pi)
+        return complex(math.log(abs(z.real)), -PI_FLOAT)
     return cmath.log(z)
 
 
@@ -4088,7 +4089,7 @@ def feynman_log_array(values: np.ndarray) -> np.ndarray:
     mask = (np.abs(z.imag) < 1.0e-30) & (z.real < 0.0)
     if np.any(mask):
         logs = logs.copy()
-        logs[mask] = np.log(np.abs(z.real[mask])) - 1j * math.pi
+        logs[mask] = np.log(np.abs(z.real[mask])) - 1j * PI_FLOAT
     return logs
 
 
@@ -4105,11 +4106,6 @@ def complex_abs_for_training_array(values: np.ndarray) -> np.ndarray:
 MultiSeries = dict[tuple[int, ...], np.ndarray]
 ExprSeries = dict[tuple[int, ...], Any]
 PrecSeries = dict[tuple[int, ...], ComplexPrecise]
-
-
-_DECIMAL_PI = Decimal(
-    "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899"
-)
 
 
 def _multi_indices(max_orders: list[int]) -> list[tuple[int, ...]]:
@@ -4884,7 +4880,7 @@ def _pc_log(value: ComplexPrecise, precision_digits: int) -> ComplexPrecise:
         if real > 0:
             return (real.ln(), Decimal(0))
         if real < 0:
-            return ((-real).ln(), -decimal_with_precision(_DECIMAL_PI, precision_digits))
+            return ((-real).ln(), -symbolica_pi_decimal(int(precision_digits)))
     approx = feynman_log(complex(float(real), float(imag)))
     return _decimal_complex(approx, precision_digits)
 

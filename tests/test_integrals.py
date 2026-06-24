@@ -29,6 +29,27 @@ if str(SRC_ROOT) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+def test_source_does_not_hard_code_special_constant_decimals() -> None:
+    """Precision-sensitive source must get special constants from Symbolica."""
+    checked_paths = [PROJECT_ROOT / "FSD.py", *sorted(SRC_ROOT.glob("*.py"))]
+    forbidden_patterns = [
+        r"\d+\.\d{12,}",
+        r"math\.pi",
+        r"mp\.euler",
+        r"mp\.zeta",
+        r"3\.14159",
+        r"0\.57721",
+    ]
+    combined = re.compile("|".join(f"(?:{pattern})" for pattern in forbidden_patterns))
+    offenders: list[str] = []
+    for path in checked_paths:
+        text = path.read_text()
+        for match in combined.finditer(text):
+            line_no = text[: match.start()].count("\n") + 1
+            offenders.append(f"{path.relative_to(PROJECT_ROOT)}:{line_no}")
+    assert offenders == []
+
 from FSD import (
     _align_coefficients,
     _align_coefficients_by_order,

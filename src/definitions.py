@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from symbolic_constants import EULER_GAMMA_FLOAT, ONELOOP_TO_FEYNMAN_FLOAT
 
-ONELOOP_TO_FEYNMAN = -1.0 / (16.0 * 3.141592653589793238462643383279502884**2)
-EULER_GAMMA = 0.577215664901532860606512090082402431
+ONELOOP_TO_FEYNMAN = ONELOOP_TO_FEYNMAN_FLOAT
+EULER_GAMMA = EULER_GAMMA_FLOAT
 
 
 @dataclass(frozen=True)

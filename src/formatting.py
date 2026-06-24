@@ -27,6 +27,7 @@ from definitions import (
 from dot_topology import DotTopologyPrintout
 from integrand import TopologyDefinition
 from sectors_generator import SectorDefinition
+from symbolic_constants import PI_SQUARED_OVER_6_FLOAT, PI_SQUARED_OVER_12_FLOAT
 from utils import format_complex_uncertainty, format_percent
 
 
@@ -1066,12 +1067,12 @@ def apply_global_convention(
             return convolve_regular_factor(
                 sector_coeffs,
                 sector_errors,
-                [1.0 + 0.0j, 1.0 + 0.0j, (math.pi * math.pi / 6.0) + 0.0j],
+                [1.0 + 0.0j, 1.0 + 0.0j, PI_SQUARED_OVER_6_FLOAT + 0.0j],
             )
         return sector_coeffs[:], sector_errors[:]
 
     if request.gamma_scheme == "full":
-        g2 = 0.5 * EULER_GAMMA * EULER_GAMMA + math.pi * math.pi / 12.0
+        g2 = 0.5 * EULER_GAMMA * EULER_GAMMA + PI_SQUARED_OVER_12_FLOAT
         signed = [-coeff for coeff in sector_coeffs]
         return convolve_regular_factor(
             signed,
@@ -1085,7 +1086,7 @@ def apply_global_convention(
         return convolve_regular_factor(
             coeffs,
             errors,
-            [1.0 + 0.0j, 0.0 + 0.0j, (math.pi * math.pi / 6.0) + 0.0j],
+            [1.0 + 0.0j, 0.0 + 0.0j, PI_SQUARED_OVER_6_FLOAT + 0.0j],
         )
     return coeffs, errors
 

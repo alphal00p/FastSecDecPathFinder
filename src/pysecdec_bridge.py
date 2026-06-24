@@ -29,6 +29,7 @@ from integrand import TopologyDefinition
 from kinematics import KinematicsDefinition
 from numerator_reducer import reduce_dot_product_numerator
 from sectors_generator import SectorDefinition, prepare_sector_evaluators
+from symbolic_constants import symbolica_euler_gamma_decimal, symbolica_zeta_decimal
 
 
 @dataclass
@@ -357,19 +358,14 @@ def _regular_series_exp(log_coeffs: list[complex], max_order: int) -> list[compl
 
 def _gamma_one_plus_affine_eps_series(eps_coeff: float, max_order: int) -> list[complex]:
     """Return ``Gamma(1 + eps_coeff*eps)`` through ``eps^max_order``."""
-    try:
-        import mpmath as mp
-    except ImportError as exc:  # pragma: no cover - pySecDec already requires mpmath.
-        raise RuntimeError("mpmath is required to evaluate Gamma-series constants") from exc
-
-    mp.mp.dps = max(50, 10 * (int(max_order) + 2))
+    precision = max(50, 10 * (int(max_order) + 2))
     log_coeffs = [0.0 + 0.0j for _ in range(int(max_order) + 1)]
     if max_order >= 1:
-        log_coeffs[1] = -float(mp.euler) * float(eps_coeff)
+        log_coeffs[1] = -float(symbolica_euler_gamma_decimal(precision)) * float(eps_coeff)
     for order in range(2, int(max_order) + 1):
         log_coeffs[order] = (
             ((-1.0) ** order)
-            * float(mp.zeta(order))
+            * float(symbolica_zeta_decimal(order, precision))
             * (float(eps_coeff) ** order)
             / float(order)
         )

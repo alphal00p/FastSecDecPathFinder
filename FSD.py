@@ -75,6 +75,7 @@ from result_io import (
 )
 from runtime_benchmark import run_sector_runtime_benchmark
 from sectors_generator import generate_sectors
+from symbolic_constants import PI_SQUARED_OVER_6_FLOAT
 from uf_topology import get_uf_bundle
 
 
@@ -2051,7 +2052,7 @@ def _dot_box_oneloop_target(request: IntegralRequest, topology) -> TargetDefinit
         [
             1.0 + 0.0j,
             -1.0 + 0.0j,
-            (1.0 - math.pi * math.pi / 6.0) + 0.0j,
+            (1.0 - PI_SQUARED_OVER_6_FLOAT) + 0.0j,
         ],
     )
     sector_errors = [0.0 + 0.0j for _ in sector_coeffs]
@@ -2079,7 +2080,7 @@ def _dot_box_oneloop_target(request: IntegralRequest, topology) -> TargetDefinit
             "dot_sector_normalization": [
                 1.0,
                 -1.0,
-                1.0 - math.pi * math.pi / 6.0,
+                1.0 - PI_SQUARED_OVER_6_FLOAT,
             ],
         },
     )
