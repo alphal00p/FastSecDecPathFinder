@@ -155,10 +155,9 @@ triple-box case to keep in future performance and stability sweeps.
 
 ### Common DOT And U/F Runs
 
-The following examples use `--jit-compile --complex-evaluator` for FSD runs.
-This keeps the JIT path enabled while avoiding the currently problematic
-real-valued JIT evaluator path.  In FSD modes, `--output` writes a reusable
-prepared-output directory for generated sector/evaluator artifacts.  In native
+The following examples use the fixed real-valued JIT evaluator path for FSD
+runs.  In FSD modes, `--output` writes a reusable prepared-output directory
+for generated sector/evaluator artifacts.  In native
 pySecDec mode, use `--pysecdec-workdir` instead; pySecDec/FORM/compile output
 is captured to a log file there by default, and `--show-pysecdec-output`
 restores direct terminal output.
@@ -174,7 +173,7 @@ run preset:
   --target-integration-time 30 \
   --workers 10 \
   --result-path examples/outputs/dot_box_qmc_30s.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputBox \
   --restart
 ```
@@ -203,7 +202,7 @@ compared against the stored pySecDec-convention target:
   --batch-size 100000 \
   --max-iter 10 \
   --result-path examples/outputs/dot_double_box_havana.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputDoubleBox \
   --restart
 ```
@@ -221,7 +220,7 @@ including propagator powers, U/F epsilon exponents, and global prefactor:
   --batch-size 100000 \
   --max-iter 10 \
   --result-path examples/outputs/double_box_from_U_and_F_havana.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputDoubleBoxFromUandF \
   --restart
 ```
@@ -822,8 +821,8 @@ Choose the Symbolica evaluator backend:
 JIT and keeps plain eager evaluators.  `--compile` builds a shared-library f64
 hot path where Symbolica supports it; FSD still stores the eager evaluator next
 to the compiled artifact so precision rescue remains available when strict
-prepared bundles are loaded later.  `--complex-evaluator` can be used to force
-complex-valued f64 evaluator calls even for real kinematics.
+prepared bundles are loaded later.  `--complex-evaluator` remains available for
+forcing complex-valued f64 evaluator calls even for real kinematics.
 
 ## Output
 

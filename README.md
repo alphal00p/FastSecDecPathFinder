@@ -21,8 +21,7 @@ activation.
 
 ## Common Runs
 
-These examples use `--jit-compile --complex-evaluator` for FSD runs.  That
-keeps JIT enabled while avoiding the current real-valued JIT evaluator issue.
+These examples use the fixed real-valued JIT evaluator path for FSD runs.
 `--output` stores reusable FSD generated artifacts.  Native pySecDec uses
 `--pysecdec-workdir` instead.
 
@@ -35,7 +34,7 @@ uv run fsd \
   --target-integration-time 30 \
   --workers 10 \
   --result-path examples/outputs/dot_box_qmc_30s.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputBox \
   --restart
 ```
@@ -62,7 +61,7 @@ uv run fsd \
   --batch-size 100000 \
   --max-iter 10 \
   --result-path examples/outputs/dot_double_box_havana.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputDoubleBox \
   --restart
 ```
@@ -78,7 +77,7 @@ uv run fsd \
   --batch-size 100000 \
   --max-iter 10 \
   --result-path examples/outputs/double_box_from_U_and_F_havana.json \
-  --jit-compile --complex-evaluator \
+  --jit-compile \
   --output MyFSDOutputDoubleBoxFromUandF \
   --restart
 ```
