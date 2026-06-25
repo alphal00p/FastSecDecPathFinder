@@ -68,6 +68,7 @@ from definitions import EpsilonExpansion, ParametricRepresentation
 from generation_timing import GenerationTimings
 from dot_parser import parse_dot_file
 from dot_topology import GammaLoopDotTopologyBuilder, clear_dot_bundle_cache
+import evaluator_utils as evaluator_utils_module
 from formatting import (
     _ellipsis_table_text,
     apply_global_convention,
@@ -195,6 +196,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "jit_compile_evaluators": False,
         "evaluator_compile_mode": "eager",
         "real_evaluator": True,
+        "jit_direct_translation": False,
         "dual_evaluator_mode": "pregenerate",
         "subtraction_backend": "formula",
         "ibp_reduce_to_log_endpoint": False,
@@ -1135,14 +1137,80 @@ def test_evaluator_backend_cli_defaults_and_validation() -> None:
     assert default_request.evaluator_compile_mode == "jit"
     assert default_request.jit_compile_evaluators is True
     assert default_request.real_evaluator is True
+    assert default_request.jit_direct_translation is False
     assert eager_request.evaluator_compile_mode == "eager"
     assert eager_request.jit_compile_evaluators is False
     assert compile_request.evaluator_compile_mode == "compile"
     assert compile_request.real_evaluator is True
     assert complex_request.evaluator_compile_mode == "jit"
     assert complex_request.real_evaluator is False
+    indirect_request = build_request(
+        parse_args(["--no-jit-direct-translation", "--no-progress"])
+    )
+    explicit_direct_request = build_request(
+        parse_args(["--jit-direct-translation", "--no-progress"])
+    )
+    assert indirect_request.jit_direct_translation is False
+    assert explicit_direct_request.jit_direct_translation is True
     with pytest.raises(ValueError, match="--compile"):
         validate_request(invalid_request)
+
+
+def test_jit_direct_translation_forwarded_to_symbolica(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FSD forwards direct/indirect JIT translation to Symbolica builders."""
+    monkeypatch.delenv("FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION", raising=False)
+    single_calls: list[dict[str, Any]] = []
+
+    class FakeExpr:
+        def evaluator(self, params: list[Any], **kwargs: Any) -> SimpleNamespace:
+            single_calls.append(dict(kwargs))
+            return SimpleNamespace(evaluate=lambda rows: rows)
+
+    evaluator_utils_module.build_evaluator(
+        FakeExpr(),
+        [],
+        evaluator_compile_mode="jit",
+        jit_direct_translation=False,
+    )
+    assert single_calls[0]["jit_compile"] is False
+    assert single_calls[0]["jit_direct_translation"] is False
+    assert single_calls[1]["jit_compile"] is True
+    assert single_calls[1]["jit_direct_translation"] is False
+
+    multi_calls: list[dict[str, Any]] = []
+
+    class FakeExpression:
+        @staticmethod
+        def evaluator_multiple(
+            exprs: list[Any],
+            params: list[Any],
+            **kwargs: Any,
+        ) -> SimpleNamespace:
+            multi_calls.append(dict(kwargs))
+            return SimpleNamespace(evaluate=lambda rows: rows)
+
+    monkeypatch.setattr(evaluator_utils_module, "Expression", FakeExpression)
+    evaluator_utils_module.build_evaluator_multiple(
+        [FakeExpr(), FakeExpr()],
+        [],
+        evaluator_compile_mode="jit",
+        jit_direct_translation=True,
+    )
+    assert multi_calls[0]["jit_compile"] is False
+    assert multi_calls[0]["jit_direct_translation"] is False
+    assert multi_calls[1]["jit_compile"] is True
+    assert multi_calls[1]["jit_direct_translation"] is True
+
+    multi_calls.clear()
+    monkeypatch.setenv("FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION", "0")
+    evaluator_utils_module.build_evaluator_multiple(
+        [FakeExpr()],
+        [],
+        evaluator_compile_mode="jit",
+        jit_direct_translation=True,
+    )
+    assert multi_calls[1]["jit_compile"] is True
+    assert multi_calls[1]["jit_direct_translation"] is False
 
 
 def test_all_example_run_presets_parse_and_resolve_paths() -> None:
@@ -2930,15 +2998,18 @@ def test_regular_taylor_expression_checkpoint_rebuilds_evaluator(
         input_symbols: list[Any],
         *,
         jit_compile: bool,
+        jit_direct_translation: bool = False,
         monitor: Any = None,
     ) -> tuple[list[Any], str]:
         calls.append(len(expressions))
         assert [str(symbol) for symbol in input_symbols] == input_names
         assert jit_compile is False
+        assert jit_direct_translation is False
         return ["rebuilt-evaluator"], "multiple"
 
     class DummyTopology:
         jit_compile_evaluators = False
+        jit_direct_translation = False
 
     class DummyFormula:
         def __init__(self, **kwargs: Any) -> None:

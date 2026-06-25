@@ -101,6 +101,7 @@ class IntegralRequest:
     jit_compile_evaluators: bool
     evaluator_compile_mode: str
     real_evaluator: bool
+    jit_direct_translation: bool
     dual_evaluator_mode: str
     subtraction_backend: str
     ibp_reduce_to_log_endpoint: bool

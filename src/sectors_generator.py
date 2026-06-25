@@ -127,6 +127,7 @@ class SectorDefinition:
     jit_compile_evaluators: bool = False
     evaluator_compile_mode: str = "jit"
     real_evaluator: bool = True
+    jit_direct_translation: bool = False
     u_monomial_powers: list[int] | None = None
     measure_monomial_powers: list[float] | None = None
     numerator_monomial_powers: list[float] | None = None
@@ -281,6 +282,7 @@ class SectorDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.name}_map_{index}",
             )
             for index, expr in enumerate(self.map_exprs)
@@ -290,6 +292,7 @@ class SectorDefinition:
             params,
             evaluator_compile_mode=self.evaluator_compile_mode,
             real_evaluator=self.real_evaluator,
+            jit_direct_translation=self.jit_direct_translation,
             name_hint=f"{self.name}_jacobian",
         )
         self._map_dual_evaluators = []
@@ -307,6 +310,7 @@ class SectorDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.name}_numerator",
             )
         for expr in self.numerator_eps_exprs or [E("1")]:
@@ -319,6 +323,7 @@ class SectorDefinition:
                     params,
                     evaluator_compile_mode=self.evaluator_compile_mode,
                     real_evaluator=self.real_evaluator,
+                    jit_direct_translation=self.jit_direct_translation,
                     name_hint=f"{self.name}_numerator_eps",
                 )
             )
@@ -583,6 +588,7 @@ class SectorDefinition:
                 _symbols(self.variable_names),
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.name}_numerator",
             )
         values = self._timed_evaluate(self._numerator_evaluator, rows, timing)
@@ -675,6 +681,7 @@ class SectorDefinition:
                     params,
                     evaluator_compile_mode="eager",
                     real_evaluator=self.real_evaluator,
+                    jit_direct_translation=self.jit_direct_translation,
                     name_hint=f"{self.name}_numerator_eps_dual",
                 )
                 evaluator.dualize([list(mi) for mi in dual_shape])
@@ -714,6 +721,7 @@ class SectorDefinition:
                     _symbols(self.variable_names),
                     evaluator_compile_mode=self.evaluator_compile_mode,
                     real_evaluator=self.real_evaluator,
+                    jit_direct_translation=self.jit_direct_translation,
                     name_hint=f"{self.name}_numerator",
                 )
             row = [_decimal_complex(value, precision_digits) for value in np.asarray(y, dtype=float)]
@@ -800,6 +808,7 @@ class SectorDefinition:
                     params,
                     evaluator_compile_mode="eager",
                     real_evaluator=self.real_evaluator,
+                    jit_direct_translation=self.jit_direct_translation,
                     name_hint=f"{self.name}_numerator_eps_dual",
                 )
                 evaluator.dualize([list(mi) for mi in dual_shape])
@@ -918,6 +927,7 @@ class SectorDefinition:
                 params,
                 evaluator_compile_mode="eager",
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.name}_map_dual",
             )
             evaluator.dualize([list(mi) for mi in dual_shape])
@@ -946,6 +956,7 @@ class SectorDefinition:
             params,
             evaluator_compile_mode="eager",
             real_evaluator=self.real_evaluator,
+            jit_direct_translation=self.jit_direct_translation,
             name_hint=f"{self.name}_jacobian_dual",
         )
         evaluator.dualize([list(mi) for mi in dual_shape])
@@ -973,6 +984,7 @@ class SectorDefinition:
             params,
             evaluator_compile_mode="eager",
             real_evaluator=self.real_evaluator,
+            jit_direct_translation=self.jit_direct_translation,
             name_hint=f"{self.name}_numerator_dual",
         )
         evaluator.dualize([list(mi) for mi in dual_shape])
@@ -1328,6 +1340,7 @@ def _triangle_sector(
     swapped: bool,
     mode: str,
     jit_compile_evaluators: bool,
+    jit_direct_translation: bool = False,
 ) -> SectorDefinition:
     """Construct one of the two triangle sectors."""
     x_forward = "t/(1+z)"
@@ -1357,10 +1370,15 @@ def _triangle_sector(
         subtraction_type=subtraction_type,
         description="triangle endpoint sector with x1/x2 swapped" if swapped else "triangle endpoint sector",
         jit_compile_evaluators=jit_compile_evaluators,
+        jit_direct_translation=jit_direct_translation,
     )
 
 
-def _box_primary_sector(dominant_index: int, jit_compile_evaluators: bool) -> SectorDefinition:
+def _box_primary_sector(
+    dominant_index: int,
+    jit_compile_evaluators: bool,
+    jit_direct_translation: bool = False,
+) -> SectorDefinition:
     """Construct a finite massive box primary sector."""
     variable_names = ["y0", "y1", "y2"]
     denom = "1+y0+y1+y2"
@@ -1381,6 +1399,7 @@ def _box_primary_sector(dominant_index: int, jit_compile_evaluators: bool) -> Se
         subtraction_type="finite",
         description=f"box primary sector with x{dominant_index} dominant",
         jit_compile_evaluators=jit_compile_evaluators,
+        jit_direct_translation=jit_direct_translation,
     )
 
 
@@ -1391,6 +1410,7 @@ def _box_massless_sector(
     left_slot: int,
     right_slot: int,
     jit_compile_evaluators: bool,
+    jit_direct_translation: bool = False,
 ) -> SectorDefinition:
     """Construct one massless box secondary sector inside a primary sector."""
     variable_names = ["u", "v", "w"]
@@ -1444,10 +1464,14 @@ def _box_massless_sector(
         subtraction_type=subtraction_type,
         description=f"massless box secondary sector {kind} from primary B{dominant_index}",
         jit_compile_evaluators=jit_compile_evaluators,
+        jit_direct_translation=jit_direct_translation,
     )
 
 
-def _box_massless_sectors(jit_compile_evaluators: bool) -> list[SectorDefinition]:
+def _box_massless_sectors(
+    jit_compile_evaluators: bool,
+    jit_direct_translation: bool = False,
+) -> list[SectorDefinition]:
     """Enumerate all twelve massless box sectors."""
     sectors: list[SectorDefinition] = []
     pair_by_primary = {
@@ -1470,6 +1494,7 @@ def _box_massless_sectors(jit_compile_evaluators: bool) -> list[SectorDefinition
                 left_slot,
                 right_slot,
                 jit_compile_evaluators,
+                jit_direct_translation,
             )
         )
         sectors.append(
@@ -1480,6 +1505,7 @@ def _box_massless_sectors(jit_compile_evaluators: bool) -> list[SectorDefinition
                 left_slot,
                 right_slot,
                 jit_compile_evaluators,
+                jit_direct_translation,
             )
         )
         sectors.append(
@@ -1490,6 +1516,7 @@ def _box_massless_sectors(jit_compile_evaluators: bool) -> list[SectorDefinition
                 left_slot,
                 right_slot,
                 jit_compile_evaluators,
+                jit_direct_translation,
             )
         )
     return sectors
@@ -1535,27 +1562,41 @@ def generate_sectors(request: IntegralRequest) -> list[SectorDefinition]:
                 swapped=False,
                 mode=request.mode,
                 jit_compile_evaluators=request.jit_compile_evaluators,
+                jit_direct_translation=request.jit_direct_translation,
             ),
             _triangle_sector(
                 "S2",
                 swapped=True,
                 mode=request.mode,
                 jit_compile_evaluators=request.jit_compile_evaluators,
+                jit_direct_translation=request.jit_direct_translation,
             ),
         ]
         for sector in sectors:
             sector.evaluator_compile_mode = request.evaluator_compile_mode
             sector.real_evaluator = request.real_evaluator
+            sector.jit_direct_translation = request.jit_direct_translation
         prepare_sector_evaluators(sectors)
         return sectors
     if request.integral == "box":
         if request.mode == "massless":
-            sectors = _box_massless_sectors(request.jit_compile_evaluators)
+            sectors = _box_massless_sectors(
+                request.jit_compile_evaluators,
+                request.jit_direct_translation,
+            )
         else:
-            sectors = [_box_primary_sector(i, request.jit_compile_evaluators) for i in range(4)]
+            sectors = [
+                _box_primary_sector(
+                    i,
+                    request.jit_compile_evaluators,
+                    request.jit_direct_translation,
+                )
+                for i in range(4)
+            ]
         for sector in sectors:
             sector.evaluator_compile_mode = request.evaluator_compile_mode
             sector.real_evaluator = request.real_evaluator
+            sector.jit_direct_translation = request.jit_direct_translation
         prepare_sector_evaluators(sectors)
         return sectors
     raise ValueError(f"unsupported integral {request.integral!r}")

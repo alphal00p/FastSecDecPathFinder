@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -36,11 +37,19 @@ def jit_flag_for_mode(mode: str) -> bool:
 def evaluator_build_kwargs(
     *,
     evaluator_compile_mode: str = "jit",
+    jit_direct_translation: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Return Symbolica evaluator kwargs with a consistent compilation mode."""
     out = dict(kwargs)
-    out["jit_compile"] = jit_flag_for_mode(evaluator_compile_mode)
+    jit_compile = jit_flag_for_mode(evaluator_compile_mode)
+    out["jit_compile"] = jit_compile
+    if "FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION" in os.environ:
+        value = os.environ["FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION"].strip().lower()
+        jit_direct_translation = value not in {"0", "false", "no", "off"}
+    elif "jit_direct_translation" in out:
+        jit_direct_translation = bool(out["jit_direct_translation"])
+    out["jit_direct_translation"] = bool(jit_direct_translation) if jit_compile else False
     return out
 
 
@@ -186,6 +195,7 @@ def build_evaluator(
     *,
     evaluator_compile_mode: str = "jit",
     real_evaluator: bool = True,
+    jit_direct_translation: bool = False,
     name_hint: str = "evaluator",
     **kwargs: Any,
 ) -> Any:
@@ -194,11 +204,19 @@ def build_evaluator(
     if mode == "jit":
         precision_evaluator = expr.evaluator(
             params,
-            **evaluator_build_kwargs(evaluator_compile_mode="eager", **kwargs),
+            **evaluator_build_kwargs(
+                evaluator_compile_mode="eager",
+                jit_direct_translation=jit_direct_translation,
+                **kwargs,
+            ),
         )
         hot_evaluator = expr.evaluator(
             params,
-            **evaluator_build_kwargs(evaluator_compile_mode="jit", **kwargs),
+            **evaluator_build_kwargs(
+                evaluator_compile_mode="jit",
+                jit_direct_translation=jit_direct_translation,
+                **kwargs,
+            ),
         )
         return HotEvaluatorWithPrecisionFallback(
             hot_evaluator=hot_evaluator,
@@ -208,7 +226,11 @@ def build_evaluator(
         )
     evaluator = expr.evaluator(
         params,
-        **evaluator_build_kwargs(evaluator_compile_mode=mode, **kwargs),
+        **evaluator_build_kwargs(
+            evaluator_compile_mode=mode,
+            jit_direct_translation=jit_direct_translation,
+            **kwargs,
+        ),
     )
     if mode != "compile":
         return evaluator
@@ -227,6 +249,7 @@ def build_evaluator_multiple(
     *,
     evaluator_compile_mode: str = "jit",
     real_evaluator: bool = True,
+    jit_direct_translation: bool = False,
     name_hint: str = "evaluator_multiple",
     **kwargs: Any,
 ) -> Any:
@@ -236,12 +259,20 @@ def build_evaluator_multiple(
         precision_evaluator = Expression.evaluator_multiple(
             exprs,
             params,
-            **evaluator_build_kwargs(evaluator_compile_mode="eager", **kwargs),
+            **evaluator_build_kwargs(
+                evaluator_compile_mode="eager",
+                jit_direct_translation=jit_direct_translation,
+                **kwargs,
+            ),
         )
         hot_evaluator = Expression.evaluator_multiple(
             exprs,
             params,
-            **evaluator_build_kwargs(evaluator_compile_mode="jit", **kwargs),
+            **evaluator_build_kwargs(
+                evaluator_compile_mode="jit",
+                jit_direct_translation=jit_direct_translation,
+                **kwargs,
+            ),
         )
         return HotEvaluatorWithPrecisionFallback(
             hot_evaluator=hot_evaluator,
@@ -252,7 +283,11 @@ def build_evaluator_multiple(
     evaluator = Expression.evaluator_multiple(
         exprs,
         params,
-        **evaluator_build_kwargs(evaluator_compile_mode=mode, **kwargs),
+        **evaluator_build_kwargs(
+            evaluator_compile_mode=mode,
+            jit_direct_translation=jit_direct_translation,
+            **kwargs,
+        ),
     )
     if mode != "compile":
         return evaluator

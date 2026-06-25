@@ -234,7 +234,11 @@ def _chain_rule_global_cold_lock(signature_id: str):
         ) from exc
 
 
-def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
+def _symbolica_evaluator_kwargs(
+    jit_compile: bool,
+    *,
+    jit_direct_translation: bool = False,
+) -> dict[str, Any]:
     """Return tunable Symbolica evaluator optimization options."""
 
     kwargs: dict[str, Any] = {
@@ -258,6 +262,8 @@ def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
         value = _env_optional_int(env_name, default, minimum=minimum)
         if value is not None:
             kwargs[key] = value
+    if bool(jit_compile):
+        kwargs["jit_direct_translation"] = bool(jit_direct_translation)
     bool_options = {
         "direct_translation": "FSD_SYMBOLICA_DIRECT_TRANSLATION",
         "jit_direct_translation": "FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION",
@@ -399,6 +405,7 @@ class TopologyDefinition:
     jit_compile_evaluators: bool = False
     evaluator_compile_mode: str = "jit"
     real_evaluator: bool = True
+    jit_direct_translation: bool = False
     generation_workers: int = 1
     dual_evaluator_mode: str = "pregenerate"
     ibp_reduce_to_log_endpoint: bool = False
@@ -536,6 +543,7 @@ class TopologyDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.family}_U",
             )
             self._f_evaluator = build_evaluator(
@@ -543,6 +551,7 @@ class TopologyDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.family}_F",
             )
         if self.parametric_representation is None:
@@ -2479,6 +2488,7 @@ class TopologyDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.family}_{polynomial}_derivatives_{max_total}",
             )
         self.dual_evaluator_build_seconds += time.perf_counter() - start
@@ -2531,6 +2541,7 @@ class TopologyDefinition:
                 params,
                 evaluator_compile_mode=self.evaluator_compile_mode,
                 real_evaluator=self.real_evaluator,
+                jit_direct_translation=self.jit_direct_translation,
                 name_hint=f"{self.family}_{polynomial}_derivative",
             )
             cache[multi_index] = evaluator
@@ -2576,6 +2587,7 @@ class TopologyDefinition:
             params,
             evaluator_compile_mode=self.evaluator_compile_mode,
             real_evaluator=self.real_evaluator,
+            jit_direct_translation=self.jit_direct_translation,
             name_hint=f"{self.family}_{polynomial}_derivative_multi",
         )
         multi_cache[key] = evaluator
@@ -3059,7 +3071,10 @@ class TopologyDefinition:
 
         def build_evaluators(output_expressions: list[Any], source: str) -> list[Any]:
             evaluator_start = time.perf_counter()
-            evaluator_kwargs = _symbolica_evaluator_kwargs(self.jit_compile_evaluators)
+            evaluator_kwargs = _symbolica_evaluator_kwargs(
+                self.jit_compile_evaluators,
+                jit_direct_translation=self.jit_direct_translation,
+            )
             _chain_rule_monitor(
                 f"{signature_id} evaluator_start source={source} "
                 f"n_cores={evaluator_kwargs.get('n_cores')} "
@@ -3077,12 +3092,19 @@ class TopologyDefinition:
                 mode = evaluator_mode_from_jit(
                     bool(evaluator_kwargs_for_build.pop("jit_compile", False))
                 )
+                build_jit_direct_translation = bool(
+                    evaluator_kwargs_for_build.pop(
+                        "jit_direct_translation",
+                        self.jit_direct_translation,
+                    )
+                )
                 evaluators = [
                     build_evaluator_multiple(
                         output_expressions,
                         input_symbols,
                         evaluator_compile_mode=mode,
                         real_evaluator=self.real_evaluator,
+                        jit_direct_translation=build_jit_direct_translation,
                         name_hint=f"{self.family}_chain_rule",
                         **evaluator_kwargs_for_build,
                     )
@@ -4033,6 +4055,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             jit_compile_evaluators=request.jit_compile_evaluators,
             evaluator_compile_mode=request.evaluator_compile_mode,
             real_evaluator=request.real_evaluator,
+            jit_direct_translation=request.jit_direct_translation,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,
@@ -4067,6 +4090,7 @@ def build_topology(request: IntegralRequest) -> TopologyDefinition:
             jit_compile_evaluators=request.jit_compile_evaluators,
             evaluator_compile_mode=request.evaluator_compile_mode,
             real_evaluator=request.real_evaluator,
+            jit_direct_translation=request.jit_direct_translation,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,
@@ -7398,6 +7422,7 @@ def build_two_stage_sector_formula(
         [S(name) for name in assembler_input_names],
         evaluator_compile_mode=topology.evaluator_compile_mode,
         real_evaluator=topology.real_evaluator,
+        jit_direct_translation=topology.jit_direct_translation,
         name_hint=f"{sector.name}_two_stage_assembler",
     )
     assembler_eval_seconds = time.perf_counter() - assembler_eval_start
@@ -7416,6 +7441,7 @@ def build_two_stage_sector_formula(
         [S(f"y{axis}") for axis in range(sector.integration_dim)],
         evaluator_compile_mode=topology.evaluator_compile_mode,
         real_evaluator=topology.real_evaluator,
+        jit_direct_translation=topology.jit_direct_translation,
         name_hint=f"{sector.name}_two_stage_source",
     )
     source_eval_seconds = time.perf_counter() - source_eval_start
@@ -7642,6 +7668,7 @@ def build_explicit_sector_formula(
         [S(f"y{axis}") for axis in range(sector.integration_dim)],
         evaluator_compile_mode=topology.evaluator_compile_mode,
         real_evaluator=topology.real_evaluator,
+        jit_direct_translation=topology.jit_direct_translation,
         name_hint=f"{sector.name}_explicit",
     )
     qmc_evaluator = None
@@ -7654,6 +7681,7 @@ def build_explicit_sector_formula(
             [S(f"y{axis}") for axis in range(sector.integration_dim)],
             evaluator_compile_mode=topology.evaluator_compile_mode,
             real_evaluator=topology.real_evaluator,
+            jit_direct_translation=topology.jit_direct_translation,
             name_hint=f"{sector.name}_explicit_qmc_components",
         )
     eval_seconds = time.perf_counter() - eval_start
@@ -8586,6 +8614,7 @@ def build_subtraction_formula_legacy(
             input_symbols,
             evaluator_compile_mode=topology.evaluator_compile_mode,
             real_evaluator=topology.real_evaluator,
+            jit_direct_translation=topology.jit_direct_translation,
             name_hint=f"{topology.family}_subtraction_{index}",
         )
         for index, expr in enumerate(outputs)

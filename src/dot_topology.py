@@ -202,6 +202,7 @@ def _request_cache_key(request: IntegralRequest) -> tuple[object, ...]:
         request.jit_compile_evaluators,
         request.evaluator_compile_mode,
         request.real_evaluator,
+        request.jit_direct_translation,
         request.dual_evaluator_mode,
         request.subtraction_backend,
         request.sector_evaluator_backend,

@@ -185,6 +185,7 @@ def summary_data(
         "jit_compile_evaluators": request.jit_compile_evaluators,
         "evaluator_compile_mode": request.evaluator_compile_mode,
         "real_evaluator": request.real_evaluator,
+        "jit_direct_translation": request.jit_direct_translation,
         "dual_evaluator_mode": request.dual_evaluator_mode,
         "subtraction_backend": request.subtraction_backend,
         "sector_evaluator_backend": request.sector_evaluator_backend,

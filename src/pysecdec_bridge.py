@@ -1098,6 +1098,7 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
         jit_compile_evaluators=request.jit_compile_evaluators,
         evaluator_compile_mode=request.evaluator_compile_mode,
         real_evaluator=request.real_evaluator,
+        jit_direct_translation=request.jit_direct_translation,
         endpoint_taylor_orders=endpoint_taylor_orders,
     )
 
@@ -1151,6 +1152,7 @@ def build_dot_bundle(
             jit_compile_evaluators=request.jit_compile_evaluators,
             evaluator_compile_mode=request.evaluator_compile_mode,
             real_evaluator=request.real_evaluator,
+            jit_direct_translation=request.jit_direct_translation,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,
@@ -1364,6 +1366,7 @@ def build_uf_bundle(
             jit_compile_evaluators=request.jit_compile_evaluators,
             evaluator_compile_mode=request.evaluator_compile_mode,
             real_evaluator=request.real_evaluator,
+            jit_direct_translation=request.jit_direct_translation,
             dual_evaluator_mode=request.dual_evaluator_mode,
             ibp_reduce_to_log_endpoint=request.ibp_reduce_to_log_endpoint,
             ibp_power_goal=request.ibp_power_goal,

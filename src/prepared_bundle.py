@@ -311,6 +311,7 @@ def _topology_json(writer: _BundleWriter, topology: TopologyDefinition) -> dict[
         "jit_compile_evaluators": topology.jit_compile_evaluators,
         "evaluator_compile_mode": topology.evaluator_compile_mode,
         "real_evaluator": topology.real_evaluator,
+        "jit_direct_translation": topology.jit_direct_translation,
         "dual_evaluator_mode": topology.dual_evaluator_mode,
         "ibp_reduce_to_log_endpoint": topology.ibp_reduce_to_log_endpoint,
         "ibp_power_goal": topology.ibp_power_goal,
@@ -409,6 +410,7 @@ def _load_topology(data: dict[str, Any], store: PreparedEvaluatorStore) -> Topol
             )
         ),
         real_evaluator=bool(data.get("real_evaluator", True)),
+        jit_direct_translation=bool(data.get("jit_direct_translation", False)),
         dual_evaluator_mode=str(data.get("dual_evaluator_mode", "pregenerate")),
         ibp_reduce_to_log_endpoint=bool(data.get("ibp_reduce_to_log_endpoint", False)),
         ibp_power_goal=(
@@ -530,6 +532,7 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         "jit_compile_evaluators": sector.jit_compile_evaluators,
         "evaluator_compile_mode": sector.evaluator_compile_mode,
         "real_evaluator": sector.real_evaluator,
+        "jit_direct_translation": sector.jit_direct_translation,
         "u_monomial_powers": sector.u_monomial_powers,
         "measure_monomial_powers": sector.measure_monomial_powers,
         "numerator_monomial_powers": sector.numerator_monomial_powers,
@@ -627,6 +630,7 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
             )
         ),
         real_evaluator=bool(data.get("real_evaluator", True)),
+        jit_direct_translation=bool(data.get("jit_direct_translation", False)),
         u_monomial_powers=[int(value) for value in data.get("u_monomial_powers", [])],
         measure_monomial_powers=[float(value) for value in data.get("measure_monomial_powers", [])],
         numerator_monomial_powers=[float(value) for value in data.get("numerator_monomial_powers", [])],
@@ -1114,6 +1118,7 @@ def save_prepared_bundle(
             "dual_evaluator_mode": request.dual_evaluator_mode,
             "evaluator_compile_mode": request.evaluator_compile_mode,
             "real_evaluator": request.real_evaluator,
+            "jit_direct_translation": request.jit_direct_translation,
             "subtraction_backend": request.subtraction_backend,
             "sector_evaluator_backend": request.sector_evaluator_backend,
             "ibp_reduce_to_log_endpoint": request.ibp_reduce_to_log_endpoint,

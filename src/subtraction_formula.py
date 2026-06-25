@@ -96,7 +96,11 @@ def _env_optional_int(
     return parsed
 
 
-def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
+def _symbolica_evaluator_kwargs(
+    jit_compile: bool,
+    *,
+    jit_direct_translation: bool = False,
+) -> dict[str, Any]:
     """Return evaluator tuning options shared with the chain-rule builder."""
 
     kwargs: dict[str, Any] = {
@@ -120,6 +124,8 @@ def _symbolica_evaluator_kwargs(jit_compile: bool) -> dict[str, Any]:
         value = _env_optional_int(env_name, default, minimum=minimum)
         if value is not None:
             kwargs[key] = value
+    if bool(jit_compile):
+        kwargs["jit_direct_translation"] = bool(jit_direct_translation)
     bool_options = {
         "direct_translation": "FSD_SYMBOLICA_DIRECT_TRANSLATION",
         "jit_direct_translation": "FSD_SYMBOLICA_JIT_DIRECT_TRANSLATION",
@@ -148,17 +154,21 @@ def _build_evaluator_multiple(
     input_symbols: list[Any],
     *,
     jit_compile: bool,
+    jit_direct_translation: bool = False,
     monitor: "_FormulaBuildMonitor | None" = None,
 ) -> tuple[list[Any], str]:
     """Build one multi-output evaluator, with a conservative panic fallback."""
 
     if not expressions:
         return [], "separate"
-    primary = _symbolica_evaluator_kwargs(jit_compile)
+    primary = _symbolica_evaluator_kwargs(
+        jit_compile,
+        jit_direct_translation=jit_direct_translation,
+    )
     attempts: list[tuple[str, dict[str, Any]]] = [("optimized", primary)]
     direct = dict(primary)
     direct["direct_translation"] = True
-    direct.setdefault("jit_direct_translation", False)
+    direct.setdefault("jit_direct_translation", bool(jit_direct_translation))
     if direct != primary:
         attempts.append(("direct_translation", direct))
 
@@ -184,11 +194,15 @@ def _build_evaluator_multiple(
         try:
             evaluator_kwargs = dict(kwargs)
             mode = evaluator_mode_from_jit(bool(evaluator_kwargs.pop("jit_compile", False)))
+            build_jit_direct_translation = bool(
+                evaluator_kwargs.pop("jit_direct_translation", jit_direct_translation)
+            )
             evaluator = build_evaluator_multiple(
                 expressions,
                 input_symbols,
                 evaluator_compile_mode=mode,
                 real_evaluator=True,
+                jit_direct_translation=build_jit_direct_translation,
                 **evaluator_kwargs,
             )
             if monitor is not None:
@@ -218,7 +232,7 @@ def _build_evaluator_multiple(
 
     fallback_kwargs = dict(primary)
     fallback_kwargs["direct_translation"] = True
-    fallback_kwargs.setdefault("jit_direct_translation", False)
+    fallback_kwargs.setdefault("jit_direct_translation", bool(jit_direct_translation))
     fallback_kwargs["verbose"] = bool(fallback_kwargs.get("verbose", True))
     scalar_attempts: list[tuple[str, dict[str, Any]]] = [
         ("direct_translation", fallback_kwargs),
@@ -296,11 +310,15 @@ def _build_evaluator_multiple(
             try:
                 evaluator_kwargs = dict(scalar_kwargs)
                 mode = evaluator_mode_from_jit(bool(evaluator_kwargs.pop("jit_compile", False)))
+                build_jit_direct_translation = bool(
+                    evaluator_kwargs.pop("jit_direct_translation", jit_direct_translation)
+                )
                 built_evaluator = build_evaluator(
                     expr,
                     input_symbols,
                     evaluator_compile_mode=mode,
                     real_evaluator=True,
+                    jit_direct_translation=build_jit_direct_translation,
                     **evaluator_kwargs,
                 )
                 if attempt_index != preferred_attempt:
@@ -482,6 +500,7 @@ def build_subtraction_formula_symbolica(
             ctx.input_symbols,
             evaluator_compile_mode=topology.evaluator_compile_mode,
             real_evaluator=topology.real_evaluator,
+            jit_direct_translation=topology.jit_direct_translation,
             name_hint="subtraction_formula",
         )
         for expr in outputs
@@ -552,6 +571,7 @@ def build_endpoint_projector_formula_symbolica(
                 ctx.input_symbols,
                 evaluator_compile_mode=topology.evaluator_compile_mode,
                 real_evaluator=topology.real_evaluator,
+                jit_direct_translation=topology.jit_direct_translation,
                 name_hint="endpoint_projector",
             )
             for expr in outputs
@@ -637,6 +657,7 @@ def build_regular_taylor_formula_symbolica(
             outputs,
             ctx.input_symbols,
             jit_compile=topology.jit_compile_evaluators,
+            jit_direct_translation=topology.jit_direct_translation,
         )
         formula = formula_class(
             signature=signature,
@@ -699,6 +720,7 @@ def _build_regular_taylor_dualized_formula(
         evaluator_symbols,
         evaluator_compile_mode="eager",
         real_evaluator=topology.real_evaluator,
+        jit_direct_translation=topology.jit_direct_translation,
         name_hint="regular_taylor_dual",
     )
     evaluator.dualize([list(mi) for mi in dual_shape])
@@ -887,6 +909,7 @@ def _build_regular_taylor_sparse_expression_formula(
         outputs,
         ctx.input_symbols,
         jit_compile=topology.jit_compile_evaluators,
+        jit_direct_translation=topology.jit_direct_translation,
         monitor=monitor,
     )
     monitor.emit(
@@ -1126,6 +1149,7 @@ def _load_endpoint_projector_formula_from_cache(
                     input_symbols,
                     evaluator_compile_mode=topology.evaluator_compile_mode,
                     real_evaluator=topology.real_evaluator,
+                    jit_direct_translation=topology.jit_direct_translation,
                     name_hint="regular_taylor_cache",
                 )
                 for expr in outputs
@@ -1258,6 +1282,7 @@ def _load_regular_taylor_formula_from_cache(
                             evaluator_input_symbols,
                             evaluator_compile_mode="eager",
                             real_evaluator=topology.real_evaluator,
+                            jit_direct_translation=topology.jit_direct_translation,
                             name_hint="regular_taylor_cache_dual",
                         )
                         evaluator.dualize([list(mi) for mi in evaluator_dual_shape])
@@ -1287,6 +1312,7 @@ def _load_regular_taylor_formula_from_cache(
                             outputs,
                             input_symbols,
                             jit_compile=topology.jit_compile_evaluators,
+                            jit_direct_translation=topology.jit_direct_translation,
                         )
                         _upgrade_regular_cache_with_evaluator_sidecars(
                             candidate,

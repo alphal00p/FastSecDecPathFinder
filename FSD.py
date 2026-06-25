@@ -1011,6 +1011,26 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         action="store_false",
         help="Force complex-valued Symbolica evaluator APIs for f64 batches.",
     )
+    jit_direct_default = bool(defaults.get("jit_direct_translation", False))
+    jit_direct_group = parser.add_mutually_exclusive_group()
+    jit_direct_group.add_argument(
+        "--jit-direct-translation",
+        dest="jit_direct_translation",
+        action="store_true",
+        default=jit_direct_default,
+        help=(
+            "Ask Symbolica/SymJIT to use direct JIT translation for JIT evaluators. "
+            "FSD defaults to indirect JIT translation because it is faster on "
+            "the PSD50 MRE; this flag keeps the direct path available for "
+            "benchmarking."
+        ),
+    )
+    jit_direct_group.add_argument(
+        "--no-jit-direct-translation",
+        dest="jit_direct_translation",
+        action="store_false",
+        help="Use Symbolica/SymJIT indirect JIT translation for JIT evaluators.",
+    )
     dual_group = parser.add_mutually_exclusive_group()
     dual_group.add_argument(
         "--pregenerate-dual-evaluators",
@@ -1598,6 +1618,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         jit_compile_evaluators=evaluator_compile_mode == "jit",
         evaluator_compile_mode=evaluator_compile_mode,
         real_evaluator=real_evaluator,
+        jit_direct_translation=bool(args.jit_direct_translation),
         dual_evaluator_mode=args.dual_evaluator_mode,
         subtraction_backend=args.subtraction_backend,
         sector_evaluator_backend=args.sector_evaluator_backend,
