@@ -1,0 +1,31 @@
+extends = "four_loop_hard_from_U_and_F.yaml"
+
+# One raw sector from the hard four-loop U/F example discussed in the
+# performance notes.  This card uses FSD's current best native QMC setup:
+# explicit sector generation, QMC-specialized evaluators, pySecDec-compatible
+# lattice vectors, and no precision rescue for the f64 throughput benchmark.
+sectors = [2807]
+dot-engine = "fsd"
+sampling-mode = "qmc"
+qmc-optimized-evaluators = true
+qmc-lattice-backend = "pysecdec-default"
+qmc-shifts = 32
+qmc-max-samples-per-iter = 0
+qmc-refine-sectors = "democratic"
+samples-per-iter = 1000000
+batch-size = 32768
+workers = 10
+max-iter = 1
+min-iter = 1
+
+evaluator-compile-mode = "jit"
+real-evaluator = true
+max-eps-order = 0
+stability-threshold = 0.0
+medium-precision-stability-threshold = 0.0
+high-precision-stability-threshold = 0.0
+max-weight-precision-xi = 0.0
+
+output = "../../output/four_loop_hard_psd2807_fsd_qmc"
+result-path = "../outputs/four_loop_hard_psd2807_fsd_qmc.json"
+restart = true

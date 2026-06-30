@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from fractions import Fraction
+import importlib
 from pathlib import Path
 import json
 import re
@@ -111,6 +112,7 @@ def require_pysecdec() -> dict[str, Any]:
             primary_decomposition,
         )
         from pySecDec.integral_interface import IntegralLibrary
+        from pySecDec import make_package
         from pySecDec.loop_integral import (
             LoopIntegralFromGraph,
             LoopIntegralFromPropagators,
@@ -136,6 +138,7 @@ def require_pysecdec() -> dict[str, Any]:
         "iterative_decomposition": iterative_decomposition,
         "primary_decomposition": primary_decomposition,
         "IntegralLibrary": IntegralLibrary,
+        "make_package": make_package,
         "LoopIntegralFromGraph": LoopIntegralFromGraph,
         "LoopIntegralFromPropagators": LoopIntegralFromPropagators,
         "loop_package": loop_package,
@@ -222,6 +225,8 @@ def ensure_pysecdec_package(
             detail="reused existing compiled package",
         )
         return paths, timings
+    if paths.package_dir.exists():
+        shutil.rmtree(paths.package_dir)
 
     cwd = Path.cwd()
     log_path = _pysecdec_generation_log_path(paths)
@@ -754,11 +759,33 @@ def _decompose(
         other=_sector_other_polynomials(li, modules, numerator_polynomials),
     )
     normaliz = request.normaliz_executable
+    if normaliz is None and request.sector_method in {
+        "geometric",
+        "geometric_no_primary",
+        "geometric_infinity_no_primary",
+    }:
+        try:
+            import pySecDecContrib  # type: ignore
+
+            candidate = Path(pySecDecContrib.dirname) / "bin" / "normaliz"
+            if candidate.is_file():
+                normaliz = str(candidate)
+        except Exception:
+            normaliz = None
     with timings.measure(
         "pySecDec sector decomposition",
         request.sector_method,
         progress=progress,
     ):
+        if request.sector_method == "iterative_no_primary":
+            return _squash_pysecdec_sector_symmetries(
+                list(modules["iterative_decomposition"](initial)),
+                request,
+                timings,
+                modules,
+                progress,
+                ignored_other_count=map_polynomial_count,
+            )
         if request.sector_method == "iterative":
             sectors: list[Any] = []
             for primary in modules["primary_decomposition"](initial):
@@ -773,6 +800,38 @@ def _decompose(
             )
         workdir = f"normaliz_tmp_{os.getpid()}"
         shutil.rmtree(workdir, ignore_errors=True)
+        if request.sector_method == "geometric_no_primary":
+            try:
+                return _squash_pysecdec_sector_symmetries(
+                    list(
+                        modules["geometric_decomposition_ku"](
+                            initial, normaliz=normaliz, workdir=workdir
+                        )
+                    ),
+                    request,
+                    timings,
+                    modules,
+                    progress,
+                    ignored_other_count=map_polynomial_count,
+                )
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+        if request.sector_method == "geometric_infinity_no_primary":
+            try:
+                return _squash_pysecdec_sector_symmetries(
+                    list(
+                        modules["geometric_decomposition"](
+                            initial, normaliz=normaliz, workdir=workdir
+                        )
+                    ),
+                    request,
+                    timings,
+                    modules,
+                    progress,
+                    ignored_other_count=map_polynomial_count,
+                )
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
         if request.sector_method == "geometric_ku":
             # Mirror pySecDec's package writer: ``geometric_ku`` performs the
             # usual loop-integral primary decomposition and then applies the KU
@@ -840,6 +899,13 @@ def _squash_pysecdec_sector_symmetries(
     """
     reduced = list(sectors)
     details: list[str] = [f"raw={len(reduced)}"]
+    if not bool(getattr(request, "sector_symmetry_squashing", True)):
+        timings.add(
+            "pySecDec sector symmetry summary",
+            0.0,
+            detail=", ".join([*details, "disabled"]),
+        )
+        return reduced
     with timings.measure("pySecDec sector symmetry squashing", progress=progress):
         if getattr(request, "pysecdec_use_iterative_sort", True):
             reduced = _squash_fsd_sector_symmetries_preserving_maps(
@@ -1036,8 +1102,8 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
     """Convert one pySecDec sector into an FSD declarative sector."""
     variable_names = _sector_variable_names(sec)
     dimension = len(variable_names)
-    u_powers, _u_residual = _split_cast_product(sec.cast[0], dimension)
-    f_powers, _f_residual = _split_cast_product(sec.cast[1], dimension)
+    u_powers, u_residual = _split_cast_product(sec.cast[0], dimension)
+    f_powers, f_residual = _split_cast_product(sec.cast[1], dimension)
     jacobian_powers, jacobian_coeff = _split_one_term_monomial(sec.Jacobian, dimension)
     measure_powers = _measure_monomial_powers_from_maps(sec, topology, dimension)
     other_exprs = [_polynomial_to_expr(poly) for poly in sec.other]
@@ -1088,6 +1154,8 @@ def _convert_sector(sec: Any, index: int, topology: TopologyDefinition, request:
         regular_jacobian_expr=E(jacobian_coeff),
         numerator_expr=numerator_expr,
         numerator_eps_exprs=numerator_eps_exprs,
+        u_residual_expr=_polynomial_to_expr(u_residual),
+        f_residual_expr=_polynomial_to_expr(f_residual),
         u_monomial_powers=u_powers,
         f_monomial_powers=f_powers,
         jacobian_monomial_powers=jacobian_powers,
@@ -1489,6 +1557,209 @@ def run_pysecdec_package(
         errors=errors,
         orders=orders,
         raw_series=series,
+        timings=timings,
+    )
+
+
+def _safe_package_name(text: str) -> str:
+    """Return a pySecDec/C++ friendly package-name fragment."""
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", str(text)).strip("_").lower()
+    return cleaned or "uf"
+
+
+def _uf_single_sector_package_paths(
+    source: UFTopologyData,
+    request: IntegralRequest,
+    sector_id: int,
+) -> PySecDecPackagePaths:
+    """Return package paths for a native pySecDec direct-U/F single-sector run."""
+    workdir = Path(request.pysecdec_workdir).expanduser().resolve()
+    name = f"fsd_psd_{_safe_package_name(source.family)}_sector{int(sector_id)}_pysecdec"
+    package_dir = workdir / name
+    integral_dir = package_dir / f"{name}_integral"
+    return PySecDecPackagePaths(
+        package_dir=package_dir,
+        integral_dir=integral_dir,
+        shared_library=package_dir / f"{name}_pylink.so",
+    )
+
+
+@contextlib.contextmanager
+def _single_raw_sector_pysecdec_patch(raw_sector_index: int):
+    """Temporarily ask pySecDec package generation to emit one raw sector."""
+    make_package_module = importlib.import_module("pySecDec.code_writer.make_package")
+    original_make_environment = make_package_module._make_environment
+
+    def one_sector_environment(original_environment):
+        secondary_sectors = original_environment.pop("secondary_sectors")
+        sector_index = int(original_environment.pop("sector_index"))
+        selected_sector = None
+        for raw_index, sector in enumerate(secondary_sectors):
+            if int(raw_index) == int(raw_sector_index):
+                selected_sector = sector
+                break
+        if selected_sector is None:
+            raise RuntimeError(f"raw secondary sector {int(raw_sector_index)} was not generated")
+        environment = original_environment.copy()
+        environment["sector"] = selected_sector
+        environment["sector_index"] = sector_index + 1
+        print(
+            "[single-sector patch] selected raw secondary sector "
+            f"{int(raw_sector_index)} -> generated pySecDec sector {environment['sector_index']}",
+            flush=True,
+        )
+        yield environment
+
+    try:
+        make_package_module._make_environment = one_sector_environment
+        yield
+    finally:
+        make_package_module._make_environment = original_make_environment
+
+
+def _uf_decomposition_polynomials(source: UFTopologyData) -> list[str]:
+    """Return pySecDec make_package polynomials for direct U/F input."""
+    out: list[str] = []
+    u_exp = source.u_exponent.as_text()
+    f_exp = source.f_exponent.as_text()
+    u_text = _symbolica_to_pysecdec_text(source.u_expr_text)
+    f_text = _symbolica_to_pysecdec_text(source.f_expr_text)
+    if u_exp.strip() in {"1", "1.0"}:
+        out.append(u_text)
+    else:
+        out.append(f"({u_text})**({u_exp})")
+    out.append(f"({f_text})**({f_exp})")
+    return out
+
+
+def run_pysecdec_uf_single_sector(
+    source: UFTopologyData,
+    request: IntegralRequest,
+    progress: GenerationProgress | None = None,
+) -> PySecDecRunResult:
+    """Run native pySecDec QMC for one selected direct-U/F raw sector.
+
+    This is intentionally a narrow comparison path.  pySecDec's public package
+    API emits all sectors, so selecting one raw secondary sector requires a
+    temporary package-generation patch matching the local PSD2807 study.
+    """
+    if request.sectors is None or len(request.sectors) != 1:
+        raise ValueError("native pySecDec direct-U/F mode requires exactly one --sectors entry")
+    sector_id = int(request.sectors[0])
+    modules = require_pysecdec()
+    timings = GenerationTimings()
+    paths = _uf_single_sector_package_paths(source, request, sector_id)
+    if paths.package_dir.exists() and not request.keep_pysecdec_workdir:
+        shutil.rmtree(paths.package_dir)
+    paths.package_dir.parent.mkdir(parents=True, exist_ok=True)
+    metadata = paths.integral_dir / "disteval" / f"{paths.integral_dir.name}.json"
+    static_library = paths.integral_dir / f"lib{paths.integral_dir.name}.a"
+    log_path = _pysecdec_generation_log_path(paths)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_detail = "" if request.show_pysecdec_output else f"captured output: {log_path}"
+    if (
+        request.keep_pysecdec_workdir
+        and paths.package_dir.exists()
+        and paths.shared_library.is_file()
+        and metadata.is_file()
+        and static_library.is_file()
+    ):
+        timings.add("pySecDec package generation", 0.0, detail="reused existing generated package")
+        timings.add("pySecDec package compile", 0.0, detail="reused existing compiled package")
+    else:
+        if paths.package_dir.exists():
+            shutil.rmtree(paths.package_dir)
+        cwd = Path.cwd()
+        try:
+            os.chdir(paths.package_dir.parent)
+            with (
+                contextlib.nullcontext()
+                if request.show_pysecdec_output
+                else log_path.open("w", encoding="utf-8")
+            ) as log_handle:
+                make_kwargs: dict[str, Any] = {
+                    "name": paths.package_dir.name,
+                    "integration_variables": list(source.x_names),
+                    "regulators": ["eps"],
+                    "requested_orders": [int(request.max_eps_order)],
+                    "polynomials_to_decompose": _uf_decomposition_polynomials(source),
+                    "decomposition_method": request.sector_method,
+                    # The raw-sector selector patches pySecDec's package
+                    # environment in-process.  Keep generation single-process
+                    # so the patched callable never has to be pickled into a
+                    # multiprocessing worker; this path emits only one sector.
+                    "processes": 1,
+                    "form_threads": 1,
+                    "form_work_space": "50M",
+                    "use_iterative_sort": False,
+                    "use_light_Pak": False,
+                    "use_dreadnaut": False,
+                    "use_Pak": False,
+                    "split": False,
+                    "pylink_qmc_transforms": ["korobov3x3"],
+                }
+                if source.parameter_names:
+                    make_kwargs["real_parameters"] = list(source.parameter_names)
+                if request.ibp_power_goal is not None:
+                    make_kwargs["ibp_power_goal"] = int(request.ibp_power_goal)
+                with timings.measure("pySecDec package generation", log_detail, progress=progress):
+                    with (
+                        contextlib.nullcontext()
+                        if request.show_pysecdec_output
+                        else _redirect_process_output_to(log_handle)
+                    ):
+                        with _single_raw_sector_pysecdec_patch(sector_id):
+                            modules["make_package"](**make_kwargs)
+                compile_detail = (
+                    "make pylink"
+                    if request.show_pysecdec_output
+                    else f"make pylink; captured output: {log_path}"
+                )
+                with timings.measure("pySecDec package compile", compile_detail, progress=progress):
+                    subprocess.run(
+                        ["make", "-C", str(paths.package_dir), "pylink", "-j"],
+                        check=True,
+                        stdout=None if request.show_pysecdec_output else log_handle,
+                        stderr=None if request.show_pysecdec_output else subprocess.STDOUT,
+                    )
+        finally:
+            os.chdir(cwd)
+
+    with timings.measure("pySecDec package load", progress=progress):
+        integral = modules["IntegralLibrary"](str(paths.shared_library))
+    maxeval = int(request.pysecdec_maxeval)
+    if maxeval <= 0:
+        maxeval = int(request.samples_per_iter)
+    with timings.measure("pySecDec integration", progress=progress):
+        integral.use_Qmc(
+            transform="korobov3x3",
+            epsrel=0.0,
+            epsabs=0.0,
+            maxeval=maxeval,
+            minn=max(1, min(maxeval, 10_000)),
+            maxnperpackage=0,
+            cputhreads=max(int(request.workers), 1),
+            verbosity=0,
+            seed=int(request.seed),
+            errormode="largest",
+        )
+        series = integral(
+            real_parameters=list(source.parameter_values),
+            together=True,
+            maxeval=maxeval,
+            mineval=maxeval,
+            epsrel=0.0,
+            epsabs=0.0,
+            number_of_threads=max(int(request.workers), 1),
+            format="json",
+        )
+    raw_series = series[2] if isinstance(series, tuple) and len(series) >= 3 else series
+    orders, coeffs, errors = _parse_pysecdec_json_series(raw_series)
+    return PySecDecRunResult(
+        coeffs=coeffs,
+        errors=errors,
+        orders=orders,
+        raw_series=raw_series,
         timings=timings,
     )
 

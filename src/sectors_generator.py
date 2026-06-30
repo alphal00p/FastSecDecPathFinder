@@ -134,6 +134,8 @@ class SectorDefinition:
     endpoint_taylor_orders: list[int] | None = None
     numerator_expr: Any | None = None
     numerator_eps_exprs: list[Any] | None = None
+    u_residual_expr: Any | None = None
+    f_residual_expr: Any | None = None
     strict_prepared_bundle: bool = False
     f_monomial_expr: Any = field(init=False)
     u_monomial_expr: Any = field(init=False)
@@ -204,6 +206,10 @@ class SectorDefinition:
             self.numerator_eps_exprs = [self.numerator_expr]
         if not self.numerator_eps_exprs:
             self.numerator_eps_exprs = [E("0")]
+        if isinstance(self.u_residual_expr, str):
+            self.u_residual_expr = E(str(self.u_residual_expr))
+        if isinstance(self.f_residual_expr, str):
+            self.f_residual_expr = E(str(self.f_residual_expr))
         self.numerator_expr = self.numerator_eps_exprs[0]
         self.f_monomial_expr = _monomial_expr(self.variable_names, self.f_monomial_powers)
         self.u_monomial_expr = _monomial_expr(self.variable_names, self.u_monomial_powers)

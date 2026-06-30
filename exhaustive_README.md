@@ -153,6 +153,19 @@ also includes the off-shell Euclidean triple box,
 `examples/runs/dot_triple_box_offshell.yaml`, as the no-threshold three-loop
 triple-box case to keep in future performance and stability sweeps.
 
+TOML run cards are also accepted, and may use `extends` to inherit a longer
+YAML card.  The four-loop hard-polynomial single-sector comparison uses this
+to avoid duplicating the long direct `U/F` input:
+
+```sh
+.venv/bin/python FSD.py --run examples/runs/four_loop_hard_psd2807_fsd_qmc.toml
+.venv/bin/python FSD.py --run examples/runs/four_loop_hard_psd2807_pysecdec_native.toml
+```
+
+Both cards select raw sector `2807`; the first uses FSD's optimized QMC route,
+while the second patches native pySecDec package generation to emit and run the
+same raw sector.
+
 ### Common DOT And U/F Runs
 
 The following examples use the fixed real-valued JIT evaluator path for FSD
@@ -356,10 +369,13 @@ mode; the default adaptive mode remains the production integration path.
 
 QMC integration is also available through randomized shifted rank-1 lattices
 with the Korobov periodizing transform used in the pySecDec/QMC literature.
-This path is independent of pySecDec's QMC internals; pySecDec is only used for
-DOT sector finding or as an external generated-integrator baseline.  The
-default `--qmc-lattice-backend cbcpt-dn1-100` uses a small bundled CBC/PT
-generating-vector table implemented directly in NumPy.  The alternative
+This path is independent of pySecDec's QMC integrator; pySecDec is only used
+for DOT sector finding or as an external generated-integrator baseline.  The
+default `--qmc-lattice-backend pysecdec-default` mirrors pySecDec's default
+`cbcpt_dn1_100` CBC/PT generating-vector table and prime rule-size selection
+for dimensions up to 100 while FSD still
+generates and evaluates samples itself.  `--qmc-lattice-backend cbcpt-dn1-100`
+keeps the older small bundled table for compact tests, and
 `--qmc-lattice-backend qmcpy` uses QMCPy's base-two lattices and requires
 `--samples-per-iter` to be a power of two.  In this mode `--samples-per-iter`
 is the requested number of lattice points per support group and per random

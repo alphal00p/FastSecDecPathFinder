@@ -23,6 +23,7 @@ import shutil
 import signal
 import sys
 import time
+import tomllib
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -59,7 +60,7 @@ from integrand import build_topology
 from integrator import integrate
 from kinematics import load_kinematics
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
-from pysecdec_bridge import ensure_pysecdec_package, run_pysecdec_package
+from pysecdec_bridge import ensure_pysecdec_package, run_pysecdec_package, run_pysecdec_uf_single_sector
 from pysecdec_kernel_benchmark import (
     benchmark_pysecdec_generated_kernels,
     output_pysecdec_kernel_benchmark_json,
@@ -76,7 +77,7 @@ from result_io import (
 from runtime_benchmark import run_sector_runtime_benchmark
 from sectors_generator import generate_sectors
 from symbolic_constants import PI_SQUARED_OVER_6_FLOAT
-from uf_topology import get_uf_bundle
+from uf_topology import get_uf_bundle, uf_topology_data_from_request
 
 
 _INTERRUPT_CLEANUP_ACTIVE = False
@@ -328,8 +329,10 @@ def validate_request(request: IntegralRequest) -> None:
         raise ValueError("--qmc-max-samples-per-iter must be >= 0")
     if request.qmc_korobov_alpha < 1:
         raise ValueError("--qmc-korobov-alpha must be a positive integer")
-    if request.qmc_lattice_backend not in {"qmcpy", "cbcpt-dn1-100"}:
-        raise ValueError("--qmc-lattice-backend supports 'qmcpy' and 'cbcpt-dn1-100'")
+    if request.qmc_lattice_backend not in {"qmcpy", "cbcpt-dn1-100", "pysecdec-default"}:
+        raise ValueError(
+            "--qmc-lattice-backend supports 'qmcpy', 'cbcpt-dn1-100', and 'pysecdec-default'"
+        )
     if request.qmc_order not in {"linear", "radical-inverse", "gray"}:
         raise ValueError("--qmc-order must be 'linear', 'radical-inverse', or 'gray'")
     if request.qmc_refine_sectors not in {"adaptive", "democratic"}:
@@ -430,8 +433,12 @@ def validate_request(request: IntegralRequest) -> None:
             raise ValueError("direct U/F topology mode requires --topology-source uf")
         if not isinstance(request.uf_topology, dict):
             raise ValueError("direct U/F topology mode requires a uf-topology YAML mapping")
-        if request.dot_engine != "fsd":
-            raise ValueError("direct U/F topology mode supports only --dot-engine fsd")
+        if request.dot_engine not in {"fsd", "pysecdec"}:
+            raise ValueError("direct U/F topology mode supports only --dot-engine fsd or pysecdec")
+        if request.dot_engine == "pysecdec" and (request.sectors is None or len(request.sectors) != 1):
+            raise ValueError(
+                "direct U/F native pySecDec comparison currently requires exactly one selected sector"
+            )
         if request.target_args == ("pysecdec",):
             raise ValueError("direct U/F topology mode cannot use --target pysecdec")
         return
@@ -520,31 +527,50 @@ def _is_numeric_token(token: object) -> bool:
         return False
 
 
-def _resolve_yaml_path(value: object, base_dir: Path) -> str:
-    """Resolve one YAML path relative to the run-file directory."""
+def _resolve_run_path(value: object, base_dir: Path) -> str:
+    """Resolve one run-card path relative to the run-file directory."""
     path = Path(str(value)).expanduser()
     if path.is_absolute():
         return str(path)
     return str((base_dir / path).resolve())
 
 
-def _load_run_defaults(run_file: str | None) -> dict[str, object]:
-    """Load CLI defaults from a YAML run preset.
+def _load_run_mapping(run_path: Path) -> dict[str, object]:
+    """Load one YAML or TOML run-card mapping."""
+    suffix = run_path.suffix.lower()
+    if suffix == ".toml":
+        data = tomllib.loads(run_path.read_text(encoding="utf-8")) or {}
+    else:
+        data = yaml.safe_load(run_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{run_path}: run preset must contain a mapping")
+    return data
 
-    YAML keys mirror long CLI options without the leading ``--`` and may use
-    either kebab-case or snake_case.  Path-like values in the YAML are resolved
-    relative to the YAML file location; explicit CLI paths remain untouched by
-    this helper because argparse applies them after defaults are installed.
+
+def _load_run_defaults(run_file: str | None) -> dict[str, object]:
+    """Load CLI defaults from a YAML or TOML run preset.
+
+    Run-card keys mirror long CLI options without the leading ``--`` and may
+    use either kebab-case or snake_case.  Path-like values are resolved relative
+    to the run-card file location; explicit CLI paths remain untouched by this
+    helper because argparse applies them after defaults are installed.
     """
     if run_file is None:
         return {}
     run_path = Path(run_file).expanduser().resolve()
-    data = yaml.safe_load(run_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{run_path}: run preset must contain a YAML mapping")
+    data = _load_run_mapping(run_path)
 
     base_dir = run_path.parent
-    defaults: dict[str, object] = {"run_file": str(run_path)}
+    defaults: dict[str, object] = {}
+    extends = data.pop("extends", None)
+    if extends is not None:
+        extend_files = extends if isinstance(extends, list) else [extends]
+        for extend_file in extend_files:
+            extend_path = Path(str(extend_file)).expanduser()
+            if not extend_path.is_absolute():
+                extend_path = (base_dir / extend_path).resolve()
+            defaults.update(_load_run_defaults(str(extend_path)))
+    defaults["run_file"] = str(run_path)
     path_keys = {
         "dot_file",
         "kinematics",
@@ -575,7 +601,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
                 }[key]
             continue
         if key in path_keys and value is not None:
-            value = _resolve_yaml_path(value, base_dir)
+            value = _resolve_run_path(value, base_dir)
         elif key == "target" and value is not None:
             tokens = value if isinstance(value, list) else [value]
             resolved_tokens: list[str] = []
@@ -583,7 +609,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
                 if str(token) in {"pysecdec", "oneloop"} or _is_numeric_token(token):
                     resolved_tokens.append(str(token))
                 else:
-                    resolved_tokens.append(_resolve_yaml_path(token, base_dir))
+                    resolved_tokens.append(_resolve_run_path(token, base_dir))
             value = resolved_tokens
         elif key == "sectors" and value is not None:
             value = [int(item) for item in (value if isinstance(value, list) else [value])]
@@ -642,7 +668,14 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     parser.add_argument("--graph-name", default=None, help="DOT graph name when a file contains multiple graphs.")
     parser.add_argument(
         "--sector-method",
-        choices=["geometric", "geometric_ku", "iterative"],
+        choices=[
+            "geometric",
+            "geometric_ku",
+            "iterative",
+            "geometric_no_primary",
+            "geometric_infinity_no_primary",
+            "iterative_no_primary",
+        ],
         default="iterative",
         help="pySecDec decomposition method used for DOT sector generation. Default: iterative.",
     )
@@ -764,14 +797,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
     )
     parser.add_argument(
         "--qmc-lattice-backend",
-        choices=["qmcpy", "cbcpt-dn1-100"],
-        default=str(defaults.get("qmc_lattice_backend", "cbcpt-dn1-100")),
+        choices=["qmcpy", "cbcpt-dn1-100", "pysecdec-default"],
+        default=str(defaults.get("qmc_lattice_backend", "pysecdec-default")),
         help=(
             "Rank-1 lattice source for --sampling-mode qmc. QMC integration "
             "is implemented independently of pySecDec. 'qmcpy' uses QMCPy's "
-            "base-two lattice; 'cbcpt-dn1-100' uses a bundled CBC/PT rank-1 "
-            "vector table with pySecDec-like prime rule sizes. Default: "
-            "cbcpt-dn1-100."
+            "base-two lattice; 'cbcpt-dn1-100' uses a small bundled CBC/PT "
+            "rank-1 vector subset; 'pysecdec-default' mirrors pySecDec's "
+            "default CBC/PT vector-table selection while still evaluating "
+            "samples in FSD. Default: pysecdec-default."
         ),
     )
     parser.add_argument(
@@ -835,6 +869,28 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         help=(
             "Legacy QMC error mode: integrate sectors with independent "
             "random shifts and combine sector errors in quadrature."
+        ),
+    )
+    qmc_optimized_default = defaults.get("qmc_optimized_evaluators", None)
+    parser.add_argument(
+        "--qmc-optimized-evaluators",
+        dest="qmc_optimized_evaluators",
+        action="store_true",
+        default=(None if qmc_optimized_default is None else bool(qmc_optimized_default)),
+        help=(
+            "During explicit-sector generation, also build QMC-specialized "
+            "evaluators that consume raw lattice coordinates and fold in the "
+            "Korobov transform plus Jacobian weight. Default: enabled for "
+            "--sampling-mode qmc."
+        ),
+    )
+    parser.add_argument(
+        "--no-qmc-optimized-evaluators",
+        dest="qmc_optimized_evaluators",
+        action="store_false",
+        help=(
+            "Disable QMC-specialized raw-lattice evaluators, useful for "
+            "performance comparisons against the ordinary explicit evaluator."
         ),
     )
     parser.add_argument(
@@ -1232,6 +1288,24 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
             "under --pysecdec-workdir and the CLI shows generation progress instead."
         ),
     )
+    sector_symmetry_default = bool(defaults.get("sector_symmetry_squashing", True))
+    parser.add_argument(
+        "--sector-symmetry-squashing",
+        dest="sector_symmetry_squashing",
+        action="store_true",
+        default=sector_symmetry_default,
+        help="Apply pySecDec-style sector symmetry squashing after decomposition.",
+    )
+    parser.add_argument(
+        "--no-sector-symmetry-squashing",
+        dest="sector_symmetry_squashing",
+        action="store_false",
+        help=(
+            "Skip pySecDec-style sector symmetry squashing. This is useful for "
+            "raw no-primary polynomial decomposition probes where the symmetry "
+            "hashing can dominate generation time."
+        ),
+    )
     parser.add_argument(
         "--output",
         default=None,
@@ -1568,6 +1642,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         pysecdec_maxeval=args.pysecdec_maxeval,
         keep_pysecdec_workdir=args.keep_pysecdec_workdir,
         show_pysecdec_output=bool(args.show_pysecdec_output),
+        sector_symmetry_squashing=bool(args.sector_symmetry_squashing),
         progress_value_order=args.progress_value_order,
         max_eps_order=args.max_eps_order,
         target_args=target_args,
@@ -1601,6 +1676,11 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         qmc_correlate_sectors=bool(args.qmc_correlate_sectors),
         qmc_support_mode=str(args.qmc_support_mode),
         qmc_refine_sectors=str(args.qmc_refine_sectors),
+        qmc_optimized_evaluators=(
+            bool(args.qmc_optimized_evaluators)
+            if args.qmc_optimized_evaluators is not None
+            else str(args.sampling_mode) == "qmc"
+        ),
         restart=bool(args.restart),
         target_rel_accuracy=(
             None if args.target_rel_accuracy is None else float(args.target_rel_accuracy)
@@ -2260,6 +2340,54 @@ def _run_native_pysecdec_dot(request: IntegralRequest, logger: logging.Logger) -
     return 0
 
 
+def _run_native_pysecdec_uf_single_sector(request: IntegralRequest, logger: logging.Logger) -> int:
+    """Run direct U/F input through native pySecDec for one selected raw sector."""
+    progress = _generation_progress(request, logger, "pySecDec")
+    try:
+        source = uf_topology_data_from_request(request)
+        pysecdec_result = run_pysecdec_uf_single_sector(source, request, progress=progress)
+    except Exception as exc:
+        print(f"{Fore.RED}error:{Style.RESET_ALL} {exc}", file=sys.stderr)
+        return 1
+    finally:
+        progress.close()
+
+    pysecdec_result.timings.log(logger)
+    summary: dict[str, object] = {
+        "generation_timings": GenerationTimings().to_summary_dict(),
+        "pysecdec_native": True,
+        "pysecdec_native_single_sector": True,
+    }
+    _merge_pysecdec_package_generation_timings(summary, pysecdec_result.timings)
+    _specialize_native_pysecdec_generation_timings(summary)
+    summary["pysecdec_timings"] = pysecdec_result.timings.to_dict()
+    output = {
+        "schema_version": 1,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "command": sys.argv,
+        "integral": request.integral,
+        "mode": request.mode,
+        "prefactor_convention": request.prefactor_convention,
+        "request": request_metadata(request),
+        "environment": environment_metadata(),
+        "summary": summary,
+        "pysecdec": {
+            "coeffs": pysecdec_result.coeffs,
+            "errors": pysecdec_result.errors,
+            "orders": pysecdec_result.orders,
+            "timings": summary.get("pysecdec_timings", {}),
+        },
+    }
+    write_result_json(output, result_output_path(request))
+    if request.json:
+        print(output_json(output))
+    else:
+        if not request.quiet_summary:
+            print_generation_report(request, summary)
+        print_pysecdec_result_table(output)
+    return 0
+
+
 def _pysecdec_target(
     request: IntegralRequest,
     summary: dict,
@@ -2445,11 +2573,13 @@ def _prepare_sector_runtime_artifacts(
     topology.chain_rule_formula_output_length_limit = request.chain_rule_formula_output_length_limit
     topology.direct_projector_cache_term_threshold = request.direct_projector_cache_term_threshold
     topology.allow_fallback_for_missing_caches = request.allow_fallback_for_missing_caches
-    topology.enable_qmc_component_outputs = request.qmc_support_mode in {
+    topology.enable_qmc_component_outputs = bool(request.qmc_optimized_evaluators) or request.qmc_support_mode in {
         "component",
         "order",
         "local-order",
     }
+    topology.enable_qmc_optimized_evaluators = bool(request.qmc_optimized_evaluators)
+    topology.qmc_korobov_alpha = int(request.qmc_korobov_alpha)
     bridge_already_prepared_external_duals = (
         request.command == "generate" and _has_external_global_prefactor(request)
         and request.sector_evaluator_backend not in {"two-stage-explicit", "explicit"}
@@ -2598,6 +2728,12 @@ def _main_impl() -> int:
             and request.dot_engine == "pysecdec"
         ):
             return _run_native_pysecdec_dot(request, logger)
+        if (
+            request.command == "run"
+            and request.integral == "uf"
+            and request.dot_engine == "pysecdec"
+        ):
+            return _run_native_pysecdec_uf_single_sector(request, logger)
         legacy_prepared_output = (
             request.command == "run"
             and _has_external_global_prefactor(request)
@@ -2677,6 +2813,13 @@ def _main_impl() -> int:
                     )
                 ),
             )
+            topology.enable_qmc_component_outputs = bool(request.qmc_optimized_evaluators) or request.qmc_support_mode in {
+                "component",
+                "order",
+                "local-order",
+            }
+            topology.enable_qmc_optimized_evaluators = bool(request.qmc_optimized_evaluators)
+            topology.qmc_korobov_alpha = int(request.qmc_korobov_alpha)
         elif _has_external_global_prefactor(request) and request.command != "generate":
             generation_progress = _generation_progress(request, logger, "FSD generation")
             bundle = _get_external_bundle(request, progress=generation_progress)

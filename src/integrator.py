@@ -34,7 +34,15 @@ from formatting import (
     summed_relative_error_percent,
 )
 from integrand import SectorProcessor, TopologyDefinition
-from qmc_lattice import actual_lattice_point_count, max_lattice_point_count, shifted_lattice_points
+from qmc_lattice import (
+    actual_lattice_point_count,
+    actual_lattice_point_count_for_dimension,
+    max_lattice_point_count,
+    max_lattice_point_count_for_dimension,
+    shifted_lattice_points,
+    shifted_lattice_point_slice,
+    supports_lattice_slices,
+)
 from sectors_generator import SectorDefinition
 from utils import format_complex_uncertainty
 
@@ -202,13 +210,20 @@ class QmcBatch:
 
     sector_position: int
     sector_id: int
-    coords: np.ndarray
-    weights: np.ndarray
-    shift_indices: np.ndarray
+    coords: np.ndarray | None
+    weights: np.ndarray | None
+    shift_indices: np.ndarray | None
     shift_count: int
     coefficient_indices: tuple[int, ...]
     support_axes: tuple[int, ...]
     component_indices: tuple[int, ...] | None = None
+    lattice_backend: str = ""
+    lattice_n_points: int = 0
+    lattice_seed: int = 0
+    lattice_order: str = "linear"
+    korobov_alpha: int = 3
+    lattice_start: int = 0
+    lattice_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -332,6 +347,50 @@ def _evaluate_qmc_batch_worker(batch: QmcBatch) -> QmcReducedBatch:
     if _WORKER_PROCESSOR is None or _WORKER_SECTORS is None:
         raise RuntimeError("worker processor not initialized")
     return _evaluate_qmc_batch(_WORKER_PROCESSOR, _WORKER_SECTORS, batch)
+
+
+def _sum_by_shift(
+    values: np.ndarray,
+    shift_indices: np.ndarray,
+    shift_count: int,
+) -> np.ndarray:
+    """Sum one complex vector by QMC shift, optimized for shift-major slices."""
+    vals = np.asarray(values, dtype=np.complex128)
+    shifts = np.asarray(shift_indices, dtype=np.int64)
+    out = np.zeros(int(shift_count), dtype=np.complex128)
+    if vals.size == 0:
+        return out
+    if shifts.size == vals.size and (shifts.size <= 1 or np.all(shifts[1:] >= shifts[:-1])):
+        starts = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(shifts[1:] != shifts[:-1]).astype(np.int64) + 1,
+            )
+        )
+        out[shifts[starts]] = np.add.reduceat(vals, starts)
+        return out
+    return (
+        np.bincount(shifts, weights=vals.real, minlength=int(shift_count))
+        + 1j * np.bincount(shifts, weights=vals.imag, minlength=int(shift_count))
+    )
+
+
+def _counts_by_shift(shift_indices: np.ndarray, shift_count: int) -> np.ndarray:
+    """Count samples by QMC shift, optimized for shift-major slices."""
+    shifts = np.asarray(shift_indices, dtype=np.int64)
+    out = np.zeros(int(shift_count), dtype=np.int64)
+    if shifts.size == 0:
+        return out
+    if shifts.size <= 1 or np.all(shifts[1:] >= shifts[:-1]):
+        starts = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(shifts[1:] != shifts[:-1]).astype(np.int64) + 1,
+            )
+        )
+        out[shifts[starts]] = np.diff(np.append(starts, shifts.size))
+        return out
+    return np.bincount(shifts, minlength=int(shift_count)).astype(np.int64)
 
 
 def _evaluate_records(
@@ -511,11 +570,169 @@ def _evaluate_qmc_batch(
     hot_start = time.perf_counter()
     timing = HotPathTiming()
     sector = sectors[int(batch.sector_position)]
-    coords = np.asarray(batch.coords, dtype=float)
-    weights = np.asarray(batch.weights, dtype=float)
-    shift_indices = np.asarray(batch.shift_indices, dtype=np.int64)
     coeff_count = processor.topology.coefficient_count
     shift_count = int(batch.shift_count)
+    precomputed_component_values: np.ndarray | None = None
+    precomputed_component_layout: list[tuple[int, tuple[int, ...]]] | None = None
+    qmc_values_already_weighted = False
+    if batch.coords is None:
+        lattice_start = time.perf_counter()
+        raw_points, shift_indices, _actual_n_points = shifted_lattice_point_slice(
+            backend=str(batch.lattice_backend),
+            dimension=len(batch.support_axes),
+            n_points=int(batch.lattice_n_points),
+            shift_count=shift_count,
+            seed=int(batch.lattice_seed),
+            order=str(batch.lattice_order),
+            start=int(batch.lattice_start),
+            count=int(batch.lattice_count),
+        )
+        timing.add_integrator(time.perf_counter() - lattice_start)
+        if batch.component_indices is not None:
+            optimized = processor.explicit_qmc_optimized_component_batch(
+                sector,
+                raw_points,
+                tuple(int(axis) for axis in batch.support_axes),
+                tuple(int(index) for index in batch.component_indices),
+                int(batch.korobov_alpha),
+                timing,
+            )
+            if optimized is not None:
+                precomputed_component_values, precomputed_component_layout = optimized
+                qmc_values_already_weighted = True
+            else:
+                if len(batch.support_axes) <= 0:
+                    support_coords = raw_points
+                    weights = np.ones(raw_points.shape[0], dtype=float)
+                else:
+                    transform_start = time.perf_counter()
+                    support_coords, weights = korobov_transform(raw_points, int(batch.korobov_alpha))
+                    timing.add_integrator(time.perf_counter() - transform_start)
+                coords = np.full(
+                    (raw_points.shape[0], int(sector.integration_dim)),
+                    0.5,
+                    dtype=float,
+                )
+                if batch.support_axes:
+                    coords[:, list(batch.support_axes)] = support_coords
+        else:
+            if len(batch.support_axes) <= 0:
+                support_coords = raw_points
+                weights = np.ones(raw_points.shape[0], dtype=float)
+            else:
+                transform_start = time.perf_counter()
+                support_coords, weights = korobov_transform(raw_points, int(batch.korobov_alpha))
+                timing.add_integrator(time.perf_counter() - transform_start)
+            coords = np.full(
+                (raw_points.shape[0], int(sector.integration_dim)),
+                0.5,
+                dtype=float,
+            )
+            if batch.support_axes:
+                coords[:, list(batch.support_axes)] = support_coords
+    else:
+        coords = np.asarray(batch.coords, dtype=float)
+        weights = np.asarray(batch.weights, dtype=float)
+        shift_indices = np.asarray(batch.shift_indices, dtype=np.int64)
+    if qmc_values_already_weighted:
+        row_count = 0 if precomputed_component_values is None else int(precomputed_component_values.shape[0])
+        if row_count == 0:
+            return QmcReducedBatch(
+                sector_id=int(batch.sector_id),
+                coefficient_indices=tuple(int(index) for index in batch.coefficient_indices),
+                count=0,
+                counts_by_shift=np.zeros(shift_count, dtype=np.int64),
+                sums_by_shift=np.zeros((shift_count, coeff_count), dtype=np.complex128),
+                max_abs=np.zeros(coeff_count, dtype=float),
+                precision_counts=np.zeros(4, dtype=np.int64),
+                timing=timing,
+            )
+        assert precomputed_component_values is not None
+        assert precomputed_component_layout is not None
+        component_coefficients = [
+            int(coeff_index)
+            for coeff_index, _support in precomputed_component_layout
+        ]
+        for local_index, coeff_index in enumerate(component_coefficients):
+            if coeff_index < 0 or coeff_index >= coeff_count:
+                raise RuntimeError(
+                    f"{sector.name}: optimized QMC component {local_index} maps to "
+                    f"invalid coefficient index {coeff_index}"
+                )
+        sums_by_shift = np.zeros((shift_count, coeff_count), dtype=np.complex128)
+        max_abs = np.zeros(coeff_count, dtype=float)
+        shift_indices_array = np.asarray(shift_indices, dtype=np.int64)
+        shift_major = shift_indices_array.size <= 1 or np.all(
+            shift_indices_array[1:] >= shift_indices_array[:-1]
+        )
+        if shift_major:
+            starts = np.concatenate(
+                (
+                    np.array([0], dtype=np.int64),
+                    np.flatnonzero(shift_indices_array[1:] != shift_indices_array[:-1]).astype(np.int64) + 1,
+                )
+            )
+            shift_run_ids = shift_indices_array[starts]
+            counts_by_shift = np.zeros(shift_count, dtype=np.int64)
+            counts_by_shift[shift_run_ids] = np.diff(np.append(starts, shift_indices_array.size))
+        else:
+            starts = np.empty(0, dtype=np.int64)
+            shift_run_ids = np.empty(0, dtype=np.int64)
+            counts_by_shift = _counts_by_shift(shift_indices_array, shift_count)
+
+        if len(set(component_coefficients)) == len(component_coefficients):
+            for local_index, coeff_index in enumerate(component_coefficients):
+                values = precomputed_component_values[:, int(local_index)]
+                if shift_major:
+                    sums_by_shift[shift_run_ids, int(coeff_index)] = np.add.reduceat(values, starts)
+                else:
+                    sums_by_shift[:, int(coeff_index)] = _sum_by_shift(
+                        values,
+                        shift_indices_array,
+                        shift_count,
+                    )
+                max_abs[int(coeff_index)] = float(np.max(np.abs(values))) if values.size else 0.0
+        else:
+            selected = sorted(set(component_coefficients))
+            selected_position = {int(coeff_index): position for position, coeff_index in enumerate(selected)}
+            selected_values = np.zeros((row_count, len(selected)), dtype=np.complex128)
+            for local_index, coeff_index in enumerate(component_coefficients):
+                selected_values[:, selected_position[int(coeff_index)]] += precomputed_component_values[
+                    :,
+                    int(local_index),
+                ]
+            for local_position, coeff_index in enumerate(selected):
+                values = selected_values[:, local_position]
+                if shift_major:
+                    sums_by_shift[shift_run_ids, int(coeff_index)] = np.add.reduceat(values, starts)
+                else:
+                    sums_by_shift[:, int(coeff_index)] = _sum_by_shift(
+                        values,
+                        shift_indices_array,
+                        shift_count,
+                    )
+                max_abs[int(coeff_index)] = float(np.max(np.abs(values))) if values.size else 0.0
+        hot_elapsed = time.perf_counter() - hot_start
+        timing.add_python(hot_elapsed - timing.total_seconds)
+        return QmcReducedBatch(
+            sector_id=int(batch.sector_id),
+            coefficient_indices=tuple(int(index) for index in batch.coefficient_indices),
+            count=row_count,
+            counts_by_shift=counts_by_shift,
+            sums_by_shift=sums_by_shift,
+            max_abs=max_abs,
+            precision_counts=np.asarray(
+                [
+                    timing.ordinary_precision_samples,
+                    timing.stability_precision_samples,
+                    timing.medium_precision_samples,
+                    timing.high_precision_samples,
+                ],
+                dtype=np.int64,
+            ),
+            timing=timing,
+        )
+
     if coords.size == 0:
         return QmcReducedBatch(
             sector_id=int(batch.sector_id),
@@ -531,29 +748,45 @@ def _evaluate_qmc_batch(
     active_indices = sector_active_coefficient_indices(processor.topology, sector)
     component_indices = batch.component_indices
     if component_indices is not None:
-        component_values, component_layout = processor.explicit_qmc_component_batch(
-            sector,
-            coords,
-            timing,
-        )
-        coeffs = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
-        for component_index in component_indices:
-            if component_index < 0 or component_index >= len(component_layout):
-                raise RuntimeError(
-                    f"{sector.name}: QMC component index {component_index} is outside "
-                    f"the prepared layout of length {len(component_layout)}"
-                )
-            coeff_index, _support = component_layout[int(component_index)]
-            if coeff_index < 0 or coeff_index >= coeff_count:
-                raise RuntimeError(
-                    f"{sector.name}: QMC component {component_index} maps to invalid "
-                    f"coefficient index {coeff_index}"
-                )
-            coeffs[:, int(coeff_index)] += component_values[:, int(component_index)]
-        selected = np.asarray(
-            sorted({int(component_layout[int(index)][0]) for index in component_indices}),
-            dtype=np.int64,
-        )
+        if precomputed_component_values is not None and precomputed_component_layout is not None:
+            component_values = precomputed_component_values
+            component_layout = precomputed_component_layout
+            coeffs = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
+            for local_index, (coeff_index, _support) in enumerate(component_layout):
+                if coeff_index < 0 or coeff_index >= coeff_count:
+                    raise RuntimeError(
+                        f"{sector.name}: optimized QMC component {local_index} maps to "
+                        f"invalid coefficient index {coeff_index}"
+                    )
+                coeffs[:, int(coeff_index)] += component_values[:, int(local_index)]
+            selected = np.asarray(
+                sorted({int(coeff_index) for coeff_index, _support in component_layout}),
+                dtype=np.int64,
+            )
+        else:
+            component_values, component_layout = processor.explicit_qmc_component_batch(
+                sector,
+                coords,
+                timing,
+            )
+            coeffs = np.zeros((coords.shape[0], coeff_count), dtype=np.complex128)
+            for component_index in component_indices:
+                if component_index < 0 or component_index >= len(component_layout):
+                    raise RuntimeError(
+                        f"{sector.name}: QMC component index {component_index} is outside "
+                        f"the prepared layout of length {len(component_layout)}"
+                    )
+                coeff_index, _support = component_layout[int(component_index)]
+                if coeff_index < 0 or coeff_index >= coeff_count:
+                    raise RuntimeError(
+                        f"{sector.name}: QMC component {component_index} maps to invalid "
+                        f"coefficient index {coeff_index}"
+                    )
+                coeffs[:, int(coeff_index)] += component_values[:, int(component_index)]
+            selected = np.asarray(
+                sorted({int(component_layout[int(index)][0]) for index in component_indices}),
+                dtype=np.int64,
+            )
         sector_timing = HotPathTiming()
     elif not active_indices:
         sector_timing = HotPathTiming()
@@ -577,13 +810,10 @@ def _evaluate_qmc_batch(
             * weights[:, np.newaxis]
         )
     sums_by_shift = np.zeros((shift_count, coeff_count), dtype=np.complex128)
-    counts_by_shift = np.bincount(shift_indices, minlength=shift_count).astype(np.int64)
+    counts_by_shift = _counts_by_shift(shift_indices, shift_count)
     for coeff_index in selected:
         values = weighted[:, coeff_index]
-        sums_by_shift[:, coeff_index] = (
-            np.bincount(shift_indices, weights=values.real, minlength=shift_count)
-            + 1j * np.bincount(shift_indices, weights=values.imag, minlength=shift_count)
-        )
+        sums_by_shift[:, coeff_index] = _sum_by_shift(values, shift_indices, shift_count)
     hot_elapsed = time.perf_counter() - hot_start
     timing.add_python(hot_elapsed - timing.total_seconds)
     precision_source = timing if component_indices is not None else sector_timing
@@ -772,7 +1002,15 @@ def qmc_component_support_groups(
 
     explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
     formula = explicit_formula_for(sector) if explicit_formula_for is not None else None
-    if base_support_mode in {"component", "order"} and formula is not None and formula.qmc_component_layout:
+    use_component_layout = (
+        formula is not None
+        and formula.qmc_component_layout
+        and (
+            base_support_mode in {"component", "order"}
+            or bool(getattr(topology, "enable_qmc_optimized_evaluators", False))
+        )
+    )
+    if use_component_layout:
         if base_support_mode == "order":
             return [
                 (
@@ -967,6 +1205,41 @@ def qmc_batches_for_sector(
     support_dim = len(axes)
     if raw_points is None and support_dim <= 0:
         raw_points = np.empty((shift_count, 1, 0), dtype=float)
+    elif raw_points is None and supports_lattice_slices(str(request.qmc_lattice_backend)):
+        actual_n_points = actual_lattice_point_count_for_dimension(
+            backend=str(request.qmc_lattice_backend),
+            n_points=n_points,
+            dimension=int(support_dim),
+        )
+        step = actual_n_points * shift_count if request.batch_size <= 0 else int(request.batch_size)
+        step = max(step, 1)
+        seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
+        batches = [
+            QmcBatch(
+                sector_position=int(sector_position),
+                sector_id=int(sector_id),
+                coords=None,
+                weights=None,
+                shift_indices=None,
+                shift_count=shift_count,
+                coefficient_indices=coeffs,
+                support_axes=axes,
+                component_indices=(
+                    None
+                    if component_indices is None
+                    else tuple(int(index) for index in component_indices)
+                ),
+                lattice_backend=str(request.qmc_lattice_backend),
+                lattice_n_points=int(n_points),
+                lattice_seed=int(seed),
+                lattice_order=str(request.qmc_order),
+                korobov_alpha=int(request.qmc_korobov_alpha),
+                lattice_start=int(start),
+                lattice_count=int(min(step, shift_count * actual_n_points - start)),
+            )
+            for start in range(0, shift_count * actual_n_points, step)
+        ]
+        return batches
     elif raw_points is None:
         seed = int(request.seed) + 1_000_003 * int(sector_id) + 97_003 * int(iteration)
         raw_points = shifted_lattice_points(
@@ -1029,9 +1302,10 @@ def qmc_actual_points_per_shift(request: IntegralRequest, support_dim: int) -> i
     """Concrete QMC points per shift for one support group."""
     if int(support_dim) <= 0:
         return 1
-    return actual_lattice_point_count(
+    return actual_lattice_point_count_for_dimension(
         backend=str(request.qmc_lattice_backend),
         n_points=int(request.samples_per_iter),
+        dimension=int(support_dim),
     )
 
 
@@ -1854,6 +2128,15 @@ def autotune_request_for_target_time(
             )
             for sector in active_sectors
         )
+        qmc_max_support_dim = 0
+        for sector in active_sectors:
+            for _coeff_indices, support_axes, _component_indices in qmc_component_support_groups(
+                topology,
+                sector,
+                global_support_dims,
+                support_mode=support_mode,
+            ):
+                qmc_max_support_dim = max(qmc_max_support_dim, len(support_axes))
         if request.qmc_refine_sectors == "adaptive" and iteration_budget > 1:
             adaptive_fraction = 0.25
             effective_group_iterations = 1.0 + adaptive_fraction * float(iteration_budget - 1)
@@ -1870,13 +2153,21 @@ def autotune_request_for_target_time(
             if str(request.qmc_lattice_backend) == "qmcpy"
             else max(raw_lattice_points, 1)
         )
-        backend_max_points = max_lattice_point_count(backend=str(request.qmc_lattice_backend))
+        backend_max_points = (
+            max_lattice_point_count_for_dimension(
+                backend=str(request.qmc_lattice_backend),
+                dimension=int(qmc_max_support_dim),
+            )
+            if qmc_max_support_dim > 0
+            else None
+        )
         qmc_lattice_limit_applied = False
         if backend_max_points is not None and tuned_samples > int(backend_max_points):
             tuned_samples = int(backend_max_points)
             qmc_lattice_limit_applied = True
         tuning_extra = {
             "qmc_group_count": int(qmc_group_count),
+            "qmc_max_support_dimension": int(qmc_max_support_dim),
             "qmc_shifts": int(request.qmc_shifts),
             "qmc_refine_sectors": str(request.qmc_refine_sectors),
             "qmc_adaptive_target_time_group_fraction": float(adaptive_fraction),
@@ -2445,6 +2736,7 @@ def integrate_qmc(
     correlated_qmc = (
         bool(request.qmc_correlate_sectors)
         and request.qmc_refine_sectors == "democratic"
+        and len(active_sector_ids) > 1
     )
     active_position_by_sector_id = {
         int(sector_id): int(position)
@@ -2471,6 +2763,13 @@ def integrate_qmc(
         )
         for sector in active_sectors
     )
+    qmc_optimized_group_count = 0
+    explicit_formula_for = getattr(topology, "explicit_sector_formula_for", None)
+    if explicit_formula_for is not None:
+        for sector in active_sectors:
+            formula = explicit_formula_for(sector)
+            if formula is not None:
+                qmc_optimized_group_count += len(getattr(formula, "qmc_optimized_evaluators", []))
     aggregate_shift_stats = [
         RunningStats() for _coeff_index in range(topology.coefficient_count)
     ]
@@ -2483,9 +2782,13 @@ def integrate_qmc(
         "qmc_refine_sectors": str(request.qmc_refine_sectors),
         "qmc_lattice_backend": str(request.qmc_lattice_backend),
         "qmc_software": (
-            "pySecDecContrib bundled CBC lattice table"
-            if str(request.qmc_lattice_backend) == "cbcpt-dn1-100"
-            else "qmcpy.Lattice"
+            "QMCPy Lattice"
+            if str(request.qmc_lattice_backend) == "qmcpy"
+            else (
+                "pySecDec-compatible CBC/PT lattice tables"
+                if str(request.qmc_lattice_backend) == "pysecdec-default"
+                else "bundled CBC/PT dn1 subset"
+            )
         ),
         "qmc_randomization": "SHIFT",
         "qmc_lattice_order": str(request.qmc_order),
@@ -2495,6 +2798,10 @@ def integrate_qmc(
         "qmc_correlate_sectors_requested": bool(request.qmc_correlate_sectors),
         "qmc_correlate_sectors": correlated_qmc,
         "qmc_support_grouping": support_mode,
+        "qmc_optimized_evaluators_requested": bool(
+            getattr(request, "qmc_optimized_evaluators", False)
+        ),
+        "qmc_optimized_evaluator_groups_prepared": int(qmc_optimized_group_count),
         "qmc_global_support_dimensions": (
             [int(value) for value in global_support_dims]
             if global_support_dims is not None

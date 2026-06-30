@@ -153,17 +153,19 @@ class IntegralRequest:
     qmc_initial_shifts: int = 64
     qmc_max_samples_per_iter: int = 4096
     qmc_korobov_alpha: int = 3
-    qmc_lattice_backend: str = "cbcpt-dn1-100"
+    qmc_lattice_backend: str = "pysecdec-default"
     qmc_order: str = "linear"
     qmc_correlate_sectors: bool = True
     qmc_support_mode: str = "boundary"
     qmc_refine_sectors: str = "democratic"
+    qmc_optimized_evaluators: bool = False
     restart: bool = False
     target_integration_time: float | None = None
     target_abs_error: float | None = None
     target_rel_error: float | None = None
     topology_source: str = "builtin"
     uf_topology: dict[str, Any] | None = None
+    sector_symmetry_squashing: bool = True
 
 
 @dataclass(frozen=True)

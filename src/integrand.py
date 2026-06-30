@@ -414,6 +414,8 @@ class TopologyDefinition:
     strict_prepared_bundle: bool = False
     chain_rule_metadata_only: bool = False
     enable_qmc_component_outputs: bool = False
+    enable_qmc_optimized_evaluators: bool = False
+    qmc_korobov_alpha: int = 3
     parametric_representation: ParametricRepresentation | None = None
     streaming_evaluator_cache_dir: str | None = None
     _u_evaluator: Any = field(init=False, repr=False)
@@ -5804,6 +5806,25 @@ class TwoStageSectorFormulaDefinition:
 
 
 @dataclass
+class QmcOptimizedEvaluatorDefinition:
+    """QMC evaluator for one sector support group.
+
+    Inputs are raw shifted rank-1 lattice coordinates.  The evaluator applies
+    the Korobov periodization map, multiplies the Korobov Jacobian weight, and
+    returns the requested explicit Laurent components.  Integer lattice-index
+    generation remains outside Symbolica.
+    """
+
+    axes: tuple[int, ...]
+    component_indices: tuple[int, ...]
+    component_layout: list[tuple[int, tuple[int, ...]]]
+    input_names: list[str]
+    evaluator: Any
+    expression_bytes: int = 0
+    evaluator_bytes: int = 0
+
+
+@dataclass
 class ExplicitSectorFormulaDefinition:
     """Prepared single-evaluator sector integrand.
 
@@ -5819,12 +5840,15 @@ class ExplicitSectorFormulaDefinition:
     evaluator: Any
     qmc_component_evaluator: Any | None = None
     qmc_component_layout: list[tuple[int, tuple[int, ...]]] = field(default_factory=list)
+    qmc_optimized_evaluators: list[QmcOptimizedEvaluatorDefinition] = field(default_factory=list)
     expression_build_seconds: float = 0.0
     evaluator_build_seconds: float = 0.0
     expression_bytes: int = 0
     evaluator_bytes: int = 0
     qmc_expression_bytes: int = 0
     qmc_evaluator_bytes: int = 0
+    qmc_optimized_expression_bytes: int = 0
+    qmc_optimized_evaluator_bytes: int = 0
     source_kind: str = "explicit-sector-expression"
 
     def evaluate_complex_batch(
@@ -5881,6 +5905,35 @@ class ExplicitSectorFormulaDefinition:
             timing.add_eval(time.perf_counter() - start)
         return [complex(float(value[0]), float(value[1])) for value in values]
 
+    def qmc_optimized_group(
+        self,
+        axes: tuple[int, ...],
+        component_indices: tuple[int, ...],
+    ) -> QmcOptimizedEvaluatorDefinition | None:
+        """Return the raw-QMC evaluator matching one support/component group."""
+        key_axes = tuple(int(axis) for axis in axes)
+        key_components = tuple(int(index) for index in component_indices)
+        for group in self.qmc_optimized_evaluators:
+            if group.axes == key_axes and group.component_indices == key_components:
+                return group
+        return None
+
+    def evaluate_qmc_optimized_batch(
+        self,
+        group: QmcOptimizedEvaluatorDefinition,
+        raw_rows: np.ndarray,
+        timing: HotPathTiming | None = None,
+    ) -> np.ndarray:
+        """Evaluate already-weighted QMC components from raw lattice points."""
+        sample_rows = np.asarray(raw_rows, dtype=np.complex128)
+        start = time.perf_counter()
+        values = np.asarray(group.evaluator.evaluate_complex(sample_rows), dtype=np.complex128)
+        if values.ndim == 1:
+            values = values.reshape(sample_rows.shape[0], 1)
+        if timing is not None:
+            timing.add_eval(time.perf_counter() - start)
+        return values
+
     def evaluate_complex_prec(
         self,
         row: np.ndarray,
@@ -5930,12 +5983,29 @@ def _build_explicit_sector_formula_process_worker(index: int) -> dict[str, Any]:
             [int(coeff_index), [int(axis) for axis in axes]]
             for coeff_index, axes in formula.qmc_component_layout
         ],
+        "qmc_optimized_evaluators": [
+            {
+                "axes": [int(axis) for axis in group.axes],
+                "component_indices": [int(index) for index in group.component_indices],
+                "component_layout": [
+                    [int(coeff_index), [int(axis) for axis in axes]]
+                    for coeff_index, axes in group.component_layout
+                ],
+                "input_names": list(group.input_names),
+                "evaluator_bytes_raw": serialize_evaluator(group.evaluator),
+                "expression_bytes": int(group.expression_bytes),
+                "evaluator_bytes": int(group.evaluator_bytes),
+            }
+            for group in formula.qmc_optimized_evaluators
+        ],
         "expression_build_seconds": float(formula.expression_build_seconds),
         "evaluator_build_seconds": float(formula.evaluator_build_seconds),
         "expression_bytes": int(formula.expression_bytes),
         "evaluator_bytes": int(formula.evaluator_bytes),
         "qmc_expression_bytes": int(formula.qmc_expression_bytes),
         "qmc_evaluator_bytes": int(formula.qmc_evaluator_bytes),
+        "qmc_optimized_expression_bytes": int(formula.qmc_optimized_expression_bytes),
+        "qmc_optimized_evaluator_bytes": int(formula.qmc_optimized_evaluator_bytes),
         "source_kind": str(formula.source_kind),
     }
 
@@ -5955,12 +6025,29 @@ def _explicit_formula_from_worker_payload(payload: dict[str, Any]) -> ExplicitSe
             (int(item[0]), tuple(int(axis) for axis in item[1]))
             for item in payload.get("qmc_component_layout", [])
         ],
+        qmc_optimized_evaluators=[
+            QmcOptimizedEvaluatorDefinition(
+                axes=tuple(int(axis) for axis in item.get("axes", [])),
+                component_indices=tuple(int(index) for index in item.get("component_indices", [])),
+                component_layout=[
+                    (int(layout_item[0]), tuple(int(axis) for axis in layout_item[1]))
+                    for layout_item in item.get("component_layout", [])
+                ],
+                input_names=[str(name) for name in item.get("input_names", [])],
+                evaluator=deserialize_evaluator(bytes(item["evaluator_bytes_raw"])),
+                expression_bytes=int(item.get("expression_bytes", 0)),
+                evaluator_bytes=int(item.get("evaluator_bytes", 0)),
+            )
+            for item in payload.get("qmc_optimized_evaluators", [])
+        ],
         expression_build_seconds=float(payload["expression_build_seconds"]),
         evaluator_build_seconds=float(payload["evaluator_build_seconds"]),
         expression_bytes=int(payload["expression_bytes"]),
         evaluator_bytes=int(payload["evaluator_bytes"]),
         qmc_expression_bytes=int(payload.get("qmc_expression_bytes", 0)),
         qmc_evaluator_bytes=int(payload.get("qmc_evaluator_bytes", 0)),
+        qmc_optimized_expression_bytes=int(payload.get("qmc_optimized_expression_bytes", 0)),
+        qmc_optimized_evaluator_bytes=int(payload.get("qmc_optimized_evaluator_bytes", 0)),
         source_kind=str(payload["source_kind"]),
     )
 
@@ -6896,6 +6983,20 @@ def _two_stage_derivative_fused_components(
         _replace_sector_vars(sector, _as_expression(expr), y_symbols)
         for expr in sector.map_exprs
     ]
+    direct_residual_exprs: dict[str, Any] | None = None
+    if sector.u_residual_expr is not None and sector.f_residual_expr is not None:
+        # pySecDec's ``Sector.cast`` already stores the regular residuals
+        # U_s^reg(y)=U(X_s(y))/M_U(y) and F_s^reg(y)=F(X_s(y))/M_F(y).
+        # For geometric-infinity sectors the recovered maps can contain
+        # inverse powers, e.g. x_i=1/y_0, so reconstructing residuals through
+        # the original black-box U/F at y_0=0 creates infinities before the
+        # monomial cancellation can happen.  Explicit generation is allowed to
+        # use the decomposed residual polynomials directly, matching
+        # pySecDec's generated sector kernels.
+        direct_residual_exprs = {
+            "u": _replace_sector_vars(sector, _as_expression(sector.u_residual_expr), y_symbols),
+            "f": _replace_sector_vars(sector, _as_expression(sector.f_residual_expr), y_symbols),
+        }
     grouped_pairs: dict[
         tuple[tuple[int, ...], tuple[int, ...]],
         set[tuple[tuple[int, ...], int]],
@@ -6968,91 +7069,106 @@ def _two_stage_derivative_fused_components(
             for axis in range(sector.integration_dim)
         ]
 
-        u_source_shape = _residual_source_shape_expr(
-            sector,
-            zero_set,
-            residual_multis,
-            sector.u_monomial_powers,
-        )
-        f_source_shape = _residual_source_shape_expr(
-            sector,
-            zero_set,
-            residual_multis,
-            sector.f_monomial_powers,
-        )
-        allowed_multis = set(u_source_shape) | set(f_source_shape) | {
-            tuple(0 for _ in sector.singular_axes)
-        }
-
-        h_series_full: list[ExprSeries] = []
-        active_x_indices: list[int] = []
-        for x_index, expr in enumerate(map_exprs_y):
-            series: ExprSeries = {}
-            for multi in allowed_multis:
-                if not any(multi):
-                    continue
-                coeff = _expr_derivative_coefficient(expr, singular_symbols, tuple(multi))
-                coeff = _replace_many(coeff, endpoint_y_replacements)
-                if str(coeff) != "0":
-                    series[tuple(multi)] = coeff
-            h_series_full.append(series)
-            if series:
-                active_x_indices.append(int(x_index))
-
-        h_series = [h_series_full[index] for index in active_x_indices]
-        polynomial_series_by_kind: dict[str, ExprSeries] = {}
-        for polynomial in ("u", "f"):
-            derivative_symbols: dict[tuple[int, ...], Any] = {}
-            max_total = min(
-                CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
-                max((sum(multi) for multi in allowed_multis), default=0),
-            )
-            for compressed in _dense_total_degree_multi_indices(len(active_x_indices), max_total):
-                full = [0 for _ in topology.x_names]
-                for active_position, x_index in enumerate(active_x_indices):
-                    full[x_index] = int(compressed[active_position])
-                full_multi = tuple(full)
-                if full_multi not in derivative_candidates[polynomial]:
-                    continue
-                derivative_symbols[tuple(compressed)] = derivative_symbol(
-                    boundary,
-                    zero,
-                    polynomial,
-                    full_multi,
-                )
-            polynomial_series_by_kind[polynomial] = _compose_polynomial_from_derivatives_expr(
-                derivative_symbols,
-                h_series,
-                allowed_multis,
-            )
-
-        def residual_series(polynomial: str, monomial_powers: list[int]) -> ExprSeries:
-            polynomial_series = polynomial_series_by_kind[polynomial]
-            shifted_series: ExprSeries = {}
-            axis_position = {axis: position for position, axis in enumerate(sector.singular_axes)}
-            for residual_multi in residual_multis:
-                shifted = list(int(value) for value in residual_multi)
-                for axis, power in enumerate(monomial_powers):
-                    position = axis_position.get(axis)
-                    if position is not None and position in zero_set:
-                        shifted[position] += int(power)
-                shifted_series[tuple(residual_multi)] = polynomial_series.get(tuple(shifted), E("0"))
-            denominator = _monomial_taylor_series_expr(
+        if direct_residual_exprs is not None:
+            def residual_series(polynomial: str, _monomial_powers: list[int]) -> ExprSeries:
+                expr_y = direct_residual_exprs[polynomial]
+                series: ExprSeries = {}
+                for multi in residual_multis:
+                    coeff = _expr_derivative_coefficient(
+                        expr_y,
+                        singular_symbols,
+                        tuple(multi),
+                    )
+                    coeff = _replace_many(coeff, endpoint_y_replacements)
+                    if str(coeff) != "0":
+                        series[tuple(multi)] = coeff
+                return series
+        else:
+            u_source_shape = _residual_source_shape_expr(
                 sector,
-                monomial_powers,
                 zero_set,
-                boundary_set,
-                max_orders,
-                y_symbols,
+                residual_multis,
+                sector.u_monomial_powers,
             )
-            if set(denominator) <= {tuple(0 for _ in max_orders)}:
-                denom0 = denominator.get(tuple(0 for _ in max_orders), E("1"))
-                return {multi: value / denom0 for multi, value in shifted_series.items()}
-            return _expr_series_mul(
-                shifted_series,
-                _expr_series_pow_real(denominator, -1.0, max_orders),
-                max_orders,
+            f_source_shape = _residual_source_shape_expr(
+                sector,
+                zero_set,
+                residual_multis,
+                sector.f_monomial_powers,
             )
+            allowed_multis = set(u_source_shape) | set(f_source_shape) | {
+                tuple(0 for _ in sector.singular_axes)
+            }
+
+            h_series_full: list[ExprSeries] = []
+            active_x_indices: list[int] = []
+            for x_index, expr in enumerate(map_exprs_y):
+                series: ExprSeries = {}
+                for multi in allowed_multis:
+                    if not any(multi):
+                        continue
+                    coeff = _expr_derivative_coefficient(expr, singular_symbols, tuple(multi))
+                    coeff = _replace_many(coeff, endpoint_y_replacements)
+                    if str(coeff) != "0":
+                        series[tuple(multi)] = coeff
+                h_series_full.append(series)
+                if series:
+                    active_x_indices.append(int(x_index))
+
+            h_series = [h_series_full[index] for index in active_x_indices]
+            polynomial_series_by_kind: dict[str, ExprSeries] = {}
+            for polynomial in ("u", "f"):
+                derivative_symbols: dict[tuple[int, ...], Any] = {}
+                max_total = min(
+                    CHAIN_RULE_MAX_DERIVATIVE_DEGREE_1_TO_3_LOOPS,
+                    max((sum(multi) for multi in allowed_multis), default=0),
+                )
+                for compressed in _dense_total_degree_multi_indices(len(active_x_indices), max_total):
+                    full = [0 for _ in topology.x_names]
+                    for active_position, x_index in enumerate(active_x_indices):
+                        full[x_index] = int(compressed[active_position])
+                    full_multi = tuple(full)
+                    if full_multi not in derivative_candidates[polynomial]:
+                        continue
+                    derivative_symbols[tuple(compressed)] = derivative_symbol(
+                        boundary,
+                        zero,
+                        polynomial,
+                        full_multi,
+                    )
+                polynomial_series_by_kind[polynomial] = _compose_polynomial_from_derivatives_expr(
+                    derivative_symbols,
+                    h_series,
+                    allowed_multis,
+                )
+
+            def residual_series(polynomial: str, monomial_powers: list[int]) -> ExprSeries:
+                polynomial_series = polynomial_series_by_kind[polynomial]
+                shifted_series: ExprSeries = {}
+                axis_position = {axis: position for position, axis in enumerate(sector.singular_axes)}
+                for residual_multi in residual_multis:
+                    shifted = list(int(value) for value in residual_multi)
+                    for axis, power in enumerate(monomial_powers):
+                        position = axis_position.get(axis)
+                        if position is not None and position in zero_set:
+                            shifted[position] += int(power)
+                    shifted_series[tuple(residual_multi)] = polynomial_series.get(tuple(shifted), E("0"))
+                denominator = _monomial_taylor_series_expr(
+                    sector,
+                    monomial_powers,
+                    zero_set,
+                    boundary_set,
+                    max_orders,
+                    y_symbols,
+                )
+                if set(denominator) <= {tuple(0 for _ in max_orders)}:
+                    denom0 = denominator.get(tuple(0 for _ in max_orders), E("1"))
+                    return {multi: value / denom0 for multi, value in shifted_series.items()}
+                return _expr_series_mul(
+                    shifted_series,
+                    _expr_series_pow_real(denominator, -1.0, max_orders),
+                    max_orders,
+                )
 
         u_residual = residual_series("u", sector.u_monomial_powers)
         f_residual = residual_series("f", sector.f_monomial_powers)
@@ -7588,6 +7704,115 @@ def _explicit_qmc_order_layout(
     return active_indices, layout
 
 
+def _korobov_periodization_expr(raw_symbol: Any, alpha: int) -> tuple[Any, Any]:
+    """Return Symbolica expressions for Korobov ``phi(u)`` and ``phi'(u)``.
+
+    This mirrors :func:`integrator.korobov_transform` exactly, but as a
+    symbolic polynomial so the transform and its Jacobian can be folded into a
+    QMC-specialized evaluator.
+    """
+    a = int(alpha)
+    if a < 1:
+        raise ValueError("Korobov alpha must be positive")
+    u = _as_expression(raw_symbol)
+    norm = math.factorial(2 * a + 1) // (math.factorial(a) * math.factorial(a))
+    phi = E("0")
+    for k in range(a + 1):
+        numerator = norm * ((-1) ** k) * math.comb(a, k)
+        denominator = a + k + 1
+        phi = phi + (E(str(int(numerator))) / E(str(int(denominator)))) * (u ** int(a + k + 1))
+    omega = E(str(int(norm))) * (u ** int(a)) * ((E("1") - u) ** int(a))
+    return phi, omega
+
+
+def _korobov_periodization_numpy(points: np.ndarray, alpha: int) -> tuple[np.ndarray, np.ndarray]:
+    """NumPy copy of the Korobov transform used for rescue classification."""
+    a = int(alpha)
+    if a < 1:
+        raise ValueError("Korobov alpha must be positive")
+    y = np.asarray(points, dtype=float)
+    if y.ndim == 1:
+        y = y.reshape(-1, 1)
+    clipped = np.clip(y, 0.0, 1.0)
+    norm = float(math.factorial(2 * a + 1) / (math.factorial(a) * math.factorial(a)))
+    phi = np.zeros_like(clipped)
+    for k in range(a + 1):
+        coefficient = norm * ((-1.0) ** k) * math.comb(a, k) / float(a + k + 1)
+        phi += coefficient * np.power(clipped, a + k + 1)
+    omega = norm * np.power(clipped, a) * np.power(1.0 - clipped, a)
+    return phi, np.prod(omega, axis=1)
+
+
+def _build_qmc_optimized_evaluators(
+    topology: TopologyDefinition,
+    sector: SectorDefinition,
+    qmc_outputs: list[Any],
+    qmc_component_layout: list[tuple[int, tuple[int, ...]]],
+) -> tuple[list[QmcOptimizedEvaluatorDefinition], int, int]:
+    """Build raw-lattice QMC evaluators for every distinct support group."""
+    if not qmc_outputs or not qmc_component_layout:
+        return [], 0, 0
+    grouped: dict[tuple[int, ...], list[int]] = {}
+    for component_index, (_coeff_index, axes) in enumerate(qmc_component_layout):
+        grouped.setdefault(tuple(int(axis) for axis in axes), []).append(int(component_index))
+
+    groups: list[QmcOptimizedEvaluatorDefinition] = []
+    total_expression_bytes = 0
+    total_evaluator_bytes = 0
+    half = E("1") / E("2")
+    alpha = int(getattr(topology, "qmc_korobov_alpha", 3))
+    function_argument = S("q")
+    phi_body, omega_body = _korobov_periodization_expr(function_argument, alpha)
+    function_map = {
+        (S("fsd_qmc_phi"), (function_argument,)): phi_body,
+        (S("fsd_qmc_omega"), (function_argument,)): omega_body,
+    }
+    for axes, component_indices in sorted(grouped.items(), key=lambda item: (len(item[0]), item[0])):
+        raw_symbols = [S(f"u{index}") for index in range(len(axes))]
+        replacements: list[tuple[str, Any]] = [(f"y{axis}", half) for axis in range(int(sector.integration_dim))]
+        jacobian_weight = E("1")
+        for local_index, axis in enumerate(axes):
+            raw_name = f"u{local_index}"
+            phi = E(f"fsd_qmc_phi({raw_name})")
+            omega = E(f"fsd_qmc_omega({raw_name})")
+            replacements[int(axis)] = (f"y{int(axis)}", phi)
+            jacobian_weight = jacobian_weight * omega
+        expressions = [
+            jacobian_weight * _replace_many(qmc_outputs[int(component_index)], replacements)
+            for component_index in component_indices
+        ]
+        evaluator = build_evaluator_multiple(
+            expressions,
+            raw_symbols,
+            evaluator_compile_mode=topology.evaluator_compile_mode,
+            real_evaluator=topology.real_evaluator,
+            jit_direct_translation=topology.jit_direct_translation,
+            name_hint=f"{sector.name}_qmc_optimized_{len(axes)}d",
+            functions=function_map,
+        )
+        evaluator_bytes = serialize_evaluator(evaluator)
+        expression_bytes = int(
+            sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in expressions)
+        )
+        total_expression_bytes += expression_bytes
+        total_evaluator_bytes += len(evaluator_bytes)
+        groups.append(
+            QmcOptimizedEvaluatorDefinition(
+                axes=tuple(int(axis) for axis in axes),
+                component_indices=tuple(int(index) for index in component_indices),
+                component_layout=[
+                    qmc_component_layout[int(index)]
+                    for index in component_indices
+                ],
+                input_names=[f"u{index}" for index in range(len(axes))],
+                evaluator=evaluator,
+                expression_bytes=expression_bytes,
+                evaluator_bytes=len(evaluator_bytes),
+            )
+        )
+    return groups, total_expression_bytes, total_evaluator_bytes
+
+
 def build_explicit_sector_formula(
     topology: TopologyDefinition,
     sector: SectorDefinition,
@@ -7684,6 +7909,20 @@ def build_explicit_sector_formula(
             jit_direct_translation=topology.jit_direct_translation,
             name_hint=f"{sector.name}_explicit_qmc_components",
         )
+    qmc_optimized_groups: list[QmcOptimizedEvaluatorDefinition] = []
+    qmc_optimized_expression_bytes = 0
+    qmc_optimized_evaluator_bytes = 0
+    if qmc_outputs and bool(getattr(topology, "enable_qmc_optimized_evaluators", False)):
+        (
+            qmc_optimized_groups,
+            qmc_optimized_expression_bytes,
+            qmc_optimized_evaluator_bytes,
+        ) = _build_qmc_optimized_evaluators(
+            topology,
+            sector,
+            qmc_outputs,
+            qmc_component_layout,
+        )
     eval_seconds = time.perf_counter() - eval_start
     evaluator_bytes = serialize_evaluator(evaluator)
     if qmc_evaluator is evaluator:
@@ -7697,6 +7936,7 @@ def build_explicit_sector_formula(
         evaluator=evaluator,
         qmc_component_evaluator=qmc_evaluator,
         qmc_component_layout=qmc_component_layout,
+        qmc_optimized_evaluators=qmc_optimized_groups,
         expression_build_seconds=float(expr_seconds),
         evaluator_build_seconds=float(eval_seconds),
         expression_bytes=int(
@@ -7707,6 +7947,8 @@ def build_explicit_sector_formula(
             sum(len(_as_expression(expr).format_plain().encode("utf-8")) for expr in qmc_outputs)
         ),
         qmc_evaluator_bytes=qmc_evaluator_bytes,
+        qmc_optimized_expression_bytes=qmc_optimized_expression_bytes,
+        qmc_optimized_evaluator_bytes=qmc_optimized_evaluator_bytes,
         source_kind=source_kind,
     )
 
@@ -10091,6 +10333,171 @@ class SectorProcessor:
             )
             timing.absorb(component_timing)
         return np.asarray(values, dtype=np.complex128), list(formula.qmc_component_layout)
+
+    def explicit_qmc_optimized_component_batch(
+        self,
+        sector: SectorDefinition,
+        raw_values: np.ndarray,
+        support_axes: tuple[int, ...],
+        component_indices: tuple[int, ...],
+        korobov_alpha: int,
+        timing: HotPathTiming,
+    ) -> tuple[np.ndarray, list[tuple[int, tuple[int, ...]]]] | None:
+        """Evaluate a QMC support group from raw lattice coordinates if prepared.
+
+        The optimized evaluator owns the Korobov map and Jacobian weight.  For
+        points that trigger precision rescue, this method falls back to the
+        existing transformed-coordinate high-precision evaluator and then
+        applies the Korobov weight explicitly.  This keeps the optimized path
+        purely an f64 acceleration for ordinary points.
+        """
+        formula = self.topology.explicit_sector_formula_for(sector)
+        if formula is None or not formula.qmc_optimized_evaluators:
+            return None
+        axes = tuple(int(axis) for axis in support_axes)
+        components = tuple(int(index) for index in component_indices)
+        group = formula.qmc_optimized_group(axes, components)
+        if group is None:
+            return None
+
+        raw_rows = np.asarray(raw_values, dtype=float)
+        if raw_rows.ndim == 1:
+            raw_rows = raw_rows.reshape(-1, len(axes))
+        if raw_rows.shape[1] != len(axes):
+            raise RuntimeError(
+                f"{sector.name}: optimized QMC group expected {len(axes)} raw "
+                f"coordinate(s), got {raw_rows.shape[1]}"
+            )
+        component_count = len(group.component_layout)
+
+        def evaluate_raw_ordinary(mask: np.ndarray, values: np.ndarray) -> None:
+            row_count = int(np.count_nonzero(mask))
+            if row_count <= 0:
+                return
+            chunk_timing = HotPathTiming()
+            chunk_timing.add_precision_samples(ordinary=row_count)
+            chunk_values = formula.evaluate_qmc_optimized_batch(
+                group,
+                raw_rows[mask],
+                chunk_timing,
+            )
+            timing.absorb(chunk_timing)
+            values[mask, :] = np.asarray(chunk_values, dtype=np.complex128)
+
+        def transformed_rows_and_weights(selected_raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            if len(axes) <= 0:
+                support_coords = np.empty((selected_raw.shape[0], 0), dtype=float)
+                weights = np.ones(selected_raw.shape[0], dtype=float)
+            else:
+                support_coords, weights = _korobov_periodization_numpy(
+                    selected_raw,
+                    int(korobov_alpha),
+                )
+            rows = np.full(
+                (selected_raw.shape[0], int(sector.integration_dim)),
+                0.5,
+                dtype=float,
+            )
+            if axes:
+                rows[:, list(axes)] = support_coords
+            return rows, weights
+
+        def evaluate_transformed_prec(
+            mask: np.ndarray,
+            precision: int,
+            tier: str,
+            values: np.ndarray,
+        ) -> None:
+            row_count = int(np.count_nonzero(mask))
+            if row_count <= 0:
+                return
+            rows, weights = transformed_rows_and_weights(raw_rows[mask])
+            chunk_timing = HotPathTiming(precision_digits=int(precision))
+            if tier == "stability":
+                chunk_timing.add_precision_samples(stability=row_count)
+            elif tier == "medium_precision":
+                chunk_timing.add_precision_samples(medium=row_count)
+            elif tier == "high_precision":
+                chunk_timing.add_precision_samples(high=row_count)
+            else:
+                raise ValueError(f"unknown optimized QMC precision tier {tier!r}")
+            rescued = np.zeros((row_count, component_count), dtype=np.complex128)
+            for row_index, row in enumerate(rows):
+                all_components = np.asarray(
+                    formula.evaluate_qmc_component_prec(
+                        row,
+                        int(precision),
+                        chunk_timing,
+                    ),
+                    dtype=np.complex128,
+                )
+                rescued[row_index, :] = all_components[list(components)] * weights[row_index]
+            timing.absorb(chunk_timing)
+            values[mask, :] = rescued
+
+        values = np.zeros((raw_rows.shape[0], component_count), dtype=np.complex128)
+        if (
+            not sector.singular_axes
+            or self.stability_threshold <= 0.0
+            or raw_rows.shape[0] <= 0
+        ):
+            all_mask = np.ones(raw_rows.shape[0], dtype=bool)
+            evaluate_raw_ordinary(all_mask, values)
+            return values, list(group.component_layout)
+
+        support_position = {axis: position for position, axis in enumerate(axes)}
+        singular_positions = [
+            support_position[int(axis)]
+            for axis in sector.singular_axes
+            if int(axis) in support_position
+        ]
+        if not singular_positions:
+            all_mask = np.ones(raw_rows.shape[0], dtype=bool)
+            evaluate_raw_ordinary(all_mask, values)
+            return values, list(group.component_layout)
+
+        singular_coords, _weights = _korobov_periodization_numpy(
+            raw_rows[:, singular_positions],
+            int(korobov_alpha),
+        )
+        min_endpoint_distance = np.min(singular_coords, axis=1)
+        high_mask = min_endpoint_distance <= self.high_precision_stability_threshold
+        medium_mask = (
+            (min_endpoint_distance <= self.medium_precision_stability_threshold)
+            & ~high_mask
+        )
+        stable_mask = (
+            (min_endpoint_distance <= self.stability_threshold)
+            & ~medium_mask
+            & ~high_mask
+        )
+        ordinary_mask = ~(high_mask | medium_mask | stable_mask)
+
+        evaluate_raw_ordinary(ordinary_mask, values)
+        for mask, precision, tier in (
+            (stable_mask, self.stability_precision, "stability"),
+            (medium_mask, self.medium_precision_stability_precision, "medium_precision"),
+            (high_mask, self.high_precision_stability_precision, "high_precision"),
+        ):
+            if not np.any(mask):
+                continue
+            evaluate_transformed_prec(mask, int(precision), tier, values)
+
+        finite_mask = np.all(np.isfinite(values), axis=1)
+        bad_count = int(np.count_nonzero(~finite_mask))
+        if bad_count:
+            evaluate_transformed_prec(
+                ~finite_mask,
+                int(self.high_precision_stability_precision),
+                "high_precision",
+                values,
+            )
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError(
+                f"{sector.name}: non-finite optimized QMC component output after "
+                f"{self.high_precision_stability_precision}-digit rescue"
+            )
+        return np.asarray(values, dtype=np.complex128), list(group.component_layout)
 
     def _convolve_regular_prefactor_array(
         self,

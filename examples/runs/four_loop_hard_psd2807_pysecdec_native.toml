@@ -1,0 +1,18 @@
+extends = "four_loop_hard_from_U_and_F.yaml"
+
+# Native pySecDec comparison for exactly the same raw secondary sector as
+# four_loop_hard_psd2807_fsd_qmc.toml.  FSD only prepares the direct-U/F input,
+# patches pySecDec package generation to keep raw sector 2807, then steers
+# pySecDec's own QMC integrator.
+sectors = [2807]
+dot-engine = "pysecdec"
+sector-method = "geometric_infinity_no_primary"
+ibp-power-goal = -1
+
+pysecdec-workdir = "../../output/pysecdec_four_loop_hard_psd2807"
+pysecdec-maxeval = 1000000
+keep-pysecdec-workdir = true
+workers = 10
+max-eps-order = 0
+
+result-path = "../outputs/four_loop_hard_psd2807_pysecdec_native.json"

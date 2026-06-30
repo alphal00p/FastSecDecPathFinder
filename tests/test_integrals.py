@@ -113,10 +113,14 @@ from kinematics import KinematicsDefinition
 from numerator_reducer import parse_dot_product_numerator, reduce_dot_product_numerator
 from prepared_bundle import load_prepared_bundle, save_prepared_bundle
 from qmc_lattice import (
+    actual_lattice_point_count_for_dimension,
     cbcpt_dn1_shifted_lattice_points,
     is_power_of_two,
     max_lattice_point_count,
+    pysecdec_default_shifted_lattice_points,
+    pysecdec_default_vector_info,
     qmcpy_shifted_lattice_points,
+    shifted_lattice_point_slice,
 )
 from pysecdec_bridge import (
     _make_loop_integral,
@@ -714,6 +718,50 @@ def test_explicit_qmc_components_reconstruct_triangle_coefficients() -> None:
         assert np.max(np.abs(reconstructed - coeffs)) < 1.0e-12
 
 
+def test_explicit_qmc_optimized_evaluator_matches_weighted_components() -> None:
+    """Raw-QMC optimized evaluators fold in Korobov coordinates and weights."""
+    request = make_request(
+        integral="triangle",
+        mode="massless",
+        s=-1.0,
+        m=0.0,
+        subtraction_backend="projector-formula",
+        sector_evaluator_backend="explicit",
+    )
+    topology = build_topology(request)
+    sectors = generate_sectors(request)
+    topology.enable_qmc_component_outputs = True
+    topology.enable_qmc_optimized_evaluators = True
+    topology.qmc_korobov_alpha = 3
+    topology.prepare_endpoint_projector_formulas(sectors)
+    topology.prepare_explicit_sector_formulas(sectors)
+    processor = SectorProcessor(topology, subtraction_backend="projector-formula")
+
+    for sector in sectors:
+        formula = topology.explicit_sector_formula_for(sector)
+        assert formula is not None
+        assert formula.qmc_optimized_evaluators
+        support_axes = tuple(range(int(sector.integration_dim)))
+        component_indices = tuple(range(len(formula.qmc_component_layout)))
+        raw = np.array([[0.23, 0.41]], dtype=float)
+        transformed, weight = integrator_module.korobov_transform(raw, 3)
+        component_values, component_layout = processor.explicit_qmc_component_batch(
+            sector,
+            transformed,
+            HotPathTiming(),
+        )
+        optimized_values, optimized_layout = processor.explicit_qmc_optimized_component_batch(
+            sector,
+            raw,
+            support_axes,
+            component_indices,
+            3,
+            HotPathTiming(),
+        )
+        assert optimized_layout == component_layout
+        assert np.max(np.abs(optimized_values - component_values * weight[:, None])) < 1.0e-11
+
+
 def test_explicit_sector_backend_matches_projector_box_with_numerator() -> None:
     """Explicit singular sectors include numerator epsilon-polynomial Taylor data."""
     request = make_request(
@@ -1052,8 +1100,8 @@ def test_explicit_backend_cli_shortcut() -> None:
     assert request.sector_evaluator_backend == "explicit"
 
 
-def test_qmc_cli_default_uses_cbcpt_lattice() -> None:
-    """The QMC auto-default should use the pySecDec-like local CBC/PT table."""
+def test_qmc_cli_default_uses_pysecdec_lattice() -> None:
+    """The QMC auto-default should use the pySecDec-compatible CBC/PT table."""
     request = build_request(
         parse_args(
             [
@@ -1070,9 +1118,10 @@ def test_qmc_cli_default_uses_cbcpt_lattice() -> None:
         )
     )
 
-    assert request.qmc_lattice_backend == "cbcpt-dn1-100"
+    assert request.qmc_lattice_backend == "pysecdec-default"
     assert request.qmc_refine_sectors == "democratic"
     assert request.qmc_max_samples_per_iter == 4096
+    assert request.qmc_optimized_evaluators is True
     assert request.restart is False
     validate_request(request)
 
@@ -1095,6 +1144,40 @@ def test_qmc_cli_default_uses_cbcpt_lattice() -> None:
     assert democratic.qmc_refine_sectors == "democratic"
     assert democratic.restart is True
     validate_request(democratic)
+
+    optimized = build_request(
+        parse_args(
+            [
+                "--sampling-mode",
+                "qmc",
+                "--qmc-optimized-evaluators",
+                "--s",
+                "1.0",
+                "--m",
+                "1.0",
+                "--no-progress",
+            ]
+        )
+    )
+    assert optimized.qmc_optimized_evaluators is True
+    validate_request(optimized)
+
+    unoptimized = build_request(
+        parse_args(
+            [
+                "--sampling-mode",
+                "qmc",
+                "--no-qmc-optimized-evaluators",
+                "--s",
+                "1.0",
+                "--m",
+                "1.0",
+                "--no-progress",
+            ]
+        )
+    )
+    assert unoptimized.qmc_optimized_evaluators is False
+    validate_request(unoptimized)
 
 
 def test_projector_generation_cli_shortcut() -> None:
@@ -1227,6 +1310,7 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
         "dot_triple_box_offshell.yaml",
         "dot_triple_box_offshell_rank2_numerator.yaml",
         "double_box_from_U_and_F.yaml",
+        "four_loop_hard_from_U_and_F.yaml",
     }
     for run_file in run_files:
         request = build_request(parse_args(["--run", str(run_file), "--no-progress"]))
@@ -1245,6 +1329,38 @@ def test_all_example_run_presets_parse_and_resolve_paths() -> None:
                 target_path = Path(target)
                 if target_path.suffix == ".json":
                     assert target_path.parent == (PROJECT_ROOT / "examples/outputs").resolve()
+
+
+def test_four_loop_hard_toml_cards_parse_and_extend_base_run() -> None:
+    """The PSD2807 TOML cards inherit the long U/F definition from YAML."""
+    fsd_card = PROJECT_ROOT / "examples/runs/four_loop_hard_psd2807_fsd_qmc.toml"
+    pysecdec_card = PROJECT_ROOT / "examples/runs/four_loop_hard_psd2807_pysecdec_native.toml"
+
+    fsd_request = build_request(parse_args(["--run", str(fsd_card), "--no-progress"]))
+    assert fsd_request.run_file == str(fsd_card.resolve())
+    assert fsd_request.integral == "uf"
+    assert fsd_request.topology_source == "uf"
+    assert fsd_request.uf_topology is not None
+    assert fsd_request.sectors == (2807,)
+    assert fsd_request.dot_engine == "fsd"
+    assert fsd_request.sampling_mode == "qmc"
+    assert fsd_request.qmc_optimized_evaluators is True
+    assert fsd_request.qmc_lattice_backend == "pysecdec-default"
+    assert fsd_request.evaluator_compile_mode == "jit"
+    assert fsd_request.real_evaluator is True
+    assert fsd_request.output is not None
+    assert Path(fsd_request.output).parent == (PROJECT_ROOT / "output").resolve()
+    assert Path(fsd_request.result_path).parent == (PROJECT_ROOT / "examples/outputs").resolve()
+
+    pysecdec_request = build_request(parse_args(["--run", str(pysecdec_card), "--no-progress"]))
+    assert pysecdec_request.integral == "uf"
+    assert pysecdec_request.sectors == (2807,)
+    assert pysecdec_request.dot_engine == "pysecdec"
+    assert pysecdec_request.pysecdec_workdir is not None
+    assert Path(pysecdec_request.pysecdec_workdir).parent == (PROJECT_ROOT / "output").resolve()
+    assert pysecdec_request.keep_pysecdec_workdir is True
+    assert pysecdec_request.pysecdec_maxeval == 1_000_000
+    assert pysecdec_request.ibp_power_goal == -1
 
 
 def test_ibp_lowering_requires_projector_formula_backend() -> None:
@@ -3683,6 +3799,55 @@ def test_cbcpt_shifted_rank1_lattice_uses_prime_rule_size() -> None:
     assert np.all(points < 1.0)
 
 
+def test_pysecdec_default_lattice_supports_high_dimension() -> None:
+    """The pySecDec-compatible table should cover PSD-style 8/9D sectors."""
+    vector_size, vector = pysecdec_default_vector_info(dimension=9, n_points=4096)
+    points = pysecdec_default_shifted_lattice_points(
+        dimension=9,
+        n_points=4096,
+        shift_count=3,
+        seed=11,
+    )
+
+    assert vector_size >= 4096
+    assert len(vector) == 9
+    assert points.shape == (3, vector_size, 9)
+    assert np.all(points >= 0.0)
+    assert np.all(points < 1.0)
+    assert actual_lattice_point_count_for_dimension(
+        backend="pysecdec-default",
+        n_points=4096,
+        dimension=9,
+    ) == vector_size
+    with pytest.raises(ValueError, match="dimensions up to 100"):
+        pysecdec_default_vector_info(dimension=101, n_points=4096)
+
+
+def test_pysecdec_default_lattice_slice_matches_full_points() -> None:
+    """Worker-side streamed lattice chunks must reproduce full-array points."""
+    full = pysecdec_default_shifted_lattice_points(
+        dimension=5,
+        n_points=4096,
+        shift_count=3,
+        seed=17,
+    )
+    flat = full.reshape(full.shape[0] * full.shape[1], full.shape[2])
+    points, shifts, vector_size = shifted_lattice_point_slice(
+        backend="pysecdec-default",
+        dimension=5,
+        n_points=4096,
+        shift_count=3,
+        seed=17,
+        order="linear",
+        start=123,
+        count=1000,
+    )
+
+    assert vector_size == full.shape[1]
+    assert np.allclose(points, flat[123:1123])
+    assert np.array_equal(shifts, np.arange(123, 1123, dtype=np.int64) // vector_size)
+
+
 def test_qmc_support_groups_skip_zero_poles_and_promote_global_support() -> None:
     """QMC support grouping should mirror pySecDec coefficient containers."""
     topology = SimpleNamespace(coefficient_count=3, laurent_orders=[-2, -1, 0])
@@ -3892,7 +4057,7 @@ def test_qmc_sampling_hits_every_sector_with_shift_estimates() -> None:
 
     assert result.samples == 4 * 32 * len(sectors)
     assert result.diagnostics["sampling_mode"] == "qmc"
-    assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
+    assert result.diagnostics["qmc_software"] == "QMCPy Lattice"
     assert result.diagnostics["qmc_lattice_backend"] == "qmcpy"
     assert result.diagnostics["qmc_korobov_alpha"] == 3
     assert result.havana_seconds > 0.0
@@ -4223,7 +4388,7 @@ def test_qmc_qmcpy_backend_records_lattice_metadata() -> None:
 
     result = integrate(request, topology, sectors, None)
 
-    assert result.diagnostics["qmc_software"] == "qmcpy.Lattice"
+    assert result.diagnostics["qmc_software"] == "QMCPy Lattice"
     assert result.diagnostics["qmc_lattice_backend"] == "qmcpy"
     assert result.diagnostics["qmc_lattice_order"] == "linear"
     assert result.diagnostics["qmc_lattice_points_per_shift"] == 1024
@@ -4260,7 +4425,7 @@ def test_qmc_cbcpt_backend_records_lattice_metadata() -> None:
 
     result = integrate(request, topology, sectors, None)
 
-    assert result.diagnostics["qmc_software"] == "pySecDecContrib bundled CBC lattice table"
+    assert result.diagnostics["qmc_software"] == "bundled CBC/PT dn1 subset"
     assert result.diagnostics["qmc_lattice_backend"] == "cbcpt-dn1-100"
     assert result.diagnostics["qmc_lattice_order"] == "linear"
     assert result.diagnostics["qmc_lattice_points_per_shift"] == 32

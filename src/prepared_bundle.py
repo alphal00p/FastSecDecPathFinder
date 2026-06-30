@@ -30,6 +30,7 @@ from integrand import (
     EndpointProjectorFormulaDefinition,
     ExplicitSectorFormulaDefinition,
     IBPEndpointProjectorTerm,
+    QmcOptimizedEvaluatorDefinition,
     RegularTaylorFormulaDefinition,
     SubtractionFormulaDefinition,
     TopologyDefinition,
@@ -524,6 +525,12 @@ def _sector_json(writer: _BundleWriter, sector: SectorDefinition, sector_id: int
         "regular_jacobian_expr": _expr_text(sector.regular_jacobian_expr),
         "numerator_expr": _expr_text(sector.numerator_expr),
         "numerator_eps_exprs": [_expr_text(expr) for expr in sector.numerator_eps_exprs or []],
+        "u_residual_expr": (
+            None if sector.u_residual_expr is None else _expr_text(sector.u_residual_expr)
+        ),
+        "f_residual_expr": (
+            None if sector.f_residual_expr is None else _expr_text(sector.f_residual_expr)
+        ),
         "f_monomial_powers": sector.f_monomial_powers,
         "jacobian_monomial_powers": sector.jacobian_monomial_powers,
         "singular_axes": sector.singular_axes,
@@ -617,6 +624,16 @@ def _load_sector(data: dict[str, Any], store: PreparedEvaluatorStore) -> SectorD
             _expr_from_text(expr)
             for expr in data.get("numerator_eps_exprs", [data.get("numerator_expr", "1")])
         ],
+        u_residual_expr=(
+            None
+            if data.get("u_residual_expr") is None
+            else _expr_from_text(data["u_residual_expr"])
+        ),
+        f_residual_expr=(
+            None
+            if data.get("f_residual_expr") is None
+            else _expr_from_text(data["f_residual_expr"])
+        ),
         f_monomial_powers=[int(value) for value in data["f_monomial_powers"]],
         jacobian_monomial_powers=[int(value) for value in data["jacobian_monomial_powers"]],
         singular_axes=[int(value) for value in data["singular_axes"]],
@@ -954,6 +971,26 @@ def _explicit_formula_json(
             "explicit_sector_qmc_components",
             formula.sector_name,
         )
+    qmc_optimized_refs = []
+    for group_index, group in enumerate(formula.qmc_optimized_evaluators):
+        qmc_optimized_refs.append(
+            {
+                "axes": [int(axis) for axis in group.axes],
+                "component_indices": [int(index) for index in group.component_indices],
+                "component_layout": [
+                    [int(coeff_index), [int(axis) for axis in axes]]
+                    for coeff_index, axes in group.component_layout
+                ],
+                "input_names": list(group.input_names),
+                "evaluator": writer.save_evaluator(
+                    group.evaluator,
+                    "explicit_sector_qmc_optimized",
+                    f"{formula.sector_name}_{group_index}",
+                ),
+                "expression_bytes": int(group.expression_bytes),
+                "evaluator_bytes": int(group.evaluator_bytes),
+            }
+        )
     return {
         "sector_name": formula.sector_name,
         "input_names": formula.input_names,
@@ -968,12 +1005,15 @@ def _explicit_formula_json(
             [int(coeff_index), [int(axis) for axis in axes]]
             for coeff_index, axes in formula.qmc_component_layout
         ],
+        "qmc_optimized_evaluators": qmc_optimized_refs,
         "expression_build_seconds": formula.expression_build_seconds,
         "evaluator_build_seconds": formula.evaluator_build_seconds,
         "expression_bytes": formula.expression_bytes,
         "evaluator_bytes": formula.evaluator_bytes,
         "qmc_expression_bytes": formula.qmc_expression_bytes,
         "qmc_evaluator_bytes": formula.qmc_evaluator_bytes,
+        "qmc_optimized_expression_bytes": formula.qmc_optimized_expression_bytes,
+        "qmc_optimized_evaluator_bytes": formula.qmc_optimized_evaluator_bytes,
         "source_kind": formula.source_kind,
     }
 
@@ -997,12 +1037,29 @@ def _load_explicit_formula(
             (int(item[0]), tuple(int(axis) for axis in item[1]))
             for item in data.get("qmc_component_layout", [])
         ],
+        qmc_optimized_evaluators=[
+            QmcOptimizedEvaluatorDefinition(
+                axes=tuple(int(axis) for axis in item.get("axes", [])),
+                component_indices=tuple(int(index) for index in item.get("component_indices", [])),
+                component_layout=[
+                    (int(layout_item[0]), tuple(int(axis) for axis in layout_item[1]))
+                    for layout_item in item.get("component_layout", [])
+                ],
+                input_names=[str(name) for name in item.get("input_names", [])],
+                evaluator=_ref(store, item["evaluator"]),
+                expression_bytes=int(item.get("expression_bytes", 0)),
+                evaluator_bytes=int(item.get("evaluator_bytes", 0)),
+            )
+            for item in data.get("qmc_optimized_evaluators", [])
+        ],
         expression_build_seconds=float(data.get("expression_build_seconds", 0.0)),
         evaluator_build_seconds=float(data.get("evaluator_build_seconds", 0.0)),
         expression_bytes=int(data.get("expression_bytes", 0)),
         evaluator_bytes=int(data.get("evaluator_bytes", 0)),
         qmc_expression_bytes=int(data.get("qmc_expression_bytes", 0)),
         qmc_evaluator_bytes=int(data.get("qmc_evaluator_bytes", 0)),
+        qmc_optimized_expression_bytes=int(data.get("qmc_optimized_expression_bytes", 0)),
+        qmc_optimized_evaluator_bytes=int(data.get("qmc_optimized_evaluator_bytes", 0)),
         source_kind=str(data.get("source_kind", "explicit-sector-expression")),
     )
 
