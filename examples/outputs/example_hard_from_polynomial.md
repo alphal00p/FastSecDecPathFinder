@@ -19,6 +19,20 @@
 - refined sectors for per-sector `1e-3` target: `138, 163, 189, 656, 772, 919, 1461, 1722, 2208`
 - refinement raw samples per selected sector: `1,060,603,168`
 
+## Reproduction Commands
+
+### single-sector PSD2807 example
+
+```bash
+.venv/bin/python FSD.py --run examples/runs/four_loop_hard_psd2807_fsd_qmc.toml
+```
+
+### full all-sector hard-polynomial example
+
+```bash
+.venv/bin/python FSD.py --run examples/runs/four_loop_hard_all_sectors_fsd_qmc.toml
+```
+
 ## Generation
 
 - total recorded generation time: `53.308 s`

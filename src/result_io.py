@@ -148,6 +148,15 @@ def _generation_details(output: JsonDict) -> tuple[list[dict[str, Any]], float]:
     return [row for row in details if isinstance(row, dict)], float(total or 0.0)
 
 
+def _markdown_repo_relative(path: str | Path) -> str:
+    """Render a path relative to the current repository when possible."""
+    value = Path(path).expanduser()
+    try:
+        return value.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except Exception:
+        return value.as_posix()
+
+
 def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
     """Write a compact markdown report for an FSD result payload.
 
@@ -272,6 +281,23 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
                 f"`{int(diagnostics.get('refinement_samples_per_selected_sector') or 0):,}`"
             )
     lines.append("")
+
+    lines.append("## Reproduction Commands")
+    lines.append("")
+    single_sector_card = Path("examples/runs/four_loop_hard_psd2807_fsd_qmc.toml")
+    all_sector_card = Path("examples/runs/four_loop_hard_all_sectors_fsd_qmc.toml")
+    run_cards = [
+        ("single-sector PSD2807 example", single_sector_card),
+        ("full all-sector hard-polynomial example", all_sector_card),
+    ]
+    for label, card in run_cards:
+        card_text = _markdown_repo_relative(card)
+        lines.append(f"### {label}")
+        lines.append("")
+        lines.append("```bash")
+        lines.append(f".venv/bin/python FSD.py --run {card_text}")
+        lines.append("```")
+        lines.append("")
 
     lines.append("## Generation")
     lines.append("")
