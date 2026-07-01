@@ -177,6 +177,7 @@ def make_request(**overrides: Any) -> IntegralRequest:
         "show_results": None,
         "sort_sector_results": "index",
         "result_path": str(Path.cwd() / "result.json"),
+        "report_path": None,
         "log_level": "WARNING",
         "log_file": None,
         "mode": "massive",
@@ -1335,6 +1336,7 @@ def test_four_loop_hard_toml_cards_parse_and_extend_base_run() -> None:
     """The PSD2807 TOML cards inherit the long U/F definition from YAML."""
     fsd_card = PROJECT_ROOT / "examples/runs/four_loop_hard_psd2807_fsd_qmc.toml"
     pysecdec_card = PROJECT_ROOT / "examples/runs/four_loop_hard_psd2807_pysecdec_native.toml"
+    all_sector_card = PROJECT_ROOT / "examples/runs/four_loop_hard_all_sectors_fsd_qmc.toml"
 
     fsd_request = build_request(parse_args(["--run", str(fsd_card), "--no-progress"]))
     assert fsd_request.run_file == str(fsd_card.resolve())
@@ -1361,6 +1363,18 @@ def test_four_loop_hard_toml_cards_parse_and_extend_base_run() -> None:
     assert pysecdec_request.keep_pysecdec_workdir is True
     assert pysecdec_request.pysecdec_maxeval == 1_000_000
     assert pysecdec_request.ibp_power_goal == -1
+
+    all_sector_request = build_request(parse_args(["--run", str(all_sector_card), "--no-progress"]))
+    assert all_sector_request.integral == "uf"
+    assert all_sector_request.sectors is None
+    assert all_sector_request.sampling_mode == "qmc"
+    assert all_sector_request.qmc_optimized_evaluators is True
+    assert all_sector_request.qmc_correlate_sectors is False
+    assert all_sector_request.samples_per_iter == 2_000_000
+    assert all_sector_request.qmc_shifts == 32
+    assert all_sector_request.target_rel_error == 1.0e-3
+    assert all_sector_request.report_path is not None
+    assert Path(all_sector_request.report_path).parent == (PROJECT_ROOT / "examples/outputs").resolve()
 
 
 def test_ibp_lowering_requires_projector_formula_backend() -> None:

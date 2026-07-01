@@ -78,6 +78,7 @@ class IntegralRequest:
     show_results: str | None
     sort_sector_results: str
     result_path: str
+    report_path: str | None
     log_level: str
     log_file: str | None
     mode: str

@@ -72,6 +72,7 @@ from result_io import (
     request_metadata,
     result_output_path,
     target_from_result_file,
+    write_markdown_report,
     write_result_json,
 )
 from runtime_benchmark import run_sector_runtime_benchmark
@@ -577,6 +578,7 @@ def _load_run_defaults(run_file: str | None) -> dict[str, object]:
         "normaliz_executable",
         "pysecdec_workdir",
         "result_path",
+        "report_path",
         "log_file",
         "show_results",
         "output",
@@ -1470,6 +1472,15 @@ def build_parser(defaults: dict[str, object] | None = None) -> argparse.Argument
         ),
     )
     parser.add_argument(
+        "--report-path",
+        default=None,
+        help=(
+            "Optional markdown report path written after integration, summarizing "
+            "generation timing, aggregate coefficients, per-sector errors, and "
+            "per-sector runtime statistics."
+        ),
+    )
+    parser.add_argument(
         "--sort-sector-results",
         choices=["index", "abs-central", "abs-error"],
         default="index",
@@ -1650,6 +1661,7 @@ def build_request(args: argparse.Namespace) -> IntegralRequest:
         show_results=args.show_results,
         sort_sector_results=args.sort_sector_results,
         result_path=result_path,
+        report_path=str(Path(args.report_path).expanduser()) if args.report_path is not None else None,
         log_level=args.log_level,
         log_file=args.log_file,
         mode=mode,
@@ -3058,6 +3070,8 @@ def _main_impl() -> int:
             intermediate=True,
         )
         write_result_json(output, result_output_path(request))
+        if request.report_path is not None:
+            write_markdown_report(output, request.report_path)
 
     try:
         if request.integral == "dot" and request.command != "integrate":
@@ -3134,6 +3148,8 @@ def _main_impl() -> int:
     )
 
     write_result_json(output, result_output_path(request))
+    if request.report_path is not None:
+        write_markdown_report(output, request.report_path)
 
     if request.json:
         print(output_json(output))

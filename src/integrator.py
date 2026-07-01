@@ -589,6 +589,12 @@ def _evaluate_qmc_batch(
         )
         timing.add_integrator(time.perf_counter() - lattice_start)
         if batch.component_indices is not None:
+            precision_counts_before_optimized = (
+                timing.ordinary_precision_samples,
+                timing.stability_precision_samples,
+                timing.medium_precision_samples,
+                timing.high_precision_samples,
+            )
             optimized = processor.explicit_qmc_optimized_component_batch(
                 sector,
                 raw_points,
@@ -598,9 +604,29 @@ def _evaluate_qmc_batch(
                 timing,
             )
             if optimized is not None:
-                precomputed_component_values, precomputed_component_layout = optimized
-                qmc_values_already_weighted = True
-            else:
+                optimized_values, optimized_layout = optimized
+                # The QMC-optimized evaluator fuses the Korobov map, sector
+                # map, and Laurent component algebra.  A few compactified
+                # infinity sectors are analytically regular but numerically
+                # fragile in this fully fused f64 expression: intermediate
+                # overflow/underflow can create NaN/Inf even though the
+                # ordinary coordinate path evaluates the same batch safely.
+                # Treat non-finite optimized output as a batch-local fast-path
+                # failure and recompute through the ordinary path below rather
+                # than letting one bad row poison the QMC shift average.
+                if np.all(np.isfinite(optimized_values)):
+                    precomputed_component_values = optimized_values
+                    precomputed_component_layout = optimized_layout
+                    qmc_values_already_weighted = True
+                else:
+                    (
+                        timing.ordinary_precision_samples,
+                        timing.stability_precision_samples,
+                        timing.medium_precision_samples,
+                        timing.high_precision_samples,
+                    ) = precision_counts_before_optimized
+                    optimized = None
+            if optimized is None:
                 if len(batch.support_axes) <= 0:
                     support_coords = raw_points
                     weights = np.ones(raw_points.shape[0], dtype=float)

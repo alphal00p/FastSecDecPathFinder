@@ -1,0 +1,33 @@
+extends = "four_loop_hard_from_U_and_F.yaml"
+
+# Full hard-polynomial run: all pySecDec geometric-infinity raw sectors are
+# generated and integrated by FSD using QMC-specialized explicit evaluators.
+# The selected statistics target roughly a few seconds per sector on the local
+# Apple M3 Pro development machine used for the PSD2807 timing study.
+dot-engine = "fsd"
+sampling-mode = "qmc"
+qmc-optimized-evaluators = true
+qmc-lattice-backend = "pysecdec-default"
+qmc-shifts = 32
+qmc-max-samples-per-iter = 0
+qmc-refine-sectors = "democratic"
+qmc-correlate-sectors = false
+samples-per-iter = 2000000
+batch-size = 32768
+workers = 10
+max-iter = 1
+min-iter = 1
+
+evaluator-compile-mode = "jit"
+real-evaluator = true
+max-eps-order = 0
+target-rel-error = 1.0e-3
+stability-threshold = 0.0
+medium-precision-stability-threshold = 0.0
+high-precision-stability-threshold = 0.0
+max-weight-precision-xi = 0.0
+
+output = "../../output/four_loop_hard_all_sectors_fsd_qmc"
+result-path = "../outputs/example_hard_from_polynomial_all_raw_results.json"
+report-path = "../outputs/example_hard_from_polynomial.md"
+restart = true

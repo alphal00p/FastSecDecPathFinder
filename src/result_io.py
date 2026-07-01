@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import statistics
 import sys
 from typing import Any
 
@@ -28,6 +30,8 @@ from formatting import (
 
 def complex_from_json(value: Any) -> complex:
     """Decode a complex number emitted by ``formatting.output_json``."""
+    if isinstance(value, complex):
+        return value
     if isinstance(value, dict) and "re" in value and "im" in value:
         return complex(float(value["re"]), float(value["im"]))
     if isinstance(value, (int, float)):
@@ -71,6 +75,273 @@ def write_result_json(output: JsonDict, path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     tmp = destination.with_name(destination.name + ".tmp")
     tmp.write_text(output_json(output) + "\n", encoding="utf-8")
+    os.replace(tmp, destination)
+    return destination
+
+
+def _markdown_seconds(seconds: Any) -> str:
+    """Format seconds compactly for markdown reports."""
+    try:
+        value = float(seconds)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(value):
+        return "n/a"
+    if value < 1.0e-3:
+        return f"{1.0e6 * value:.3g} us"
+    if value < 1.0:
+        return f"{1.0e3 * value:.3g} ms"
+    return f"{value:.3f} s"
+
+
+def _markdown_complex(value: Any) -> str:
+    """Format one real-dominant complex value for markdown."""
+    try:
+        z = complex_from_json(value)
+    except Exception:
+        return "n/a"
+    if abs(z.imag) <= 1.0e-15 * max(abs(z.real), 1.0):
+        return f"{z.real:.12g}"
+    return f"{z.real:.12g}{z.imag:+.12g}i"
+
+
+def _markdown_relerr(coeff: Any, error: Any) -> float | None:
+    """Return a dimensionless relative error, or ``None`` when undefined."""
+    try:
+        c = complex_from_json(coeff)
+        e = complex_from_json(error)
+    except Exception:
+        return None
+    denom = abs(c)
+    if denom <= 0.0 or not math.isfinite(denom):
+        return None
+    rel = abs(e) / denom
+    return rel if math.isfinite(rel) else None
+
+
+def _markdown_float(value: Any, digits: int = 4) -> str:
+    """Format a finite float or return ``n/a``."""
+    try:
+        x = float(value)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(x):
+        return "n/a"
+    return f"{x:.{digits}g}"
+
+
+def _generation_details(output: JsonDict) -> tuple[list[dict[str, Any]], float]:
+    """Return generation detail rows and total seconds from a result payload."""
+    generation = output.get("summary", {}).get("generation_timings", {})
+    if not isinstance(generation, dict):
+        return [], 0.0
+    details = generation.get("details", generation.get("records", []))
+    if not isinstance(details, list):
+        details = []
+    total = generation.get("total", None)
+    if total is None:
+        total = sum(
+            float(row.get("seconds", 0.0) or 0.0)
+            for row in details
+            if isinstance(row, dict)
+        )
+    return [row for row in details if isinstance(row, dict)], float(total or 0.0)
+
+
+def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
+    """Write a compact markdown report for an FSD result payload.
+
+    The report intentionally derives all numbers from the persisted result
+    object.  For QMC runs with independent sector errors the aggregate errors
+    are the quadrature-propagated sector errors stored by the integrator.
+    """
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    labels = [str(label) for label in output.get("laurent_labels", [])]
+    sector_rows = [
+        row for row in output.get("sector_results", [])
+        if isinstance(row, dict)
+    ]
+    active_rows = [row for row in sector_rows if int(row.get("samples", 0) or 0) > 0]
+    diagnostics = output.get("integration_diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    generation_rows, generation_total = _generation_details(output)
+
+    runtime_rows: list[tuple[float, str, int]] = []
+    max_weight_rows: list[tuple[float, str, int]] = []
+    sector_rel_rows: list[tuple[float, str, int, str]] = []
+    threshold = 1.0e-3
+    for row in active_rows:
+        diag = row.get("diagnostics", {})
+        if not isinstance(diag, dict):
+            diag = {}
+        sector_id = int(row.get("sector_id", -1))
+        name = str(row.get("name", f"sector_{sector_id}"))
+        avg_eval = diag.get("avg_eval_us_per_sample")
+        try:
+            avg_value = float(avg_eval)
+            if math.isfinite(avg_value):
+                runtime_rows.append((avg_value, name, sector_id))
+        except Exception:
+            pass
+        try:
+            max_weight = float(diag.get("max_abs_weight", 0.0) or 0.0)
+            if math.isfinite(max_weight):
+                max_weight_rows.append((max_weight, name, sector_id))
+        except Exception:
+            pass
+        display = row.get("display", {})
+        if not isinstance(display, dict):
+            display = {}
+        coeffs = display.get("coefficients", [])
+        errors = display.get("errors", [])
+        worst_rel = 0.0
+        worst_label = "n/a"
+        for label, coeff, error in zip(labels, coeffs, errors):
+            rel = _markdown_relerr(coeff, error)
+            if rel is not None and rel > worst_rel:
+                worst_rel = rel
+                worst_label = label
+        sector_rel_rows.append((worst_rel, name, sector_id, worst_label))
+
+    runtime_values = [value for value, _name, _sector_id in runtime_rows]
+    rel_values = [value for value, _name, _sector_id, _label in sector_rel_rows]
+    rel_failures = [row for row in sector_rel_rows if row[0] > threshold]
+    precision = output.get("precision_stats", {})
+    if not isinstance(precision, dict):
+        precision = {}
+
+    lines: list[str] = []
+    lines.append("# FSD Integration Report")
+    lines.append("")
+    lines.append("## Run")
+    lines.append("")
+    request = output.get("request", {})
+    run_file = request.get("run_file") if isinstance(request, dict) else None
+    lines.append(f"- result file: `{output.get('result_path', 'n/a')}`")
+    if run_file:
+        lines.append(f"- run card: `{run_file}`")
+    lines.append(f"- integral: `{output.get('integral', 'n/a')}`")
+    lines.append(f"- prefactor convention: `{output.get('prefactor_convention', 'n/a')}`")
+    lines.append(f"- sampling mode: `{diagnostics.get('sampling_mode', 'n/a')}`")
+    lines.append(f"- QMC backend: `{diagnostics.get('qmc_lattice_backend', 'n/a')}`")
+    lines.append(f"- QMC support grouping: `{diagnostics.get('qmc_support_grouping', 'n/a')}`")
+    lines.append(
+        f"- QMC optimized evaluator groups: `{diagnostics.get('qmc_optimized_evaluator_groups_prepared', 'n/a')}`"
+    )
+    lines.append(
+        f"- sectors sampled: `{len(active_rows)}` / `{len(sector_rows)}`"
+    )
+    lines.append(f"- total raw samples: `{int(output.get('samples', 0) or 0):,}`")
+    lines.append(f"- elapsed integration wall time: `{_markdown_seconds(output.get('elapsed_seconds'))}`")
+    lines.append(f"- average eval time: `{_markdown_float(output.get('avg_eval_us_per_sample_per_worker'))} us/sample/worker`")
+    patched_sectors = diagnostics.get("patched_nonfinite_qmc_optimized_sectors")
+    if patched_sectors:
+        lines.append(
+            "- optimized-QMC fallback sectors: "
+            f"`{', '.join(str(int(value)) for value in patched_sectors)}`"
+        )
+    refined_sectors = diagnostics.get("refined_sector_ids_for_1e_minus_3")
+    if refined_sectors:
+        lines.append(
+            "- refined sectors for per-sector `1e-3` target: "
+            f"`{', '.join(str(int(value)) for value in refined_sectors)}`"
+        )
+        if diagnostics.get("refinement_samples_per_selected_sector") is not None:
+            lines.append(
+                "- refinement raw samples per selected sector: "
+                f"`{int(diagnostics.get('refinement_samples_per_selected_sector') or 0):,}`"
+            )
+    lines.append("")
+
+    lines.append("## Generation")
+    lines.append("")
+    lines.append(f"- total recorded generation time: `{_markdown_seconds(generation_total)}`")
+    lines.append("")
+    lines.append("| stage | time | detail |")
+    lines.append("|---|---:|---|")
+    for row in generation_rows:
+        detail = str(row.get("detail", "") or "-").replace("\n", " ")
+        if len(detail) > 120:
+            detail = detail[:117] + "..."
+        lines.append(
+            f"| {row.get('name', 'n/a')} | {_markdown_seconds(row.get('seconds', 0.0))} | {detail} |"
+        )
+    lines.append("")
+
+    lines.append("## Aggregate Laurent Sum")
+    lines.append("")
+    lines.append("The aggregate coefficients below are the total sector sum stored in the result JSON.  In independent-sector QMC mode the reported errors are the quadrature propagation of per-sector errors.")
+    lines.append("")
+    lines.append("| order | value | MC error | relative error |")
+    lines.append("|---|---:|---:|---:|")
+    display = output.get("display", {})
+    coeffs = display.get("coefficients", []) if isinstance(display, dict) else []
+    errors = display.get("errors", []) if isinstance(display, dict) else []
+    for label, coeff, error in zip(labels, coeffs, errors):
+        rel = _markdown_relerr(coeff, error)
+        rel_text = "n/a" if rel is None else f"{rel:.4g}"
+        lines.append(
+            f"| {label} | {_markdown_complex(coeff)} | {_markdown_complex(error)} | {rel_text} |"
+        )
+    lines.append("")
+
+    lines.append("## Per-Sector Runtime")
+    lines.append("")
+    if runtime_values:
+        min_runtime = min(runtime_rows, key=lambda item: item[0])
+        max_runtime = max(runtime_rows, key=lambda item: item[0])
+        lines.append("| statistic | value | sector |")
+        lines.append("|---|---:|---|")
+        lines.append(f"| min | {min_runtime[0]:.4g} us/sample | {min_runtime[1]} ({min_runtime[2]}) |")
+        lines.append(f"| max | {max_runtime[0]:.4g} us/sample | {max_runtime[1]} ({max_runtime[2]}) |")
+        lines.append(f"| average | {statistics.mean(runtime_values):.4g} us/sample | - |")
+        lines.append(f"| median | {statistics.median(runtime_values):.4g} us/sample | - |")
+    else:
+        lines.append("No sampled-sector runtime rows were available.")
+    lines.append("")
+
+    lines.append("## Per-Sector Relative Accuracy")
+    lines.append("")
+    if rel_values:
+        min_rel = min(sector_rel_rows, key=lambda item: item[0])
+        max_rel = max(sector_rel_rows, key=lambda item: item[0])
+        lines.append(f"- threshold checked: `{threshold:.1e}`")
+        lines.append(f"- sectors above threshold: `{len(rel_failures)}` / `{len(active_rows)}`")
+        lines.append("")
+        lines.append("| statistic | max relative error | sector/order |")
+        lines.append("|---|---:|---|")
+        lines.append(f"| min sector max | {min_rel[0]:.4g} | {min_rel[1]} ({min_rel[2]}), {min_rel[3]} |")
+        lines.append(f"| max sector max | {max_rel[0]:.4g} | {max_rel[1]} ({max_rel[2]}), {max_rel[3]} |")
+        lines.append(f"| average sector max | {statistics.mean(rel_values):.4g} | - |")
+        lines.append(f"| median sector max | {statistics.median(rel_values):.4g} | - |")
+        lines.append("")
+        lines.append("| worst sector | max relative error | order | samples |")
+        lines.append("|---|---:|---|---:|")
+        samples_by_id = {int(row.get("sector_id", -1)): int(row.get("samples", 0) or 0) for row in active_rows}
+        for rel, name, sector_id, label in sorted(sector_rel_rows, reverse=True)[:20]:
+            lines.append(f"| {name} ({sector_id}) | {rel:.4g} | {label} | {samples_by_id.get(sector_id, 0):,} |")
+    else:
+        lines.append("No finite per-sector relative errors were available.")
+    lines.append("")
+
+    lines.append("## Weight And Precision Diagnostics")
+    lines.append("")
+    if max_weight_rows:
+        max_weight = max(max_weight_rows, key=lambda item: item[0])
+        lines.append(f"- maximum absolute sampled weight: `{max_weight[0]:.6g}` in {max_weight[1]} ({max_weight[2]})")
+    for key in ("ordinary", "stability", "medium_precision", "high_precision"):
+        block = precision.get(key, {}) if isinstance(precision, dict) else {}
+        if isinstance(block, dict):
+            lines.append(
+                f"- {key}: `{int(block.get('samples', 0) or 0):,}` samples "
+                f"({_markdown_float(100.0 * float(block.get('fraction', 0.0) or 0.0), 3)}%)"
+            )
+    lines.append("")
+
+    tmp = destination.with_name(destination.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.replace(tmp, destination)
     return destination
 
