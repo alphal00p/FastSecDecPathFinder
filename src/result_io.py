@@ -130,6 +130,19 @@ def _markdown_float(value: Any, digits: int = 4) -> str:
     return f"{x:.{digits}g}"
 
 
+def _markdown_count(value: Any) -> str:
+    """Format an integer-like count with separators."""
+    try:
+        x = float(value)
+    except Exception:
+        return "n/a"
+    if not math.isfinite(x):
+        return "n/a"
+    if abs(x) >= 1.0:
+        return f"{int(round(x)):,}"
+    return f"{x:,.4g}"
+
+
 def _generation_details(output: JsonDict) -> tuple[list[dict[str, Any]], float]:
     """Return generation detail rows and total seconds from a result payload."""
     generation = output.get("summary", {}).get("generation_timings", {})
@@ -175,9 +188,18 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
     diagnostics = output.get("integration_diagnostics", {})
     if not isinstance(diagnostics, dict):
         diagnostics = {}
+    request = output.get("request", {})
+    if not isinstance(request, dict):
+        request = {}
+    try:
+        worker_count = max(int(request.get("workers", 1) or 1), 1)
+    except Exception:
+        worker_count = 1
     generation_rows, generation_total = _generation_details(output)
 
     runtime_rows: list[tuple[float, str, int]] = []
+    sample_rows: list[tuple[float, str, int]] = []
+    wall_time_rows: list[tuple[float, str, int]] = []
     max_weight_rows: list[tuple[float, str, int]] = []
     sector_rel_rows: list[tuple[float, str, int, str]] = []
     threshold = 1.0e-3
@@ -187,11 +209,28 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
             diag = {}
         sector_id = int(row.get("sector_id", -1))
         name = str(row.get("name", f"sector_{sector_id}"))
+        try:
+            samples = float(row.get("samples", 0) or 0)
+            if math.isfinite(samples):
+                sample_rows.append((samples, name, sector_id))
+        except Exception:
+            pass
         avg_eval = diag.get("avg_eval_us_per_sample")
         try:
             avg_value = float(avg_eval)
             if math.isfinite(avg_value):
                 runtime_rows.append((avg_value, name, sector_id))
+        except Exception:
+            pass
+        try:
+            profiled_seconds = (
+                float(diag.get("eval_seconds", 0.0) or 0.0)
+                + float(diag.get("python_seconds", 0.0) or 0.0)
+                + float(diag.get("havana_seconds", diag.get("integrator_seconds", 0.0)) or 0.0)
+            )
+            wall_equivalent = profiled_seconds / float(worker_count)
+            if math.isfinite(wall_equivalent):
+                wall_time_rows.append((wall_equivalent, name, sector_id))
         except Exception:
             pass
         try:
@@ -215,6 +254,8 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
         sector_rel_rows.append((worst_rel, name, sector_id, worst_label))
 
     runtime_values = [value for value, _name, _sector_id in runtime_rows]
+    sample_values = [value for value, _name, _sector_id in sample_rows]
+    wall_time_values = [value for value, _name, _sector_id in wall_time_rows]
     rel_values = [value for value, _name, _sector_id, _label in sector_rel_rows]
     rel_failures = [row for row in sector_rel_rows if row[0] > threshold]
     precision = output.get("precision_stats", {})
@@ -240,8 +281,7 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
     lines.append("")
     lines.append("## Run")
     lines.append("")
-    request = output.get("request", {})
-    run_file = request.get("run_file") if isinstance(request, dict) else None
+    run_file = request.get("run_file")
     lines.append(f"- result file: `{output.get('result_path', 'n/a')}`")
     if run_file:
         lines.append(f"- run card: `{run_file}`")
@@ -333,15 +373,55 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
 
     lines.append("## Per-Sector Runtime")
     lines.append("")
-    if runtime_values:
-        min_runtime = min(runtime_rows, key=lambda item: item[0])
-        max_runtime = max(runtime_rows, key=lambda item: item[0])
-        lines.append("| statistic | value | sector |")
-        lines.append("|---|---:|---|")
-        lines.append(f"| min | {min_runtime[0]:.4g} us/sample | {min_runtime[1]} ({min_runtime[2]}) |")
-        lines.append(f"| max | {max_runtime[0]:.4g} us/sample | {max_runtime[1]} ({max_runtime[2]}) |")
-        lines.append(f"| average | {statistics.mean(runtime_values):.4g} us/sample | - |")
-        lines.append(f"| median | {statistics.median(runtime_values):.4g} us/sample | - |")
+    if runtime_values or sample_values or wall_time_values:
+        lines.append(
+            "Per-sector wall-equivalent time is computed from the profiled "
+            f"sector work `(EvalT + PythonT + IntegratorT) / {worker_count}` "
+            "using the run worker count."
+        )
+        lines.append("")
+        min_runtime = min(runtime_rows, key=lambda item: item[0]) if runtime_rows else None
+        max_runtime = max(runtime_rows, key=lambda item: item[0]) if runtime_rows else None
+        min_samples = min(sample_rows, key=lambda item: item[0]) if sample_rows else None
+        max_samples = max(sample_rows, key=lambda item: item[0]) if sample_rows else None
+        min_wall = min(wall_time_rows, key=lambda item: item[0]) if wall_time_rows else None
+        max_wall = max(wall_time_rows, key=lambda item: item[0]) if wall_time_rows else None
+        def sector_text(row: tuple[float, str, int] | None) -> str:
+            return f"{row[1]} ({row[2]})" if row is not None else "n/a"
+
+        def eval_text(row: tuple[float, str, int] | None) -> str:
+            return f"{row[0]:.4g} us/sample" if row is not None else "n/a"
+
+        def sample_text(row: tuple[float, str, int] | None) -> str:
+            return _markdown_count(row[0]) if row is not None else "n/a"
+
+        def wall_text(row: tuple[float, str, int] | None) -> str:
+            return _markdown_seconds(row[0]) if row is not None else "n/a"
+
+        lines.append("| statistic | eval time | eval sector | samples | sample sector | wall-equivalent time | time sector |")
+        lines.append("|---|---:|---|---:|---|---:|---|")
+        lines.append(
+            f"| min | {eval_text(min_runtime)} | {sector_text(min_runtime)} | "
+            f"{sample_text(min_samples)} | {sector_text(min_samples)} | "
+            f"{wall_text(min_wall)} | {sector_text(min_wall)} |"
+        )
+        lines.append(
+            f"| max | {eval_text(max_runtime)} | {sector_text(max_runtime)} | "
+            f"{sample_text(max_samples)} | {sector_text(max_samples)} | "
+            f"{wall_text(max_wall)} | {sector_text(max_wall)} |"
+        )
+        lines.append(
+            "| average | "
+            f"{statistics.mean(runtime_values):.4g} us/sample | - | "
+            f"{_markdown_count(statistics.mean(sample_values)) if sample_values else 'n/a'} | - | "
+            f"{_markdown_seconds(statistics.mean(wall_time_values)) if wall_time_values else 'n/a'} | - |"
+        )
+        lines.append(
+            "| median | "
+            f"{statistics.median(runtime_values):.4g} us/sample | - | "
+            f"{_markdown_count(statistics.median(sample_values)) if sample_values else 'n/a'} | - | "
+            f"{_markdown_seconds(statistics.median(wall_time_values)) if wall_time_values else 'n/a'} | - |"
+        )
     else:
         lines.append("No sampled-sector runtime rows were available.")
     lines.append("")

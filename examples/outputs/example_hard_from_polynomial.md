@@ -70,12 +70,14 @@ The aggregate coefficients below are the total sector sum stored in the result J
 
 ## Per-Sector Runtime
 
-| statistic | value | sector |
-|---|---:|---|
-| min | 0.04781 us/sample | PSD1037 (1037) |
-| max | 0.2178 us/sample | PSD2779 (2779) |
-| average | 0.1283 us/sample | - |
-| median | 0.1391 us/sample | - |
+Per-sector wall-equivalent time is computed from the profiled sector work `(EvalT + PythonT + IntegratorT) / 10` using the run worker count.
+
+| statistic | eval time | eval sector | samples | sample sector | wall-equivalent time | time sector |
+|---|---:|---|---:|---|---:|---|
+| min | 0.04781 us/sample | PSD1037 (1037) | 66,860,128 | PSD0 (0) | 1.349 s | PSD1037 (1037) |
+| max | 0.2178 us/sample | PSD2779 (2779) | 1,060,603,168 | PSD138 (138) | 31.131 s | PSD656 (656) |
+| average | 0.1283 us/sample | - | 69,259,186 | - | 1.984 s | - |
+| median | 0.1391 us/sample | - | 66,860,128 | - | 1.990 s | - |
 
 ## Per-Sector Relative Accuracy
 
