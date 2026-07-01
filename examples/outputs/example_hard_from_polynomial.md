@@ -12,7 +12,8 @@
 - QMC optimized evaluator groups: `3728`
 - sectors sampled: `3728` / `3728`
 - total raw samples: `258,198,244,544`
-- elapsed integration wall time: `7777.277 s`
+- total integration time (wall): `7777.277 s`
+- total profiled integration work (EvalT + PythonT + IntegratorT): `74107.298 s`
 - average eval time: `0.1279 us/sample/worker`
 - optimized-QMC fallback sectors: `37, 104, 153, 921, 1590, 1725`
 - refined sectors for per-sector `1e-3` target: `138, 163, 189, 656, 772, 919, 1461, 1722, 2208`

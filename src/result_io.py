@@ -211,6 +211,20 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
     precision = output.get("precision_stats", {})
     if not isinstance(precision, dict):
         precision = {}
+    eval_seconds = float(output.get("eval_seconds", 0.0) or 0.0)
+    python_seconds = float(output.get("python_seconds", 0.0) or 0.0)
+    integrator_seconds = float(
+        output.get(
+            "integrator_seconds",
+            output.get("havana_seconds", 0.0),
+        )
+        or 0.0
+    )
+    total_profiled_integration_seconds = (
+        eval_seconds
+        + python_seconds
+        + integrator_seconds
+    )
 
     lines: list[str] = []
     lines.append("# FSD Integration Report")
@@ -234,7 +248,11 @@ def write_markdown_report(output: JsonDict, path: str | Path) -> Path:
         f"- sectors sampled: `{len(active_rows)}` / `{len(sector_rows)}`"
     )
     lines.append(f"- total raw samples: `{int(output.get('samples', 0) or 0):,}`")
-    lines.append(f"- elapsed integration wall time: `{_markdown_seconds(output.get('elapsed_seconds'))}`")
+    lines.append(f"- total integration time (wall): `{_markdown_seconds(output.get('elapsed_seconds'))}`")
+    lines.append(
+        "- total profiled integration work "
+        f"(EvalT + PythonT + IntegratorT): `{_markdown_seconds(total_profiled_integration_seconds)}`"
+    )
     lines.append(f"- average eval time: `{_markdown_float(output.get('avg_eval_us_per_sample_per_worker'))} us/sample/worker`")
     patched_sectors = diagnostics.get("patched_nonfinite_qmc_optimized_sectors")
     if patched_sectors:
